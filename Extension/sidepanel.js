@@ -324,10 +324,10 @@ function renderTabs() {
 
 const SOTI_KB = {
     common: {
-        "SQL": "SQL Collation: SQL_Latin1_General_CP1_CI_AS. DB Maintenance: DBInstall.NET.log. Port: 1433.",
+        "SQL": "SQL Collation: Case-insensitive (CI) and Accent-sensitive (AS) required (e.g., SQL_Latin1_General_CP1_CI_AS). DB Maintenance: DBInstall.log. Port: 1433.",
         "MCAU": "MCAU: Manage services, Verbose logging, DB connection string decryption.",
         "PORT": "Critical: MS/DS (5494), Signal (13131), APNS (2197), Web (443).",
-        "UPGRADE": "Upgrade Check: ProgramData\\SOTI\\DBInstall.NET.log for schema failures."
+        "UPGRADE": "Upgrade Check: ProgramData\\SOTI\\DBInstall.log for schema failures."
     },
     android: {
         "Enrollment": "Android Enterprise Work Managed via QR/ZeroTouch/afw#mobicontrol. Play Store for GMS devices.",
@@ -346,6 +346,11 @@ const SOTI_KB = {
         "SSO": "Centralized Single Sign-On for SOTI ONE apps and third-party integrations (O365, Google, Okta, etc.) via App Catalog.",
         "User Management": "Unified portal for managing users across multiple directories (LDAP, Azure AD/Entra ID).",
         "Security": "Conditional access policies, persistent PIN for lockdown, and multi-factor authentication (MFA)."
+    },
+    services: {
+        "CORE": ["SOTI Management Service", "SOTI Deployment Server", "SOTI Deployment Server Extensions"],
+        "SECONDARY": ["SOTI Search Service", "SOTI Activation Service", "SOTI Location Service", "SOTI Enrollment Service", "SOTI Agent Builder Service"],
+        "HOSTING": "The SOTI Management Service hosts the Web Console. There is NO separate 'Web Hosting' service."
     }
 };
 
@@ -485,8 +490,10 @@ ${kbStr}
 ### SOTI ARCHITECT'S HANDBOOK:
 - **SOTI ONLY**: You are a SOTI specialist. NEVER recommend Microsoft or non-SOTI documentation unless it is a specific, known integration (e.g., KME, Zero-touch). For enrollment, ALWAYS use the afw#mobicontrol, QR, and EMM portal workflows defined in the handbook.
 - **Ports**: MS/DS Handshake (5494), Signal (13131), APNS (2197), Web/Deployment (443/80).
-- **SQL**: Collation must be SQL_Latin1_General_CP1_CI_AS.
-- **Android Enrollment (AE Work Managed)**: 
+- **SQL**: Collation must be Case-insensitive (CI) and Accent-sensitive (AS). SQL_Latin1_General_CP1_CI_AS is recommended but not mandatory.
+- **Web Architecture (100% Accuracy)**: Modern MobiControl (v12+) hosts its Web Console directly within the **SOTI Management Service**. **NEVER mention IIS, Apache, Nginx, or a 'SOTI Web Hosting' service**. If the console is down, check the status of 'SOTI Management Service' and its communication with the SQL database.
+
+### Android Enrollment (AE Work Managed)**: 
   1. **Prerequisite**: Device MUST be Factory Reset (OOBE state).
   2. **afw#mobicontrol**: At the Google Sign-in screen, enter "afw#mobicontrol" in the email field to download the SOTI Agent.
   3. **QR Code**: Tap the "Welcome" screen 6 times to launch the QR scanner.
