@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "SOTI AI Analyser",
+  "version": "2.3.0",
+  "description": "Intelligent SOTI Log Analysis & Salesforce Integration",
+  "permissions": [
+    "sidePanel",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.soti.net/*",
+    "https://*.salesforce.com/*",
+    "https://*.force.com/*",
+    "https://api.allorigins.win/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open SOTI AI Analyser"
+  },
+  "side_panel": {
+    "default_path": "SOTI_AI_Analyser.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.salesforce.com/*",
+        "https://*.force.com/*"
+      ],
+      "js": ["content.js"]
+    }
+  ]
+}

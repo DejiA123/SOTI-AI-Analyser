@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOTI AI Analyser</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="tl">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:10px"><path d="M12 2l9 4.9V17.1L12 22l-9-4.9V6.9L12 2z"></path></svg>
+            <div class="logo-block">
+                <span class="logo-name">SOTI AI ANALYSER</span>
+            </div>
+        </div>
+        <div class="tc">
+            <div class="status-pill" id="pulseHealth" title="SOTI Pulse Connection" style="display: none">
+                <div class="dot" id="dot"></div>
+                <span id="statusTxt">Ready — Cloud Scale</span>
+            </div>
+        </div>
+        <div class="tr">
+            <button class="btn btn-new" id="btnNew" title="Start New Case">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                New Case
+            </button>
+            <button class="btn btn-jira" id="btnJira" title="Generate JIRA Report">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                Create JIRA
+            </button>
+            <div class="more-menu">
+                <button class="btn" id="btnMore" title="More Options">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
+                </button>
+                <div class="dropdown" id="moreDropdown" style="display:none">
+                    <button class="drop-item" id="btnExport">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                        Export Session
+                    </button>
+                    <button class="drop-item" id="btnPop">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        Pop Out Window
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+    
+    <div class="tab-bar" id="tabBar"></div>
+
+    <div class="layout">
+        <!-- Case Information (Collapsible) -->
+        <aside class="panel-left collapsed" id="panelL">
+            <div class="ph" id="toggleL">
+                <div class="ph-left">
+                    📋 Case Info
+                    <span class="info-icon" title="Review and edit the context provided to the AI. This data is used to ensure accurate analysis and reporting.">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </span>
+                </div>
+                <div class="ph-collapse" id="iconL">▶</div>
+            </div>
+            <div class="pb" id="bodyL" style="display: none">
+                <div class="sf-sync-row">
+                    <button class="btn btn-sf" id="btnSyncSF" title="Automatically pull case details, account info, and issue descriptions from the active Salesforce tab.">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                        Sync from Salesforce
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px; opacity:0.8"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </button>
+                </div>
+                <div class="fld" style="display: none"><span class="flbl">AI Model</span>
+                    <select class="fsel" id="modelSel">
+                        <option value="openrouter/free">Auto (Free Pool)</option>
+                        <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B (High Quality)</option>
+                        <option value="google/gemini-2.0-flash-exp:free">Gemini 2.0 Flash</option>
+                        <option value="local/llama3.2">Local Ollama (Offline)</option>
+                    </select>
+                </div>
+                <div class="fld">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="flbl">Meeting Notes</span>
+                        <span class="info-icon" title="Useful for capturing manual notes during customer meetings or troubleshooting sessions. This content will be analysed alongside other case data.">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        </span>
+                    </div>
+                    <textarea class="ftxt" id="meetingNotes" rows="6" placeholder="Manual notes..."></textarea>
+                </div>
+                <div class="fld"><span class="flbl">Case Number</span><input class="finput" id="caseNum" placeholder="e.g. 0012345678"></div>
+                <div class="fld"><span class="flbl">Account Scrub</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
+                <div class="fld"><span class="flbl">Customer Scrub</span><input class="finput" id="scrubCustomer" placeholder="e.g. John Doe"></div>
+                <div class="fld"><span class="flbl">Product</span>
+                    <select class="fsel" id="product">
+                        <option value="">— Select —</option>
+                        <option>SOTI MobiControl</option>
+                        <option>SOTI Connect</option>
+                        <option>SOTI SNAP</option>
+                        <option>SOTI XSight</option>
+                        <option>SOTI Identity</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">SOTI Version</span>
+                    <select class="fsel" id="sotiVer"><option value="">— Select —</option></select>
+                </div>
+                <div class="fld"><span class="flbl">Agent Version</span>
+                    <select class="fsel" id="agentVer"><option value="">— Select —</option></select>
+                </div>
+                <div class="fld"><span class="flbl">Platform</span>
+                    <select class="fsel" id="platform">
+                        <option value="">— Select —</option>
+                        <option>Android (Enterprise)</option>
+                        <option>Android (Classic)</option>
+                        <option>iOS</option>
+                        <option>Windows Modern</option>
+                        <option>Windows Classic</option>
+                        <option>macOS</option>
+                        <option>Linux</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">Environment</span>
+                    <select class="fsel" id="enviro">
+                        <option value="">— Select —</option>
+                        <option>Production</option>
+                        <option>Test/UAT</option>
+                        <option>POC/Setup</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">MC Hosted</span>
+                    <select class="fsel" id="dsCfg">
+                        <option value="">— Select —</option>
+                        <option>On-Prem</option>
+                        <option>Cloud</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">Affected Devices</span>
+                    <select class="fsel" id="affDev">
+                        <option value="">— Select —</option>
+                        <option>1-10 devices</option>
+                        <option>10-50 devices</option>
+                        <option>50-200 devices</option>
+                        <option>200-1000 devices</option>
+                        <option>1000+ devices</option>
+                    </select>
+                </div>
+                <div class="fld">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="flbl">Issue Summary</span>
+                        <span class="info-icon" title="A concise summary of the problem, automatically synced from the Salesforce Case Description or manually entered.">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        </span>
+                    </div>
+                    <textarea class="ftxt" id="issueSummary" rows="5" placeholder="Synced from Salesforce or enter details..."></textarea>
+                </div>
+                <div class="fld">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="flbl">Email Chain</span>
+                        <span class="info-icon" title="Pull the latest email conversation directly from the Salesforce Feed tab to provide the AI with full technical context. Note: Ensure you are on the 'Feed' tab for this to work.">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        </span>
+                    </div>
+                    <div style="font-size:9px; color:var(--blue2); margin:2px 0 6px; line-height:1.2; font-weight: 600; display: flex; align-items: center; gap: 4px;">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        Ensure Salesforce is on the "Feed" tab for Email Chain sync.
+                    </div>
+                    <textarea class="ftxt" id="emailChain" rows="6"></textarea>
+                </div>
+
+            </div>
+        </aside>
+
+        <!-- Chat Area -->
+        <section class="chat-wrap">
+            <div class="chat-msgs" id="chatMsgs">
+                <div class="welcome" id="welcome">
+                    <div class="w-hex-wrap">⬡</div>
+                    <div class="w-title">SOTI AI Analyser</div>
+                    <div class="w-sub">Powered by Cloud Intelligence. Fill in the case information, upload logs, and begin secure, Excellent technical analysis.</div>
+                    
+                    <div class="w-features">
+                        <div class="w-card"><span class="w-icon">📋</span> Complete the case form to give the AI full context</div>
+                        <div class="w-card"><span class="w-icon">📁</span> Upload MS, DS, Agent, or DDR logs for deeper analysis</div>
+                        <div class="w-card"><span class="w-icon">🔍</span> The AI will identify missing information and ask for it</div>
+                        <div class="w-card"><span class="w-icon">📦</span> Export the full session report when done</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="progWrap" class="prog-wrap" style="display:none">
+                <div class="prog-lbl" id="progLbl">AI thinking...</div>
+                <div class="prog-bar"><div class="prog-fill" id="progFill"></div></div>
+            </div>
+
+            <div class="chat-foot">
+                <div id="imgPreview" class="img-preview-strip" style="display:none"></div>
+                <div class="input-row">
+                    <button class="attach-btn" id="btnAttach" title="Attach logs">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                    </button>
+                    <button class="attach-btn" id="btnImgAttach" title="Attach image">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                    </button>
+                    <textarea class="cinput" id="chatIn" placeholder="Ask AI anything..." rows="1"></textarea>
+                    <button class="send-btn" id="btnSend">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Logs Area (Collapsible) -->
+        <aside class="panel-right collapsed" id="panelR">
+            <div class="ph" id="toggleR">
+                <div class="ph-left">
+                    📁 Logs
+                    <span class="info-icon" title="Upload technical logs (MS, DS, Agent, DDR) to provide the AI with raw diagnostic data for high-fidelity analysis.">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </span>
+                </div>
+                <div class="ph-collapse" id="iconR">▶</div>
+            </div>
+            <div class="pb" id="bodyR" style="display: none">
+                <div class="dz" id="dz">
+                    <div class="dz-text">Click or drag files here</div>
+                    <div class="dz-sub">LOG · TXT · XML · JSON · ZIP</div>
+                </div>
+
+                <div class="log-guide" id="logGuide">
+                    <div class="guide-title">Supported Log Types</div>
+                    <div class="guide-grid">
+                        <div class="guide-item"><span class="badge ms">MS</span> Management Service</div>
+                        <div class="guide-item"><span class="badge ds">DS</span> Deployment Server</div>
+                        <div class="guide-item"><span class="badge dse">DSE</span> DS Extension</div>
+                        <div class="guide-item"><span class="badge agt">AGT</span> Agent Manager</div>
+                        <div class="guide-item"><span class="badge ddr">DDR</span> Device Debug Report</div>
+                        <div class="guide-item"><span class="badge enr">ENR</span> Enrollment</div>
+                        <div class="guide-item"><span class="badge har">HAR</span> Har logs</div>
+                        <div class="guide-item"><span class="badge evt">EVT</span> Event Log</div>
+                    </div>
+                </div>
+
+                <div id="noFiles" class="no-files">No files uploaded yet.</div>
+                <div class="log-list" id="logList"></div>
+                <button class="btn btn-analyse" id="btnAnalyse" style="display:none">Analyse Now</button>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Hidden Inputs -->
+    <input type="file" id="fileIn" multiple accept=".txt,.log,.xml,.json,.zip" style="display:none">
+    <input type="file" id="imgFileIn" multiple accept="image/*" style="display:none">
+
+    <!-- Modal for New Case -->
+    <div class="backdrop" id="mNew" style="display:none">
+        <div class="modal">
+            <div class="mtitle">Start New Case?</div>
+            <p style="font-size:12px;color:var(--txt2);margin-bottom:20px">This will clear current chat and files.</p>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px">
+                <button class="btn" id="mNewCancel">Cancel</button>
+                <button class="btn btn-del" id="mNewConfirm" style="background:var(--red);color:#fff;border:none">Clear All</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for JIRA Info Review -->
+    <div class="backdrop" id="mJiraReview" style="display:none">
+        <div class="modal" style="max-width:500px">
+            <div class="mhdr" style="display:flex;justify-content:space-between;margin-bottom:15px">
+                <div class="mtitle">Additional info that is not in the conversation with the AI and Case Info</div>
+                <button class="mcls" id="mJiraReviewClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+            <div class="pb" style="gap:15px">
+                <div class="fld">
+                    <span class="flbl">Expected Behavior</span>
+                    <textarea class="ftxt" id="jiraExpected" rows="3" placeholder="What should have happened?"></textarea>
+                </div>
+                <div class="fld">
+                    <span class="flbl">Business Impact</span>
+                    <textarea class="ftxt" id="jiraImpact" rows="3" placeholder="Why is this critical?"></textarea>
+                </div>
+                <div class="fld">
+                    <span class="flbl">Priority Justification</span>
+                    <select class="fsel" id="jiraPriority">
+                        <option value="Low">Low - Minor issue</option>
+                        <option value="Medium" selected>Medium - Functional defect</option>
+                        <option value="High">High - Major blocker</option>
+                        <option value="Critical">Critical - Production outage</option>
+                    </select>
+                </div>
+                <div class="fld">
+                    <span class="flbl">Reproduction Steps</span>
+                    <textarea class="ftxt" id="jiraRepro" rows="4" placeholder="1. Go to...&#10;2. Click..."></textarea>
+                </div>
+            </div>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">
+                <button class="btn btn-sec" id="btnJiraReviewCancel">Cancel</button>
+                <button class="btn btn-ok" id="btnGenerateJira" style="background:var(--blue);color:#fff;border:none">Generate JIRA Report</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for JIRA -->
+    <div class="backdrop" id="mJira" style="display:none">
+        <div class="modal m-jira">
+            <div class="mhdr" style="display:flex;justify-content:space-between;margin-bottom:15px">
+                <div class="mtitle">JIRA Template</div>
+                <button class="mcls" id="mJiraClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+            <textarea id="jiraTa" readonly class="jira-textarea"></textarea>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:15px">
+                <button class="btn btn-sec" id="btnCopyJira">Copy</button>
+                <button class="btn btn-ok" id="btnJiraDone" style="background:var(--green);color:#fff;border:none">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="lib/jszip.min.js"></script>
+    <script src="lib/tesseract.min.js"></script>
+    <script src="sidepanel.js"></script>
+    <!-- Generation Loading Modal -->
+    <div class="backdrop" id="mGen" style="display:none">
+        <div class="modal" style="text-align:center; max-width:300px">
+            <div class="thinking-dot" style="margin:0 auto 15px; width:12px; height:12px"></div>
+            <div class="w-title" style="font-size:14px">Generating JIRA Report...</div>
+            <div class="w-sub" style="margin-bottom:0; font-size:11px">Analysing conversation and logs...</div>
+        </div>
+    </div>
+</body>
+</html>

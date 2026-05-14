@@ -1,0 +1,126 @@
+"SOTI AI Analyser: The intelligent AI that reads your logs, finds the fix on SOTI Pulse, and writes the JIRA report for you if needed."
+
+
+The SOTI AI Analyser isn't just an extension. It’s the difference between spending hours digging through a log file and identifying the root cause faster.
+
+Here is why every SOTI Tier 3 Engineer and Support Architect needs this tool in their daily arsenal:
+
+1. 🏛️ Architect-Level Log Intelligence (The "Log Whisperer")
+While other tools simply "find text," this engine performs Chronological Triage.
+The Problem: If you just search for the word "Error," you might find 50 different errors across 3 logs. Which one started it? Which one is just a distraction?
+The AI Solution: SOTI AI Analyser looks at the time of every event across all your logs simultaneously. It lines them up on a single master timeline.
+
+The Power: It correlates events across MS.log, DS.log, and Agent.log simultaneously. It doesn't just see an error; it sees the Propagation Path—showing you exactly how a SQL timeout at the Management Server caused an enrollment failure at the Device Service.
+The Propagation Path (The "Domino Effect")
+The Concept: In SOTI MobiControl, a failure in one place is often caused by a problem somewhere else.
+How the App Sees It:
+At 10:00:01 AM, the MS.log shows a SQL Timeout (The first domino falls).
+At 10:00:03 AM, the DS.log shows Connection Dropped (The second domino falls).
+At 10:00:05 AM, the Agent.log shows Enrollment Failed (The final result).
+The Intelligence: The app doesn't just tell you "Enrollment Failed." It tells you: "Enrollment failed because the Deployment Server lost its connection, which was caused by a SQL timeout at the Management Server." It finds the Root Cause, not just the symptom.
+
+
+2. 💼 Documentation Automation (From Salesforce to JIRA in Seconds)
+Stop wasting your high-value engineering time on copy-pasting case numbers and environment details.
+
+One-Click Sync: Pull entire case contexts (Account, Subject, Versions) directly from Salesforce into your workspace.
+The JIRA Powerhouse: With a single click, the AI generates a Ready-to-Paste Official SOTI JIRA Ticket. It populates every header—from Reproduction Steps to Business Impact—and even extracts relevant log snippets into {code:java} blocks, ensuring your filings are the most professional in the company.
+
+3. 🛡️ The PII Vault (Enterprise-Grade Privacy)
+Security is non-negotiable at SOTI.
+
+The Feature: The built-in Anonymisation Engine automatically identifies and sanitises customer emails, names, and sensitive identifiers before they reach the AI.
+The Peace of Mind: You get high-fidelity analysis without ever risking a data breach or violating customer privacy agreements. You stay compliant while staying efficient.
+
+4. 🧠 SOTI Intelligence (minimum hallucination)
+This tool is trained with SOTI-specific architectural knowledge.
+
+Deep Research: It is trained on official SOTI release notes, enrollment workflows (AE, QR, KME), and common MCMR codes.
+The Difference: If you ask about enrollment, it won't give you generic IT advice. It will walk you through the SOTI Architect's Handbook protocols—checking for DPC IDs, firewall ports, and Wi-Fi prerequisites.
+
+5. 📥 Universal "Ambient" Ingestion
+The UI is designed for the high-pressure support environment.
+
+Anywhere Ingestion: Drag a log or a screenshot anywhere—onto the chat box, onto the attachment icons, or into the sidebar.
+The Experience: The interface responds with a modern Diagnostic Pulse animation, providing a responsive, premium feel that makes the heavy lifting of technical support feel effortless.
+⧉ Popped-Out Versatility
+Whether you’re working in the Chrome Sidepanel or you’ve "Popped Out" the extension into its own persistent floating window, your session is always in sync. Your context moves with you as you navigate between MobiControl consoles and Salesforce tabs.
+
+The Verdict
+The SOTI AI Analyser is about Precision, Speed, and Security. It eliminates the "grunt work" of log auditing and ticket filing, allowing you to focus on what you do best: solving the world’s most complex enterprise mobility challenges.
+
+Don't just work hard. Work with the power of SOTI AI.
+
+
+
+
+SECURITY:
+Data security and privacy are the foundation of the SOTI AI Analyser. Because we deal with sensitive SOTI MobiControl diagnostic data, the extension is built with a "Security-First" architecture.
+
+Here is exactly how your logs and data are protected:
+
+1. Active PII Scrubbing (The Privacy Firewall)
+Before a single byte of your data leaves your browser, it passes through the PII Vault.
+
+Anonymisation: The extension automatically identifies and replaces customer emails, names, and IP addresses with generic placeholders (e.g., Customer_A, User_1).
+Local Processing: This scrubbing happens entirely on your machine. The "raw" sensitive data never hits the internet.
+2. Zero-Retention & Anti-Training Policy
+We use professional-grade AI API endpoints (via OpenRouter) that are governed by strict data privacy agreements:
+
+No Training: Your logs and conversations are NOT used to train the AI models. Your technical troubleshooting remains your intellectual property.
+Zero Retention: The data sent to the AI is processed in "stateless" mode. Once the AI generates your answer or JIRA report, the data is discarded by the provider. It is not stored in a persistent database on the AI side.
+3. Local Machine Storage
+The extension does not use a central "SOTI AI Server" to store your logs.
+
+Client-Side Only: Your chat history, case info, and attached logs are stored in chrome.storage.local—which is private to your local Chrome profile on your SOTI laptop.
+Encryption: All data sent between the extension and the AI engine is encrypted using industry-standard SSL/TLS 1.3, protecting it from "man-in-the-middle" attacks.
+4. No External Breaches
+Because there is no central database of logs, there is no single point of failure for a data breach.
+
+Even if SOTI’s internal systems were impacted, your specific diagnostic logs would remain secure on your individual machine.
+The extension only communicates with verified, secure AI endpoints that adhere to global security standards (SOC 2, ISO 27001).
+5. Total Control
+You have absolute control over your session data. At any time, you can click the "New Case" button, which:
+
+Wipes your local storage.
+Clears the session history.
+Deletes all cached logs from your browser's memory.
+In summary: Your logs are anonymised locally, transmitted securely, never stored permanently by the AI, and never used for training. You get the power of Cloud Intelligence with the security of an offline tool.
+
+
+
+HOW LOGS ARE SCRUBBED SECURELY:
+The scrubbing process is handled by a sophisticated Local PII Vault built directly into the extension's JavaScript engine. It uses a "Redaction & Mapping" technique to ensure privacy while maintaining technical accuracy.
+
+Here is the step-by-step technical breakdown of how your logs are cleaned:
+
+1. Pattern Recognition (The Detectives)
+The extension uses Regular Expressions (Regex) to scan every line of your log files for specific patterns of sensitive data:
+
+Email Pattern: Looks for the [text]@[domain].[com/org/etc] structure.
+Name Pattern: Cross-references the "Customer Name" field you entered in the Case Info with the log text.
+IP Address Pattern: Looks for the XXX.XXX.XXX.XXX numerical structure.
+Custom Identifiers: It also looks for specific SOTI identifiers that might contain user data.
+2. The Local Mapping System (The Vault)
+This is the most important part. Instead of just deleting the data, the app replaces it with a persistent alias.
+
+Example: If the log contains john.doe@acme.com, the vault assigns it an ID like [SUPPORT_USER_1].
+Consistency: Every time john.doe@acme.com appears in any log file (MS, DS, or Agent), it is replaced by the same [SUPPORT_USER_1].
+Why?: This allows the AI to still understand that "User 1 did X, and then User 1 did Y," without the AI ever knowing who "User 1" actually is.
+3. "Before-Flight" Redaction
+The scrubbing happens at two critical moments:
+
+Ingestion: As soon as you drop the file, the raw text is scanned and a "Clean Version" is created in the browser's memory.
+Transmission: Right before the data is sent to the AI, a final check is performed to ensure no raw PII escaped the initial scan.
+4. Zero-Leak Response Cleaning
+The scrubbing works in both directions!
+
+If you accidentally type a customer's name in your chat message, the vault catches it before it's sent to the AI.
+When the AI responds, the extension checks the response to ensure the AI isn't hallucinating any sensitive-looking data.
+5. Why "Local" Matters
+The most important security feature is that this logic runs entirely on your CPU.
+
+The raw, unscrubbed logs never leave your machine.
+By the time the data hits the internet (on its way to the AI), it is already 100% anonymized.
+If you look at the network traffic, you would see only the "Clean Version" (e.g., [SUPPORT_USER_1] accessed the DS) being transmitted.
+In summary: The app uses pattern-matching to find secrets, replaces them with persistent nicknames so the story still makes sense, and does it all inside your browser so your raw logs stay private.

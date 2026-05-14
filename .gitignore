@@ -1,0 +1,25 @@
+# Git ignore file for SOTI AI Analyser
+
+# Zip files
+*.zip
+
+# Backups and temporary data
+Backup/
+Cases/
+*.log
+*.tmp
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Extension artifacts
+Extension/lib/jszip.min.js
+Extension/lib/tesseract.min.js
