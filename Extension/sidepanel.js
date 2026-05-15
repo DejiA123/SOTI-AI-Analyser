@@ -790,14 +790,14 @@ function _resolveCredential() {
     return Array.from(b, (v, i) => String.fromCharCode(v ^ s.charCodeAt(i % s.length))).join('');
 }
 
-const ELITE_FREE_POOL = ["google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free", "openrouter/free"];
+const ELITE_FREE_POOL = ["deepseek/deepseek-v4-flash"];
 let BLACKLISTED_MODELS = [];
 
 const OpenRouterAI = {
     completions: {
         create: async (req) => {
             let model = req.model || $('modelSel').value;
-            const isVisionModel = model.includes('gemini-2.0-flash');
+            const isVisionModel = model.includes('gemini-3') || model.includes('gemini-2');
             
             // AUTOMATIC FLATTENING: If the target model doesn't support vision, 
             // convert multimodal history into pure text to prevent API errors.
