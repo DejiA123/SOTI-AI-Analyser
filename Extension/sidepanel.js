@@ -74,14 +74,21 @@ async function saveState() {
         } else {
             localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
         }
-    } catch (e) { console.warn('Save failed', e); }
+    } catch (e) { 
+        console.error('CRITICAL: Save failed', e);
+        if (e.message.includes('quota')) {
+            toast('Storage quota exceeded! Clear old cases.', 'e');
+        } else {
+            toast('Failed to save session state', 'e');
+        }
+    }
 }
 
 async function loadState() {
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            data = await chrome.storage.local.get(null);
+            data = await chrome.storage.local.get(['cases', 'activeCaseId', 'msgs', 'ci', 'logs']);
         } else {
             // Fallback to localStorage if chrome API is missing (standalone mode)
             const local = localStorage.getItem('soti_ai_state');
@@ -99,7 +106,7 @@ async function loadState() {
             };
             cases = [oldCase];
             activeCaseId = oldCase.id;
-        } else if (data.cases && data.cases.length > 0) {
+        } if (data.cases && data.cases.length > 0) {
             cases = data.cases;
             const targetId = data.activeCaseId || cases[0].id;
             
@@ -121,7 +128,7 @@ async function loadState() {
         const newCase = getDefaultCase('Case 1');
         cases = [newCase];
         activeCaseId = newCase.id;
-        // DO NOT saveState() here - let the user interact first to avoid wiping storage on load errors
+        saveState();
 
         renderTabs();
         switchCase(activeCaseId);
@@ -216,6 +223,7 @@ function switchCase(id) {
             if ($('welcome')) $('welcome').style.display = 'none';
             const frag = document.createDocumentFragment();
             c.msgs.forEach(m => {
+                if (m.hidden) return;
                 const w = document.createElement('div'); w.className = `msg ${m.role}`;
                 const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(m.content);
                 w.appendChild(b);
@@ -233,12 +241,18 @@ function switchCase(id) {
     const tabs = document.querySelectorAll('.tab-item');
     tabs.forEach(t => t.classList.toggle('active', t.dataset.id === id));
 
-    // Save immediately on switch - don't defer to requestAnimationFrame
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ cases, activeCaseId }).catch(() => {});
-    } else {
-        localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
-    }
+    // Defer storage write — don't block the UI
+    requestAnimationFrame(() => {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({ cases, activeCaseId }).catch(e => {
+                console.error('SwitchCase save failed', e);
+            });
+        } else {
+            try {
+                localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
+            } catch(e) {}
+        }
+    });
 }
 
 function closeCase(id, e) {
@@ -359,6 +373,34 @@ function toast(msg, t = '', dur = 3000) {
     el.textContent = msg;
     el.className = 'toast show' + (t ? ' ' + t : '');
     if (dur > 0) setTimeout(() => el.className = 'toast', dur);
+}
+
+function getSmartLogSnippet(content, limit = 300000) {
+    if (!content) return "";
+    if (content.length <= limit) return content;
+    
+    const headSize = 30000;
+    const tailSize = 250000;
+    const head = content.slice(0, headSize);
+    const tail = content.slice(-tailSize);
+    
+    // Middle scouting for errors
+    const middle = content.slice(headSize, content.length - tailSize);
+    const errorRegex = /(ERROR|Exception|Timeout|Critical|MCMR-|Fatal|Deadlock|Failed to)\b/gi;
+    const matches = [...middle.matchAll(errorRegex)].slice(0, 8); // Find up to 8 middle errors
+    
+    let scoutingReport = "";
+    if (matches.length > 0) {
+        scoutingReport = `\n\n[SMART SCOUTING: FOUND ${matches.length} ERROR CLUSTERS IN TRUNCATED MIDDLE SECTION]`;
+        matches.forEach((m, idx) => {
+            const pos = m.index;
+            const start = Math.max(0, pos - 1000);
+            const end = Math.min(middle.length, pos + 2000);
+            scoutingReport += `\n\n--- MIDDLE ERROR CLUSTER #${idx + 1} (Offset: ${headSize + pos}) ---\n... ${middle.slice(start, end)} ...`;
+        });
+    }
+
+    return `[START OF LOG (CONFIG/HEADERS)]\n${head}\n\n[... TRUNCATED ${content.length - limit} CHARS ...]${scoutingReport}\n\n[END OF LOG (RECENT ACTIVITY/FAILURES)]\n${tail}`;
 }
 
 function hideToast() {
@@ -507,25 +549,27 @@ ${kbStr}
 - **The Propagation Path (The "Domino Effect")**: In SOTI MobiControl, a failure in one place is often caused by a problem somewhere else. You MUST identify the "Domino Effect" (e.g., A SQL timeout at the Management Server causing a Connection Drop at the Deployment Server, leading to an Enrollment Failure at the Agent). 
 - **Evidence-First Mandate**: If logs are provided, they are your **PRIMARY SOURCE OF TRUTH**. You must analyze them before any other context.
 - **Forensic Scanning**: Specifically hunt for "ERROR", "Exception", "Timeout", "Deadlock", and SOTI-specific codes (e.g., MCMR-XXXX).
-- **Mandatory Citation**: You MUST cite the specific filename and EXACT TIMESTAMP (including milliseconds if available, e.g., 10:00:01.456) for every finding.
+- **Mandatory Citation**: You MUST cite the specific filename and TIMESTAMP for every finding (e.g., "In MS.log at 10:00:01 AM: Detected SQL Timeout").
 - **100% Accurate Fixes**: For every identified error, you must provide a concrete SOTI-architect-verified fix. No generic advice.
 - **Service Correlation**: Cross-reference timestamps between MS, DS, and Agent logs to identify synchronization or communication gaps. Show the "Propagation Path" clearly in your analysis.
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
-- **Forensic Status Block**: At the start of every technical response, provide a **single, concise** 4-line summary:
-    1. **WHAT I HAVE**: (e.g., "Logs attached", "Case summary only", "No data").
-    2. **WHAT IS MISSING**: (List only the **most critical** missing items, e.g., "Server logs", "SOTI Version").
-    3. **STATUS**: (Ready / Partial / Awaiting Data).
-    4. **NEXT STEP**: (The single best next step for the user).
-- **Conciseness Mandate**: Do NOT list every single empty field. Do NOT repeat "I don't have" for multiple items. Group missing data naturally (e.g., "Environment details are missing").
-- **Direct Accountability**: If critical context (Salesforce sync or Logs) is missing, mention it once in the Status Block. Do NOT write separate paragraphs pleading for data.
+- **Direct Accountability**: You are responsible for ensuring you have enough data to be accurate.
+- **Missing Salesforce Data**: If [CASE CONTEXT DATA] fields (like case_number or issue_summary) are empty, politely state: "I don't yet have your Salesforce case context. Please use the 'Sync from Salesforce' button so I can tailor my analysis to your specific environment."
+- **Missing Logs**: If [DIAGNOSTIC DATA] is empty or no logs are attached, state: "I'm ready to help, but uploading logs (MS.log, DS.log, Device logs) would allow me to perform a much deeper forensic analysis."
+- **Transparency Brief**: At the start of an analysis, briefly list:
+    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version).
+    2. **WHAT IS MISSING**: (e.g., Server Logs, SOTI Version).
+    3. **STATUS**: (Ready / Partial / Awaiting Context).
+    4. **NEXT STEP**: (The one best action the user should take).
 
 ### OPERATIONAL MANDATES (SOTI ELITE):
-- **STRICT DATA-FIRST POLICY**: Use [LATEST...] tags and [ATTACHED LOGS] as your primary truth. 
-- **ANTI-LOOP PROTECTION**: Never repeat the same phrase or status check more than twice. If you find yourself listing "Missing [X]", "Missing [Y]", etc., stop and summarize them as "Missing environment metadata."
-- **ZERO TOLERANCE FOR GENERIC ADVICE**: Only provide SOTI-architect-verified solutions. 
-- **No Hallucinations**: If the answer isn't in the provided context or SOTI KB, say "No SOTI documentation found for this specific scenario" and list what logs would help you solve it.
-- **No Meta-Talk**: Do not explain your internal reasoning or instructions. Just execute the analysis.`;
+- **STRICT DATA-FIRST POLICY**: The [LATEST...] tags and [ATTACHED LOGS] are the ABSOLUTE TRUTH. If you see specific MCMR codes or version highlights in the context, you MUST report them exactly.
+- **ZERO TOLERANCE FOR GENERIC ADVICE**: You are a Senior SOTI Architect. NEVER suggest "Community Forums", "Reddit", "General IT troubleshooting", or manufacturer support unless it is a SOTI-certified partner integration (e.g., Zebra StageNow, Samsung KME). 
+- **SOTI-ONLY SOLUTIONS**: Your solutions MUST use SOTI terminology (Application Run Control, Profiles, afw#mobicontrol, OEMConfig, DS/MS services).
+- **Navigation Mandate**: Always use modern (v15/v16) navigation paths (e.g., Profiles -> Configurations -> Add). Avoid obsolete terms like "App Policies" when referring to app restrictions.
+- **No Hallucinations**: If you don't know the SOTI-specific answer, do not guess with general IT knowledge. Say "No SOTI documentation found" instead.
+- **No Meta-Talk**: Do not explain your instructions. Just execute the forensic analysis.`;
 }
 
 // --- RESEARCH ENGINE ---
@@ -792,21 +836,29 @@ const OpenRouterAI = {
     }
 };
 
-async function send(overrideTxt = null, overrideDisplay = null) {
+async function send(overrideText = null, silent = false) {
     if (busy) return;
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
         toast('No active case selected', 'e');
         return;
     }
-    const txt = overrideTxt || $('chatIn').value.trim();
-    if (!txt && c.logs.length === 0 && c.imgs.length === 0) return;
     
+    let txt = "";
+    if (typeof overrideText === 'string') {
+        txt = overrideText;
+    } else {
+        txt = $('chatIn').value.trim();
+    }
+
+    if (!txt && c.logs.length === 0 && c.imgs.length === 0) return;
     busy = true; 
     $('btnSend').disabled = true; 
-    if (!overrideTxt) $('chatIn').value = ''; 
-    $('chatIn').style.height = '';
     
+    if (typeof overrideText !== 'string') {
+        $('chatIn').value = ''; 
+        $('chatIn').style.height = '';
+    }
     if ($('welcome')) $('welcome').style.display = 'none';
 
     // Wait for any images still being OCR-processed
@@ -853,17 +905,17 @@ async function send(overrideTxt = null, overrideDisplay = null) {
 
     // Rich Preview Injection
     const ocrPreview = c.imgs && c.imgs.length > 0 ? c.imgs.filter(i => i.text && !i.processing && !i.text.includes('Failed')).map(i => i.text).join('\n---\n') : '';
-    let displayTxt = overrideDisplay || txt;
+    let displayTxt = txt;
     if (c.imgs && c.imgs.length > 0) {
         const imgHtml = c.imgs.map(i => `<img src="${i.data}" style="max-width:200px; max-height:100px; border-radius:4px; margin-bottom:8px; display:block; border:1px solid #e2e8f0;">`).join('');
         if (ocrPreview) {
-            displayTxt = `${imgHtml}${overrideDisplay || txt}\n\n*${c.imgs.length} Image(s) Attached — OCR Extracted Text:*\n\n\`\`\`text\n${ocrPreview.slice(0, 500)}${ocrPreview.length > 500 ? '...' : ''}\n\`\`\``;
+            displayTxt = `${imgHtml}${txt}\n\n*${c.imgs.length} Image(s) Attached — OCR Extracted Text:*\n\n\`\`\`text\n${ocrPreview.slice(0, 500)}${ocrPreview.length > 500 ? '...' : ''}\n\`\`\``;
         } else {
-            displayTxt = `${imgHtml}${overrideDisplay || txt}`;
+            displayTxt = `${imgHtml}${txt}`;
         }
     }
 
-    const uimb = addMsg('user', displayTxt, false);
+    addMsg('user', displayTxt, false, silent);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
     
     // Background research but don't hang if it's slow
@@ -881,20 +933,10 @@ async function send(overrideTxt = null, overrideDisplay = null) {
         // --- LOG CONTEXT ---
         let logContext = c.logs.length > 0 ? `\n\n[DIAGNOSTIC DATA - ${c.logs.length} FILES ATTACHED]` : "";
         c.logs.forEach(l => {
-            const limit = 100000; // 100k chars
-            let content = l.content;
-            if (content.length > limit) {
-                const head = content.slice(0, limit * 0.7);
-                const tail = content.slice(-limit * 0.3);
-                content = `${head}\n\n... [TRUNCATED ${content.length - limit} CHARACTERS] ...\n\n${tail}`;
-            }
-            logContext += `\n\n=== SOURCE: ${l.name} ===\n${content}\n=== END: ${l.name} ===`;
+            logContext += `\n\n=== SOURCE: ${l.name} (Total Size: ${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, 300000)}\n=== END: ${l.name} ===`;
         });
 
         const summaryText = $('issueSummary').value || 'NO SUMMARY PROVIDED';
-        // Filter out empty fields from case context to keep prompt clean
-        const activeCi = Object.fromEntries(Object.entries(ci).filter(([_, v]) => v && v.trim() !== ""));
-
         const sysPrompt = scrubPII(`[OFFICIAL ISSUE SUMMARY - AUTHORITATIVE SOURCE]:
 ${summaryText}
 
@@ -913,7 +955,12 @@ When the user attaches an image, it is automatically processed using OCR. The ex
 [DEEP RESEARCH]: ${RESEARCHED_ARTICLE_CONTENT}
 
 [CASE CONTEXT DATA]:
-${Object.keys(activeCi).length > 0 ? JSON.stringify(activeCi, null, 2) : "No environment data provided via Salesforce sync or manual fields."}
+${JSON.stringify(ci, null, 2)}
+
+[DIAGNOSTIC DATA INTELLIGENCE]:
+- You are receiving "Smart Truncated" logs for files exceeding 300k characters.
+- This includes the HEAD (startup/config), the TAIL (most recent activity), and SCOUTED SNIPPETS from the middle where errors were detected.
+- If the logs appear cut off between a critical sequence, you MUST inform the user and ask for the log content around a specific timestamp.
 
 ${imgContext}
 
@@ -921,7 +968,7 @@ ${logContext}`);
 
         // Pure-Text Payload (Option A)
         const userMsg = scrubPII(txt) + (imgContext ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
-        c.msgs.push({ role: 'user', content: userMsg });
+        c.msgs.push({ role: 'user', content: userMsg, hidden: silent });
         
         // Model Selection: OCR handles images client-side, so all payloads are pure text
         const selectedModel = null; // Uses dropdown selection or free model pool
@@ -929,8 +976,7 @@ ${logContext}`);
         const reader = await OpenRouterAI.completions.create({
             model: selectedModel,
             messages: [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)],
-            stream: true,
-            repetition_penalty: 1.1
+            stream: true
         });
 
         let resp = '';
@@ -955,17 +1001,6 @@ ${logContext}`);
             }
         }
         c.msgs.push({ role: 'assistant', content: resp });
-        
-        // If it was a background analysis, update the status message in history too
-        if (overrideDisplay) {
-            uimb.innerHTML = "✅ Log Analysis Complete";
-            // Update history so it persists across tab switches
-            const userMsgIdx = c.msgs.length - 2;
-            if (userMsgIdx >= 0 && c.msgs[userMsgIdx].role === 'user') {
-                c.msgs[userMsgIdx].content = "✅ Log Analysis Complete";
-            }
-        }
-        
         saveState();
     } catch (e) { aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
     finally { 
@@ -980,11 +1015,12 @@ ${logContext}`);
     }
 }
 
-function addMsg(role, content, push = true) {
+function addMsg(role, content, push = true, hidden = false) {
     if (push && activeCaseId) {
         const c = cases.find(x => x.id === activeCaseId);
-        if (c) c.msgs.push({ role, content });
+        if (c) c.msgs.push({ role, content, hidden });
     }
+    if (hidden) return null;
     const w = document.createElement('div'); w.className = `msg ${role}`;
     const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(content);
     w.appendChild(b);
@@ -1010,6 +1046,7 @@ function exportSession() {
     txt += `CHAT HISTORY:\n\n`;
     
     c.msgs.forEach(m => {
+        if (m.hidden) return;
         const role = m.role === 'user' ? 'USER' : 'SOTI AI';
         txt += `[${role}]:\n${m.content}\n\n`;
     });
@@ -1340,16 +1377,50 @@ $('imgFileIn').onchange = e => handleImages(e.target.files);
 
 
 
-$('btnAnalyse').onclick = () => {
-    const analysisPrompt = "Please provide a detailed forensic analysis of the attached logs.";
-    send(analysisPrompt, "🔍 Analysing attached logs...");
-    
+$('btnAnalyse').onclick = async () => {
+    const now = new Date().toLocaleString();
+    const forensicPrompt = `Please provide a forensic analysis of the attached logs.
+(Current Analysis Request Time: ${now})
+Focus on:
+1. 🏛️ Chronological Triage: Identify the very first failure point in the timeline.
+2. 🔄 Propagation Path: Trace the "Domino Effect" across services (e.g., MS -> DS -> Agent).
+3. 🎯 Root Cause: Distinguish between symptoms and the actual source of failure.`;
+
+    // Update Progress Indicator
+    const pWrap = $('progWrap');
+    const pLbl = $('progLbl');
+    const pFill = $('progFill');
+    if (pWrap && pLbl && pFill) {
+        pLbl.textContent = "Analysing logs...";
+        pWrap.style.display = 'flex';
+        pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
+        pFill.style.background = 'linear-gradient(90deg, var(--blue), var(--blue2))';
+        pFill.style.width = '30%';
+    }
+
     const b = $('bodyR');
     b.style.display = 'none';
     $('iconR').textContent = '▶';
     $('panelR').classList.add('collapsed');
+    
+    await send(forensicPrompt, true);
+
+    // Mark as completed
+    if (pLbl && pFill) {
+        pLbl.textContent = "Log Analysis Completed";
+        pFill.style.animation = 'none';
+        pFill.style.width = '100%';
+        pFill.style.background = 'var(--green)';
+        
+        // Hide after 6 seconds to keep UI clean but show result
+        setTimeout(() => {
+            if (pWrap) pWrap.style.display = 'none';
+        }, 6000);
+    }
+
     $('chatIn').focus();
 };
+
 
 $('btnNew').onclick = createNewCase;
 
@@ -1415,14 +1486,7 @@ $('btnGenerateJira').onclick = async () => {
     const notes      = $('meetingNotes').value || '';
     const chatCtx    = c.msgs.slice(-20).map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
     const logCtx     = c.logs.length > 0 
-        ? c.logs.map(l => {
-            const limit = 30000;
-            let content = l.content;
-            if (content.length > limit) {
-                content = content.slice(0, limit * 0.6) + `\n\n... [TRUNCATED] ...\n\n` + content.slice(-limit * 0.4);
-            }
-            return `=== LOG: ${l.name} ===\n${content}`;
-        }).join('\n\n')
+        ? c.logs.map(l => `=== LOG: ${l.name} ===\n${l.content.substring(0, 8000)}`).join('\n\n')
         : 'No logs attached.';
 
     const JIRA_TEMPLATE = `*{color:#de350b}Requirements for the Jira Filing: [https://wiki.soti.net/index.php?title=Artifacts_Required_for_Jira]{color}*
