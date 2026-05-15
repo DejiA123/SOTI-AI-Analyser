@@ -35,6 +35,17 @@ function getDefaultCI() {
     };
 }
 
+function getDefaultCase(name = 'Case 1') {
+    return {
+        id: 'case-' + Date.now(),
+        name,
+        msgs: [],
+        logs: [],
+        imgs: [], // { name, data, text }
+        ci: getDefaultCI()
+    };
+}
+
 async function saveState() {
     if (!activeCaseId) return;
     try {
@@ -88,16 +99,17 @@ async function loadState() {
             };
             cases = [oldCase];
             activeCaseId = oldCase.id;
-        } else if (data.cases && data.cases.length > 0) {
+        } if (data.cases && data.cases.length > 0) {
             cases = data.cases;
             const targetId = data.activeCaseId || cases[0].id;
             
-            // Patch existing cases if meetingNotes is empty or just whitespace
+            // Patch existing cases for missing properties
             const template = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
             cases.forEach(c => {
                 if (c.ci && (!c.ci.meetingNotes || c.ci.meetingNotes.trim() === "")) {
                     c.ci.meetingNotes = template;
                 }
+                if (!c.imgs) c.imgs = [];
             });
             
             renderTabs();
@@ -106,16 +118,9 @@ async function loadState() {
         } 
         
         // If we reach here, we need a default case
-        const id = 'case-' + Date.now();
-        const newCase = {
-            id,
-            name: 'Case 1',
-            msgs: [],
-            logs: [],
-            ci: getDefaultCI()
-        };
+        const newCase = getDefaultCase('Case 1');
         cases = [newCase];
-        activeCaseId = id;
+        activeCaseId = newCase.id;
         saveState();
 
         renderTabs();
@@ -142,13 +147,7 @@ function createNewCase() {
         nextNum++;
     }
     const name = `Case ${nextNum}`;
-    const newCase = {
-        id,
-        name,
-        msgs: [],
-        logs: [],
-        ci: getDefaultCI()
-    };
+    const newCase = getDefaultCase(name);
     cases.push(newCase);
     renderTabs();
     switchCase(id);
@@ -226,7 +225,8 @@ function switchCase(id) {
             chat.scrollTop = chat.scrollHeight;
         }
     }
-
+    
+    renderImgs();
     renderLogs();
     updateAllValidations();
     // Update tab classes manually to avoid scroll jump/flicker
@@ -748,23 +748,44 @@ function _resolveCredential() {
     return Array.from(b, (v, i) => String.fromCharCode(v ^ s.charCodeAt(i % s.length))).join('');
 }
 
-const ELITE_FREE_POOL = ["meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free", "openrouter/free"];
+const ELITE_FREE_POOL = ["google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free", "openrouter/free"];
 let BLACKLISTED_MODELS = [];
 
 const OpenRouterAI = {
     completions: {
         create: async (req) => {
             let model = req.model || $('modelSel').value;
+            const isVisionModel = model.includes('gemini-2.0-flash');
+            
+            // AUTOMATIC FLATTENING: If the target model doesn't support vision, 
+            // convert multimodal history into pure text to prevent API errors.
+            const messages = req.messages.map(m => {
+                if (Array.isArray(m.content)) {
+                    if (isVisionModel) return m;
+                    // Flatten to text
+                    let text = m.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+                    const hasImg = m.content.some(c => c.type === 'image_url');
+                    if (hasImg) text = `[USER ATTACHED AN IMAGE WHICH YOU SAW IN A PREVIOUS TURN]\n${text}`;
+                    return { ...m, content: text };
+                }
+                return m;
+            });
+
             const modelsToTry = [model, ...ELITE_FREE_POOL.filter(m => m !== model && !BLACKLISTED_MODELS.includes(m))];
             for (const m of modelsToTry) {
                 try {
                     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: 'POST',
                         headers: { 'Authorization': `Bearer ${_resolveCredential()}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ ...req, model: m })
+                        body: JSON.stringify({ ...req, model: m, messages: messages })
                     });
                     if (res.status === 429) { await new Promise(r => setTimeout(r, 1000)); continue; }
-                    if (!res.ok) { BLACKLISTED_MODELS.push(m); continue; }
+                    if (!res.ok) { 
+                        const err = await res.text(); 
+                        console.error('AI Error:', res.status, err); 
+                        BLACKLISTED_MODELS.push(m); 
+                        continue; 
+                    }
                     return res.body.getReader();
                 } catch (e) { continue; }
             }
@@ -781,9 +802,39 @@ async function send() {
         return;
     }
     const txt = $('chatIn').value.trim();
-    if (!txt && c.logs.length === 0) return;
+    if (!txt && c.logs.length === 0 && c.imgs.length === 0) return;
     busy = true; $('btnSend').disabled = true; $('chatIn').value = ''; $('chatIn').style.height = '';
     if ($('welcome')) $('welcome').style.display = 'none';
+
+    // Wait for any images still being OCR-processed
+    if (c.imgs && c.imgs.some(img => img.processing)) {
+        toast('Waiting for image OCR to finish...', 'w');
+        await new Promise(resolve => {
+            const check = setInterval(() => {
+                if (!c.imgs.some(img => img.processing)) {
+                    clearInterval(check);
+                    resolve();
+                }
+            }, 300);
+            setTimeout(() => { clearInterval(check); resolve(); }, 15000); // 15s max wait
+        });
+    }
+
+    // OCR Context from Images
+    let imgContext = "";
+    if (c.imgs && c.imgs.length > 0) {
+        console.log('[SEND] Images found:', c.imgs.length);
+        c.imgs.forEach((img, idx) => {
+            console.log(`[SEND] Image ${idx}: name=${img.name}, textLen=${img.text ? img.text.length : 0}, processing=${img.processing}, text=${img.text ? img.text.substring(0,50) : 'EMPTY'}`);
+        });
+        imgContext = "\n\n[SCRAPPED TEXT FROM ATTACHED IMAGES]";
+        c.imgs.forEach(img => {
+            if (img.text) {
+                imgContext += `\n\n=== SOURCE IMAGE: ${img.name} ===\n${img.text}\n=== END IMAGE ===`;
+            }
+        });
+        console.log('[SEND] imgContext length:', imgContext.length);
+    }
 
     const ci = {
         case_number: $('caseNum').value, 
@@ -797,7 +848,19 @@ async function send() {
         email_chain: $('emailChain').value
     };
 
-    addMsg('user', txt, false);
+    // Rich Preview Injection
+    const ocrPreview = c.imgs && c.imgs.length > 0 ? c.imgs.filter(i => i.text && !i.processing && !i.text.includes('Failed')).map(i => i.text).join('\n---\n') : '';
+    let displayTxt = txt;
+    if (c.imgs && c.imgs.length > 0) {
+        const imgHtml = c.imgs.map(i => `<img src="${i.data}" style="max-width:200px; max-height:100px; border-radius:4px; margin-bottom:8px; display:block; border:1px solid #e2e8f0;">`).join('');
+        if (ocrPreview) {
+            displayTxt = `${imgHtml}${txt}\n\n*${c.imgs.length} Image(s) Attached — OCR Extracted Text:*\n\n\`\`\`text\n${ocrPreview.slice(0, 500)}${ocrPreview.length > 500 ? '...' : ''}\n\`\`\``;
+        } else {
+            displayTxt = `${imgHtml}${txt}`;
+        }
+    }
+
+    addMsg('user', displayTxt, false);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
     
     // Background research but don't hang if it's slow
@@ -824,6 +887,9 @@ ${summaryText}
 
 ${getSysPrompt(promptMode)}
 
+[IMPORTANT NOTE ON MULTIMODAL IMAGES]:
+When the user attaches an image, it is automatically processed using OCR. The extracted text is provided below in the [SCRAPPED TEXT FROM ATTACHED IMAGES] section. YOU CANNOT SEE THE IMAGES DIRECTLY. You must rely entirely on the scraped text provided in that section. Do not ask the user to upload the image or complain that you cannot see it. Just analyze the scraped text.
+
 [LATEST MOBICONTROL CONSOLE VERSIONS]: ${VERSIONS.join(', ')}
 [LATEST ANDROID AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}
 [LATEST SOTI IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}
@@ -834,10 +900,19 @@ ${getSysPrompt(promptMode)}
 [CASE CONTEXT DATA]:
 ${JSON.stringify(ci, null, 2)}
 
+${imgContext}
+
 ${logContext}`);
 
-        c.msgs.push({ role: 'user', content: scrubPII(txt) });
+        // Pure-Text Payload (Option A)
+        const userMsg = scrubPII(txt) + (imgContext ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
+        c.msgs.push({ role: 'user', content: userMsg });
+        
+        // Model Selection: OCR handles images client-side, so all payloads are pure text
+        const selectedModel = null; // Uses dropdown selection or free model pool
+
         const reader = await OpenRouterAI.completions.create({
+            model: selectedModel,
             messages: [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)],
             stream: true
         });
@@ -866,7 +941,16 @@ ${logContext}`);
         c.msgs.push({ role: 'assistant', content: resp });
         saveState();
     } catch (e) { aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
-    finally { busy = false; $('btnSend').disabled = false; }
+    finally { 
+        busy = false; 
+        $('btnSend').disabled = false;
+        // Clear images after sending so they don't hang around for the next prompt
+        if (c && c.imgs) {
+            c.imgs = [];
+            renderImgs();
+            saveState();
+        }
+    }
 }
 
 function addMsg(role, content, push = true) {
@@ -1076,10 +1160,158 @@ $('dz').onclick = () => $('fileIn').click();
         e.stopPropagation();
         counter = 0;
         el.classList.remove('drag-active');
-        if (e.dataTransfer.files) handleFiles(e.dataTransfer.files);
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const files = e.dataTransfer.files;
+            const imgs = [], logs = [];
+            for (const f of files) {
+                if (f.type.startsWith('image/')) imgs.push(f);
+                else logs.push(f);
+            }
+            if (imgs.length > 0 && typeof handleImages === 'function') handleImages(imgs);
+            if (logs.length > 0) handleFiles(logs);
+        }
     };
 });
-$('fileIn').onchange = e => handleFiles(e.target.files);
+$('fileIn').onchange = e => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const imgs = [], logs = [];
+    for (const f of files) {
+        if (f.type.startsWith('image/')) imgs.push(f);
+        else logs.push(f);
+    }
+    if (imgs.length > 0 && typeof handleImages === 'function') handleImages(imgs);
+    if (logs.length > 0) handleFiles(logs);
+};
+
+
+// --- IMAGE HANDLING ---
+async function handleImages(files) {
+    console.log('handleImages triggered', files);
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) return;
+
+    for (const f of files) {
+        const r = new FileReader();
+        r.onload = async ev => {
+            let data = ev.target.result;
+
+
+
+            const imgObj = { name: f.name, data: data, text: '', processing: true };
+            if (!c.imgs) c.imgs = [];
+            c.imgs.push(imgObj);
+            renderImgs();
+            saveState();
+
+            // Run OCR (Tesseract v5)
+            try {
+                const Lib = typeof Tesseract !== 'undefined' ? Tesseract : window.Tesseract;
+                const isExt = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id;
+                console.log('[OCR] Environment:', isExt ? 'Chrome Extension' : 'Standalone');
+                
+                const workerOpts = isExt ? {
+                    workerPath: chrome.runtime.getURL('lib/worker.min.js'),
+                    corePath: chrome.runtime.getURL('lib/'),
+                    langPath: chrome.runtime.getURL('lib/'),
+                    workerBlobURL: false
+                } : {
+                    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js',
+                    corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/',
+                    langPath: 'https://tessdata.projectnaptha.com/4.0.0/'
+                };
+                console.log('[OCR] Worker options:', JSON.stringify(workerOpts));
+                
+                const worker = await Lib.createWorker('eng', 1, workerOpts);
+                await worker.setParameters({ tessedit_pageseg_mode: '11' });
+                const result = await worker.recognize(data);
+
+                console.log('[OCR] Raw text length:', result.data.text.length);
+                console.log('[OCR] Raw text preview:', result.data.text.substring(0, 200));
+
+                // Clean text - only strip truly unprintable chars, keep everything else
+                let cleanText = result.data.text
+                    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '')
+                    .replace(/ {3,}/g, '  ')
+                    .replace(/\n{4,}/g, '\n\n\n')
+                    .trim();
+
+                // Set text IMMEDIATELY - re-find imgObj in current cases array to avoid detached reference
+                const liveCase = cases.find(x => x.id === activeCaseId);
+                const liveImg = liveCase && liveCase.imgs ? liveCase.imgs.find(i => i.name === f.name && i.processing) : null;
+                const target = liveImg || imgObj; // fallback to closure ref
+                target.text = cleanText || "[OCR Engine found no readable text]";
+                target.processing = false;
+                console.log('[OCR] Text assigned to LIVE img:', target.text.substring(0, 50));
+                toast(`Text extracted successfully`, 's');
+
+                await worker.terminate();
+            } catch (e) {
+                console.error('OCR failed', e);
+                const liveCase2 = cases.find(x => x.id === activeCaseId);
+                const liveImg2 = liveCase2 && liveCase2.imgs ? liveCase2.imgs.find(i => i.name === f.name && i.processing) : null;
+                const target2 = liveImg2 || imgObj;
+                target2.text = `[OCR failed: ${e.message || e}]`;
+                target2.processing = false;
+            } finally {
+                renderImgs();
+                saveState();
+            }
+        };
+        r.readAsDataURL(f);
+    }
+}
+
+const renderImgs = () => {
+    const strip = $('imgPreview');
+    if (!strip) return;
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c || !c.imgs || c.imgs.length === 0) {
+        strip.style.display = 'none';
+        return;
+    }
+
+    strip.style.display = 'flex';
+    const frag = document.createDocumentFragment();
+    c.imgs.forEach((img, i) => {
+        const thumb = document.createElement('div');
+        thumb.className = 'img-thumb' + (img.processing ? ' processing' : '');
+        thumb.style.backgroundImage = `url(${img.data})`;
+        
+
+        if (img.text) {
+            const tag = document.createElement('div');
+            tag.className = 'img-ocr-tag';
+            tag.textContent = 'OCR';
+            thumb.appendChild(tag);
+        }
+
+        const del = document.createElement('div');
+        del.className = 'img-del';
+        del.textContent = '×';
+        del.onclick = (e) => {
+            e.stopPropagation();
+            removeImg(i);
+        };
+
+        thumb.appendChild(del);
+        frag.appendChild(thumb);
+    });
+    strip.innerHTML = '';
+    strip.appendChild(frag);
+};
+
+const removeImg = (i) => {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (c) c.imgs.splice(i, 1);
+    renderImgs();
+    saveState();
+};
+
+$('btnImgAttach').onclick = () => $('imgFileIn').click();
+$('imgFileIn').onchange = e => handleImages(e.target.files);
+
+
 
 $('btnAnalyse').onclick = () => {
     if (!$('chatIn').value.trim()) {

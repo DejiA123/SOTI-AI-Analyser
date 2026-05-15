@@ -19,6 +19,15 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/*", "lib/*.js", "lib/*.wasm", "lib/*.gz", "*.js", "*.wasm", "*.gz"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "action": {
     "default_title": "Open SOTI AI Analyser"
   },
