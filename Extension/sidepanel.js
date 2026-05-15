@@ -379,28 +379,83 @@ function getSmartLogSnippet(content, limit = 300000) {
     if (!content) return "";
     if (content.length <= limit) return content;
     
-    const headSize = 30000;
-    const tailSize = 250000;
-    const head = content.slice(0, headSize);
-    const tail = content.slice(-tailSize);
+    // PHASE 1: FULL-FILE FORENSIC EXTRACTION — scan the ENTIRE log for critical evidence
+    // This ensures NO exception or error is missed, regardless of file size.
+    const lines = content.split('\n');
+    const forensicLines = [];
+    const exceptionBlockLines = [];
+    let inExceptionBlock = false;
+    let exceptionBlockCount = 0;
     
-    // Middle scouting for errors
-    const middle = content.slice(headSize, content.length - tailSize);
-    const errorRegex = /(ERROR|Exception|Timeout|Critical|MCMR-|Fatal|Deadlock|Failed to)\b/gi;
-    const matches = [...middle.matchAll(errorRegex)].slice(0, 8); // Find up to 8 middle errors
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const upper = line.toUpperCase();
+        
+        // Detect start of an exception/stack trace block
+        const isExceptionStart = /\b(Exception|Error|FATAL|Critical)\b/i.test(line) && 
+            (/\b(System\.|SOTI\.|Mobicontrol\.|Microsoft\.|at\s+\S+\.\S+\(|Unhandled|thrown|stack\s*trace)/i.test(line) ||
+             upper.includes('EXCEPTION') || upper.includes('STACK TRACE'));
+        
+        const isStackFrame = /^\s+(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
+        const isErrorLine = /\b(ERROR|FATAL|CRITICAL)\b/.test(line) && !isStackFrame;
+        const isWarningNearError = /\bWARN(ING)?\b/i.test(line);
+        const isSotiCode = /\bMCMR-\d+\b/i.test(line);
+        
+        if (isExceptionStart) {
+            inExceptionBlock = true;
+            exceptionBlockCount = 0;
+        }
+        
+        if (inExceptionBlock) {
+            exceptionBlockLines.push({ lineNum: i + 1, text: line });
+            exceptionBlockCount++;
+            // End exception block after 50 lines or when we hit a non-stack, non-empty line
+            if (exceptionBlockCount > 50 || 
+                (exceptionBlockCount > 3 && !isStackFrame && !isExceptionStart && line.trim().length > 0 && !/^\s/.test(line))) {
+                inExceptionBlock = false;
+            }
+        } else if (isErrorLine || isSotiCode) {
+            // Capture error line + 2 lines of context before and after
+            const ctxStart = Math.max(0, i - 2);
+            const ctxEnd = Math.min(lines.length - 1, i + 2);
+            for (let j = ctxStart; j <= ctxEnd; j++) {
+                forensicLines.push({ lineNum: j + 1, text: lines[j] });
+            }
+        }
+    }
     
-    let scoutingReport = "";
-    if (matches.length > 0) {
-        scoutingReport = `\n\n[SMART SCOUTING: FOUND ${matches.length} ERROR CLUSTERS IN TRUNCATED MIDDLE SECTION]`;
-        matches.forEach((m, idx) => {
-            const pos = m.index;
-            const start = Math.max(0, pos - 1000);
-            const end = Math.min(middle.length, pos + 2000);
-            scoutingReport += `\n\n--- MIDDLE ERROR CLUSTER #${idx + 1} (Offset: ${headSize + pos}) ---\n... ${middle.slice(start, end)} ...`;
+    // Deduplicate and sort forensic findings
+    const allForensic = [...exceptionBlockLines, ...forensicLines];
+    const seenLineNums = new Set();
+    const uniqueForensic = allForensic.filter(f => {
+        if (seenLineNums.has(f.lineNum)) return false;
+        seenLineNums.add(f.lineNum);
+        return true;
+    }).sort((a, b) => a.lineNum - b.lineNum);
+    
+    // Build forensic report
+    let forensicReport = "";
+    if (uniqueForensic.length > 0) {
+        forensicReport = `\n\n[FULL-FILE FORENSIC EXTRACTION: ${uniqueForensic.length} CRITICAL LINES FROM ${lines.length} TOTAL LINES]`;
+        forensicReport += `\n[Found ${exceptionBlockLines.length} exception/stack-trace lines and ${forensicLines.length} error/warning context lines]\n`;
+        
+        let lastLineNum = -10;
+        uniqueForensic.forEach(f => {
+            if (f.lineNum - lastLineNum > 3) {
+                forensicReport += `\n--- Line ${f.lineNum} ---\n`;
+            }
+            forensicReport += `${f.text}\n`;
+            lastLineNum = f.lineNum;
         });
     }
+    
+    // PHASE 2: HEAD + TAIL for general context (config/startup + recent activity)
+    const headSize = 30000;
+    const tailSize = 200000;
+    const head = content.slice(0, headSize);
+    const tail = content.slice(-tailSize);
 
-    return `[START OF LOG (CONFIG/HEADERS)]\n${head}\n\n[... TRUNCATED ${content.length - limit} CHARS ...]${scoutingReport}\n\n[END OF LOG (RECENT ACTIVITY/FAILURES)]\n${tail}`;
+    return `[START OF LOG (CONFIG/HEADERS — First ${headSize} chars)]\n${head}\n\n[FULL-FILE FORENSIC EXTRACTION — Every Exception, Error, and Critical line from the ENTIRE ${lines.length}-line log]${forensicReport}\n\n[END OF LOG (RECENT ACTIVITY — Last ${tailSize} chars)]\n${tail}`;
 }
 
 function hideToast() {
@@ -551,6 +606,13 @@ ${kbStr}
 - **The Propagation Path (The "Domino Effect")**: Across ALL SOTI products, a failure in one component often cascades to others. You MUST trace the full domino chain (e.g., SQL timeout → MS connection drop → DS handshake failure → Agent enrollment error). Always present this chain explicitly.
 - **Evidence-First Mandate**: Logs are your **PRIMARY SOURCE OF TRUTH**. You must analyze them BEFORE applying any other context. Your diagnosis must be anchored to specific log entries.
 - **Mandatory Citation**: You MUST cite the **exact filename** and **exact timestamp** for every finding (e.g., "In MS.log at 2026-05-15 10:00:01.342: SqlException - Timeout expired").
+- **EXCEPTION-FIRST SCANNING (HIGHEST FORENSIC VALUE)**: Exceptions are the most critical evidence in any SOTI log. You MUST actively hunt for and prioritize these patterns:
+  - **Full .NET Exception stack traces**: e.g., "System.NullReferenceException", "System.InvalidOperationException", "System.TimeoutException", "System.Data.SqlClient.SqlException", "System.Net.WebException", "System.IO.IOException", "System.UnauthorizedAccessException", "System.OutOfMemoryException".
+  - **SOTI-specific exceptions**: Any exception containing "SOTI.", "Mobicontrol.", "MobiControl.", or product-specific namespaces.
+  - **Exception chains**: Look for "Inner Exception", "--->" and "caused by" patterns — the INNERMOST exception is usually the true root cause.
+  - **Stack trace reading**: When you find an exception with a stack trace, read it BOTTOM-UP. The bottom frames show the origin call, the top frames show where it surfaced. Identify which SOTI component or method initiated the failing operation.
+  - **Recurring exceptions**: If the same exception type repeats across multiple timestamps, note the FIRST occurrence (origin) and the frequency (indicates severity/impact).
+  - **Priority order when scanning logs**: (1) Exceptions with full stack traces, (2) ERROR-level entries, (3) WARN entries near error timestamps, (4) INFO entries for context around the failure window.
 
 #### ZERO-GUESS POLICY (CRITICAL):
 - **NEVER guess the root cause**. If you cannot find a specific error signature in the logs, say: "No conclusive evidence found in the provided logs for this symptom."
@@ -1034,9 +1096,13 @@ When the user attaches an image, it is automatically processed using OCR. The ex
 ${JSON.stringify(ci, null, 2)}
 
 [DIAGNOSTIC DATA INTELLIGENCE]:
-- You are receiving "Smart Truncated" logs for files exceeding 300k characters.
-- This includes the HEAD (startup/config), the TAIL (most recent activity), and SCOUTED SNIPPETS from the middle where errors were detected.
-- If the logs appear cut off between a critical sequence, you MUST inform the user and ask for the log content around a specific timestamp.
+- For files exceeding 300k characters, you receive THREE sections:
+  1. HEAD (first 30k chars): Contains startup config, service initialization, and environment info.
+  2. FULL-FILE FORENSIC EXTRACTION: Every single Exception, ERROR, FATAL, CRITICAL, and MCMR line extracted from the ENTIRE log file — nothing skipped. Exception stack traces are captured in full with all inner exceptions. Error lines include ±2 lines of context.
+  3. TAIL (last 200k chars): Contains the most recent activity and failures.
+- **YOU HAVE SEEN EVERY EXCEPTION AND ERROR IN THE LOG.** The forensic extraction scanned every line. If an exception exists anywhere in the file, it is in your data.
+- Focus your analysis on the FORENSIC EXTRACTION section first — it contains the highest-value evidence.
+- If you need general context around a specific timestamp (e.g., INFO-level entries), those may only be in the HEAD or TAIL. In that case, ask the user for the log content around that specific timestamp.
 
 ${imgContext}
 
