@@ -1578,6 +1578,15 @@ $('btnCopyJira').onclick = () => { $('jiraTa').select(); document.execCommand('c
 loadState();
 fetchLatestSOTIVersions();
 
+// Ensure text is copied as plain text from the chat container
+$('chatMsgs').addEventListener('copy', (e) => {
+    const selection = window.getSelection();
+    if (selection.rangeCount > 0) {
+        e.clipboardData.setData('text/plain', selection.toString());
+        e.preventDefault();
+    }
+});
+
 // Real-time sync between Sidepanel and Floating Window
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && (changes.cases || changes.activeCaseId)) {
