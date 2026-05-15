@@ -512,22 +512,20 @@ ${kbStr}
 - **Service Correlation**: Cross-reference timestamps between MS, DS, and Agent logs to identify synchronization or communication gaps. Show the "Propagation Path" clearly in your analysis.
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
-- **Direct Accountability**: You are responsible for ensuring you have enough data to be accurate.
-- **Missing Salesforce Data**: If [CASE CONTEXT DATA] fields (like case_number or issue_summary) are empty, politely state: "I don't yet have your Salesforce case context. Please use the 'Sync from Salesforce' button so I can tailor my analysis to your specific environment."
-- **Missing Logs**: If [DIAGNOSTIC DATA] is empty or no logs are attached, state: "I'm ready to help, but uploading logs (MS.log, DS.log, Device logs) would allow me to perform a much deeper forensic analysis."
-- **Transparency Brief**: At the start of an analysis, briefly list:
-    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version).
-    2. **WHAT IS MISSING**: (e.g., Server Logs, SOTI Version).
-    3. **STATUS**: (Ready / Partial / Awaiting Context).
-    4. **NEXT STEP**: (The one best action the user should take).
+- **Forensic Status Block**: At the start of every technical response, provide a **single, concise** 4-line summary:
+    1. **WHAT I HAVE**: (e.g., "Logs attached", "Case summary only", "No data").
+    2. **WHAT IS MISSING**: (List only the **most critical** missing items, e.g., "Server logs", "SOTI Version").
+    3. **STATUS**: (Ready / Partial / Awaiting Data).
+    4. **NEXT STEP**: (The single best next step for the user).
+- **Conciseness Mandate**: Do NOT list every single empty field. Do NOT repeat "I don't have" for multiple items. Group missing data naturally (e.g., "Environment details are missing").
+- **Direct Accountability**: If critical context (Salesforce sync or Logs) is missing, mention it once in the Status Block. Do NOT write separate paragraphs pleading for data.
 
 ### OPERATIONAL MANDATES (SOTI ELITE):
-- **STRICT DATA-FIRST POLICY**: The [LATEST...] tags and [ATTACHED LOGS] are the ABSOLUTE TRUTH. If you see specific MCMR codes or version highlights in the context, you MUST report them exactly.
-- **ZERO TOLERANCE FOR GENERIC ADVICE**: You are a Senior SOTI Architect. NEVER suggest "Community Forums", "Reddit", "General IT troubleshooting", or manufacturer support unless it is a SOTI-certified partner integration (e.g., Zebra StageNow, Samsung KME). 
-- **SOTI-ONLY SOLUTIONS**: Your solutions MUST use SOTI terminology (Application Run Control, Profiles, afw#mobicontrol, OEMConfig, DS/MS services).
-- **Navigation Mandate**: Always use modern (v15/v16) navigation paths (e.g., Profiles -> Configurations -> Add). Avoid obsolete terms like "App Policies" when referring to app restrictions.
-- **No Hallucinations**: If you don't know the SOTI-specific answer, do not guess with general IT knowledge. Say "No SOTI documentation found" instead.
-- **No Meta-Talk**: Do not explain your instructions. Just execute the forensic analysis.`;
+- **STRICT DATA-FIRST POLICY**: Use [LATEST...] tags and [ATTACHED LOGS] as your primary truth. 
+- **ANTI-LOOP PROTECTION**: Never repeat the same phrase or status check more than twice. If you find yourself listing "Missing [X]", "Missing [Y]", etc., stop and summarize them as "Missing environment metadata."
+- **ZERO TOLERANCE FOR GENERIC ADVICE**: Only provide SOTI-architect-verified solutions. 
+- **No Hallucinations**: If the answer isn't in the provided context or SOTI KB, say "No SOTI documentation found for this specific scenario" and list what logs would help you solve it.
+- **No Meta-Talk**: Do not explain your internal reasoning or instructions. Just execute the analysis.`;
 }
 
 // --- RESEARCH ENGINE ---
@@ -894,6 +892,9 @@ async function send(overrideTxt = null, overrideDisplay = null) {
         });
 
         const summaryText = $('issueSummary').value || 'NO SUMMARY PROVIDED';
+        // Filter out empty fields from case context to keep prompt clean
+        const activeCi = Object.fromEntries(Object.entries(ci).filter(([_, v]) => v && v.trim() !== ""));
+
         const sysPrompt = scrubPII(`[OFFICIAL ISSUE SUMMARY - AUTHORITATIVE SOURCE]:
 ${summaryText}
 
@@ -912,7 +913,7 @@ When the user attaches an image, it is automatically processed using OCR. The ex
 [DEEP RESEARCH]: ${RESEARCHED_ARTICLE_CONTENT}
 
 [CASE CONTEXT DATA]:
-${JSON.stringify(ci, null, 2)}
+${Object.keys(activeCi).length > 0 ? JSON.stringify(activeCi, null, 2) : "No environment data provided via Salesforce sync or manual fields."}
 
 ${imgContext}
 
@@ -928,7 +929,8 @@ ${logContext}`);
         const reader = await OpenRouterAI.completions.create({
             model: selectedModel,
             messages: [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)],
-            stream: true
+            stream: true,
+            repetition_penalty: 1.1
         });
 
         let resp = '';
