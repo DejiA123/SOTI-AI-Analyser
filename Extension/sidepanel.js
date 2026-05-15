@@ -504,12 +504,14 @@ ${kbStr}
 - **Version Analysis**: Always compare the customer's version in [CASE CONTEXT] (soti_version/agent_version) with the versions in [RELEASE_NOTES].
 - **Fix Identification**: If the user's issue matches a "Resolved Issue" or "MCMR" found in a version NEWER than the customer's current version, you MUST explicitly recommend an upgrade and cite the specific MCMR code.
 
-### DIAGNOSTIC PROTOCOL (LOGS - HIGHEST PRIORITY):
+### DIAGNOSTIC PROTOCOL & LOG INTELLIGENCE (HIGHEST PRIORITY):
+- **Architect-Level Log Intelligence (The "Log Whisperer")**: While other tools simply "find text," you perform Chronological Triage. If multiple logs are provided, you MUST line up all events on a single master timeline to see which error actually started the failure.
+- **The Propagation Path (The "Domino Effect")**: In SOTI MobiControl, a failure in one place is often caused by a problem somewhere else. You MUST identify the "Domino Effect" (e.g., A SQL timeout at the Management Server causing a Connection Drop at the Deployment Server, leading to an Enrollment Failure at the Agent). 
 - **Evidence-First Mandate**: If logs are provided, they are your **PRIMARY SOURCE OF TRUTH**. You must analyze them before any other context.
 - **Forensic Scanning**: Specifically hunt for "ERROR", "Exception", "Timeout", "Deadlock", and SOTI-specific codes (e.g., MCMR-XXXX).
-- **Mandatory Citation**: You MUST cite the specific filename for every finding (e.g., "In MS.log: Detected DB Timeout at 10:45").
+- **Mandatory Citation**: You MUST cite the specific filename and EXACT TIMESTAMP (including milliseconds if available, e.g., 10:00:01.456) for every finding.
 - **100% Accurate Fixes**: For every identified error, you must provide a concrete SOTI-architect-verified fix. No generic advice.
-- **Service Correlation**: Cross-reference timestamps between MS and DS logs to identify synchronization or communication gaps.
+- **Service Correlation**: Cross-reference timestamps between MS, DS, and Agent logs to identify synchronization or communication gaps. Show the "Propagation Path" clearly in your analysis.
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
 - **Direct Accountability**: You are responsible for ensuring you have enough data to be accurate.
@@ -794,16 +796,21 @@ const OpenRouterAI = {
     }
 };
 
-async function send() {
+async function send(overrideTxt = null, overrideDisplay = null) {
     if (busy) return;
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
         toast('No active case selected', 'e');
         return;
     }
-    const txt = $('chatIn').value.trim();
+    const txt = overrideTxt || $('chatIn').value.trim();
     if (!txt && c.logs.length === 0 && c.imgs.length === 0) return;
-    busy = true; $('btnSend').disabled = true; $('chatIn').value = ''; $('chatIn').style.height = '';
+    
+    busy = true; 
+    $('btnSend').disabled = true; 
+    if (!overrideTxt) $('chatIn').value = ''; 
+    $('chatIn').style.height = '';
+    
     if ($('welcome')) $('welcome').style.display = 'none';
 
     // Wait for any images still being OCR-processed
@@ -850,13 +857,13 @@ async function send() {
 
     // Rich Preview Injection
     const ocrPreview = c.imgs && c.imgs.length > 0 ? c.imgs.filter(i => i.text && !i.processing && !i.text.includes('Failed')).map(i => i.text).join('\n---\n') : '';
-    let displayTxt = txt;
+    let displayTxt = overrideDisplay || txt;
     if (c.imgs && c.imgs.length > 0) {
         const imgHtml = c.imgs.map(i => `<img src="${i.data}" style="max-width:200px; max-height:100px; border-radius:4px; margin-bottom:8px; display:block; border:1px solid #e2e8f0;">`).join('');
         if (ocrPreview) {
-            displayTxt = `${imgHtml}${txt}\n\n*${c.imgs.length} Image(s) Attached — OCR Extracted Text:*\n\n\`\`\`text\n${ocrPreview.slice(0, 500)}${ocrPreview.length > 500 ? '...' : ''}\n\`\`\``;
+            displayTxt = `${imgHtml}${overrideDisplay || txt}\n\n*${c.imgs.length} Image(s) Attached — OCR Extracted Text:*\n\n\`\`\`text\n${ocrPreview.slice(0, 500)}${ocrPreview.length > 500 ? '...' : ''}\n\`\`\``;
         } else {
-            displayTxt = `${imgHtml}${txt}`;
+            displayTxt = `${imgHtml}${overrideDisplay || txt}`;
         }
     }
 
@@ -878,12 +885,21 @@ async function send() {
         // --- LOG CONTEXT ---
         let logContext = c.logs.length > 0 ? `\n\n[DIAGNOSTIC DATA - ${c.logs.length} FILES ATTACHED]` : "";
         c.logs.forEach(l => {
-            logContext += `\n\n=== SOURCE: ${l.name} ===\n${l.content.slice(0, 15000)}\n=== END: ${l.name} ===`;
+            const limit = 100000; // 100k chars
+            let content = l.content;
+            if (content.length > limit) {
+                const head = content.slice(0, limit * 0.7);
+                const tail = content.slice(-limit * 0.3);
+                content = `${head}\n\n... [TRUNCATED ${content.length - limit} CHARACTERS] ...\n\n${tail}`;
+            }
+            logContext += `\n\n=== SOURCE: ${l.name} ===\n${content}\n=== END: ${l.name} ===`;
         });
 
         const summaryText = $('issueSummary').value || 'NO SUMMARY PROVIDED';
         const sysPrompt = scrubPII(`[OFFICIAL ISSUE SUMMARY - AUTHORITATIVE SOURCE]:
 ${summaryText}
+
+[CURRENT ANALYSIS TIME]: ${new Date().toLocaleString()}
 
 ${getSysPrompt(promptMode)}
 
@@ -1314,10 +1330,8 @@ $('imgFileIn').onchange = e => handleImages(e.target.files);
 
 
 $('btnAnalyse').onclick = () => {
-    if (!$('chatIn').value.trim()) {
-        $('chatIn').value = "Please provide a forensic analysis of the attached logs.";
-    }
-    send();
+    const analysisPrompt = "Please provide a detailed forensic analysis of the attached logs.";
+    send(analysisPrompt, "🔍 Analysing attached logs...");
     
     const b = $('bodyR');
     b.style.display = 'none';
@@ -1390,7 +1404,14 @@ $('btnGenerateJira').onclick = async () => {
     const notes      = $('meetingNotes').value || '';
     const chatCtx    = c.msgs.slice(-20).map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
     const logCtx     = c.logs.length > 0 
-        ? c.logs.map(l => `=== LOG: ${l.name} ===\n${l.content.substring(0, 8000)}`).join('\n\n')
+        ? c.logs.map(l => {
+            const limit = 30000;
+            let content = l.content;
+            if (content.length > limit) {
+                content = content.slice(0, limit * 0.6) + `\n\n... [TRUNCATED] ...\n\n` + content.slice(-limit * 0.4);
+            }
+            return `=== LOG: ${l.name} ===\n${content}`;
+        }).join('\n\n')
         : 'No logs attached.';
 
     const JIRA_TEMPLATE = `*{color:#de350b}Requirements for the Jira Filing: [https://wiki.soti.net/index.php?title=Artifacts_Required_for_Jira]{color}*
