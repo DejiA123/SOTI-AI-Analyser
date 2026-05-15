@@ -1591,11 +1591,8 @@ Name of the log file:
 
 Log Analysis:
 {code:java}
-// Code placeholder
-// When providing log snippets, please place them inside a {code}
-Keyword for better formatting and visibility
-{code:java}
- {code}
+[INSERT RAW LOG SNIPPETS HERE]
+{code}
 
 *----------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*L3/SME Engineer*{color}
@@ -1616,6 +1613,7 @@ Otherwise, why was L3/SME not consulted:`;
 5. PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they appear in the template.
 6. If a field is unknown, write "N/A" or "TBC" - but NEVER omit the field.
 7. For Log Analysis, you MUST extract real technical evidence from the attached logs.
+8. The 'Log Analysis' section MUST contain raw log snippets (timestamps + error lines). Do NOT provide a textual explanation or summary in this section; provide only the raw technical evidence inside the code block.
 
 YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
 
