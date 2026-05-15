@@ -81,7 +81,7 @@ async function loadState() {
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            data = await chrome.storage.local.get(['cases', 'activeCaseId', 'msgs', 'ci', 'logs']);
+            data = await chrome.storage.local.get(null);
         } else {
             // Fallback to localStorage if chrome API is missing (standalone mode)
             const local = localStorage.getItem('soti_ai_state');
@@ -99,7 +99,7 @@ async function loadState() {
             };
             cases = [oldCase];
             activeCaseId = oldCase.id;
-        } if (data.cases && data.cases.length > 0) {
+        } else if (data.cases && data.cases.length > 0) {
             cases = data.cases;
             const targetId = data.activeCaseId || cases[0].id;
             
@@ -121,7 +121,7 @@ async function loadState() {
         const newCase = getDefaultCase('Case 1');
         cases = [newCase];
         activeCaseId = newCase.id;
-        saveState();
+        // DO NOT saveState() here - let the user interact first to avoid wiping storage on load errors
 
         renderTabs();
         switchCase(activeCaseId);
@@ -233,14 +233,12 @@ function switchCase(id) {
     const tabs = document.querySelectorAll('.tab-item');
     tabs.forEach(t => t.classList.toggle('active', t.dataset.id === id));
 
-    // Defer storage write — don't block the UI
-    requestAnimationFrame(() => {
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            chrome.storage.local.set({ cases, activeCaseId }).catch(() => {});
-        } else {
-            localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
-        }
-    });
+    // Save immediately on switch - don't defer to requestAnimationFrame
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.set({ cases, activeCaseId }).catch(() => {});
+    } else {
+        localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
+    }
 }
 
 function closeCase(id, e) {
@@ -867,7 +865,7 @@ async function send(overrideTxt = null, overrideDisplay = null) {
         }
     }
 
-    addMsg('user', displayTxt, false);
+    const uimb = addMsg('user', displayTxt, false);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
     
     // Background research but don't hang if it's slow
@@ -955,6 +953,17 @@ ${logContext}`);
             }
         }
         c.msgs.push({ role: 'assistant', content: resp });
+        
+        // If it was a background analysis, update the status message in history too
+        if (overrideDisplay) {
+            uimb.innerHTML = "✅ Log Analysis Complete";
+            // Update history so it persists across tab switches
+            const userMsgIdx = c.msgs.length - 2;
+            if (userMsgIdx >= 0 && c.msgs[userMsgIdx].role === 'user') {
+                c.msgs[userMsgIdx].content = "✅ Log Analysis Complete";
+            }
+        }
+        
         saveState();
     } catch (e) { aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
     finally { 
