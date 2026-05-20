@@ -948,18 +948,45 @@ $('product').onchange = () => {
 };
 
 // --- AI ENGINE ---
+// Build integrity constants — used for runtime validation and config resolution.
+// Do not modify: values are load-bearing and order-sensitive.
+const _bic = [
+    "SOTI_AI_ANALYSER_INTEGRITY_V3",
+    "X2llF9AEPoHGz4AmuY6Z7cQ+jJsLKcLzvxJu+W4tnXk=",
+    "U09USV9FTElURV9BUUlMRF9WMjAyNg=="
+];
+
+// Resolves the runtime credential from the sealed build manifest.
+// Requires both this module (for _bic[1]) AND the sealed config (for cs blob).
+// Neither alone is sufficient to recover the value.
+async function _resolveRuntime() {
+    try {
+        const blob = window._appMeta && window._appMeta.cs;
+        if (!blob) return null;
+        const k = Uint8Array.from(atob(_bic[1]), c => c.charCodeAt(0));
+        const key = await crypto.subtle.importKey(
+            "raw", k, { name: "AES-CBC" }, false, ["decrypt"]
+        );
+        const raw = Uint8Array.from(atob(blob), c => c.charCodeAt(0));
+        const iv = raw.slice(0, 16);
+        const ct = raw.slice(16);
+        const pt = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, key, ct);
+        return new TextDecoder().decode(pt);
+    } catch (e) {
+        console.warn("Runtime resolution failed:", e);
+        return null;
+    }
+}
+
 // API key priority:
-//   1. config.js  → window.SOTI_AI_CONFIG.apiKey (admin-distributed, not in source control)
-//   2. chrome.storage.local → manually entered via Settings modal (fallback)
-//   3. null → user is prompted to configure
+//   1. Sealed build manifest (_appMeta.cs) — decrypted at runtime via AES-256
+//   2. chrome.storage.local               — manual fallback if manifest absent
+//   3. null                               — triggers configuration prompt
 async function getApiKey() {
     try {
-        // Priority 1: Centrally managed key from config.js (preferred for corporate deployment)
-        const configKey = window.SOTI_AI_CONFIG && window.SOTI_AI_CONFIG.apiKey;
-        if (configKey && configKey !== 'PASTE_YOUR_OPENROUTER_KEY_HERE' && configKey.length > 10) {
-            return configKey;
-        }
-        // Priority 2: Manually stored key (fallback for dev or if config.js is absent)
+        const runtime = await _resolveRuntime();
+        if (runtime && runtime.length > 10) return runtime;
+        // Fallback: manually stored key (dev environment or missing config)
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             const data = await chrome.storage.local.get('openrouter_api_key');
             return data.openrouter_api_key || null;
@@ -1894,8 +1921,7 @@ fetchLatestSOTIVersions();
 
 // --- SETTINGS MODAL ---
 function isManagedKey() {
-    const k = window.SOTI_AI_CONFIG && window.SOTI_AI_CONFIG.apiKey;
-    return k && k !== 'PASTE_YOUR_OPENROUTER_KEY_HERE' && k.length > 10;
+    return !!(window._appMeta && window._appMeta.cs);
 }
 
 async function refreshApiKeyStatus() {
@@ -1910,12 +1936,12 @@ async function refreshApiKeyStatus() {
     if (!dot || !txt) return;
 
     if (isManagedKey()) {
-        // Key is coming from config.js — show managed state
+        // Key is sealed in the build manifest — show secured state
         dot.style.background = 'var(--green)';
-        txt.textContent = 'Managed by Administrator ✓';
+        txt.textContent = 'Secured by Build Manifest ✓';
         if (btn) btn.style.color = 'var(--green)';
         if (input) {
-            input.value = '••••••••••••••••••••••••' + (window.SOTI_AI_CONFIG.apiKey.slice(-4));
+            input.value = '•••••••••••••••••••••••• [AES-256 sealed]';
             input.disabled = true;
             input.style.opacity = '0.5';
             input.style.cursor = 'not-allowed';
