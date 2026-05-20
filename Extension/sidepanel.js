@@ -1047,7 +1047,14 @@ const OpenRouterAI = {
                     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: 'POST',
                         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ ...req, model: m, messages: messages })
+                        body: JSON.stringify({ 
+                            ...req, 
+                            model: m, 
+                            messages: messages,
+                            // ISO 27001 / ZDR: Only route to providers that guarantee
+                            // zero data retention — no logging, no training on our data.
+                            zdr: true
+                        })
                     });
                     if (res.status === 429) { await new Promise(r => setTimeout(r, 1000)); continue; }
                     if (!res.ok) { 
@@ -1887,7 +1894,10 @@ ${JIRA_TEMPLATE}`);
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userPrompt }
                 ],
-                max_tokens: 4000
+                max_tokens: 4000,
+                // ISO 27001 / ZDR: Only route to providers that guarantee
+                // zero data retention — no logging, no training on our data.
+                zdr: true
             })
         });
         const data = await res.json();
