@@ -407,107 +407,139 @@ function getSmartLogSnippet(content, limit = 300000) {
     if (content.length <= limit) return content;
 
     const lines = content.split('\n');
+    const totalLines = lines.length;
 
-    // --- TIMESTAMP EXTRACTION ---
-    const extractTimestamp = l => {
-        const m = l.match(/(\d{4}[-\/]\d{2}[-\/]\d{2}[\sT]\d{2}:\d{2}:\d{2}[\.\d]*)/);
-        return m ? m[1] : null;
+    const forensicEntries = [];
+    const seenLineNums = new Set();
+
+    let inException = false;
+    let exceptionLinesCount = 0;
+
+    for (let i = 0; i < totalLines; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        const hasExceptionWord = /\b(Exception|ExceptionChain|Err|Error|FATAL|Critical|Failed|Timeout|Deadlock)\b/i.test(line);
+        const hasStackFrameIndicators = /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
+
+        if (inException) {
+            if (hasStackFrameIndicators || trimmed === "" || (exceptionLinesCount < 3)) {
+                if (!seenLineNums.has(i + 1)) {
+                    forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
+                    seenLineNums.add(i + 1);
+                }
+                exceptionLinesCount++;
+                if (exceptionLinesCount > 40) {
+                    inException = false;
+                }
+            } else {
+                inException = false;
+            }
+        }
+
+        if (!inException && hasExceptionWord && (hasStackFrameIndicators || /Exception\b|Exception:/i.test(line) || /^\s*at\s+/i.test(line) || (i < totalLines - 1 && /^\s*at\s+/i.test(lines[i + 1])))) {
+            inException = true;
+            exceptionLinesCount = 1;
+            if (!seenLineNums.has(i + 1)) {
+                forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
+                seenLineNums.add(i + 1);
+            }
+        } else if (!inException) {
+            const isCriticalLine = /\b(ERROR|FATAL|CRITICAL|Deadlock|Timeout expired)\b/i.test(line);
+            const isSotiCode = /\bMCMR-\d+\b/i.test(line);
+
+            if (isCriticalLine || isSotiCode) {
+                const start = Math.max(0, i - 3);
+                const end = Math.min(totalLines - 1, i + 3);
+                for (let j = start; j <= end; j++) {
+                    if (!seenLineNums.has(j + 1)) {
+                        forensicEntries.push({ lineNum: j + 1, text: lines[j], isError: (j === i) });
+                        seenLineNums.add(j + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    forensicEntries.sort((a, b) => a.lineNum - b.lineNum);
+
+    const compressedEntries = [];
+    let repeatCount = 0;
+    let lastErrorSig = "";
+
+    const getErrorSignature = (text) => {
+        return text.replace(/\d{4}[-\/]\d{2}[-\/]\d{2}[\sT]\d{2}:\d{2}:\d{2}[\.\d]*/g, "")
+                   .replace(/0x[0-9a-fA-F]+/g, "")
+                   .replace(/\d+/g, "")
+                   .trim();
     };
 
-    // --- PATTERN MATCHERS ---
-    const isExcStart   = l => /\b(Exception|Error|FATAL|Critical)\b/i.test(l) &&
-        (/\b(System\.|SOTI\.|Mobicontrol\.|MobiControl\.|Microsoft\.|at\s+\S+\.\S+\(|Unhandled|thrown|stack\s*trace)/i.test(l) ||
-         /\b(EXCEPTION|STACK TRACE)\b/i.test(l));
-    const isStackFrame = l => /^\s+(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(l);
-    const isErrorLine  = l => /\b(ERROR|FATAL|CRITICAL)\b/.test(l) && !isStackFrame(l);
-    const isWarnLine   = l => /\bWARN(ING)?\b/i.test(l);
-    const isSotiCode   = l => /\bMCMR-\d+\b/i.test(l);
-    const isInnerExc   = l => /Inner Exception|---> /i.test(l);
-
-    // --- PHASE 1: FULL-FILE SCAN — extract every incident ---
-    const incidents = [];
-    let cur = null, idle = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const critical = isExcStart(line) || isErrorLine(line) || isSotiCode(line);
-        const relevant = isStackFrame(line) || isWarnLine(line) || isInnerExc(line);
-
-        if (critical) {
-            if (!cur) {
-                const pre = [];
-                for (let k = Math.max(0, i - 3); k < i; k++) pre.push(lines[k]);
-                cur = { type: isExcStart(line) ? 'EXCEPTION' : isSotiCode(line) ? 'MCMR' : 'ERROR',
-                        firstLine: i + 1, ts: extractTimestamp(line), lines: pre, keyLine: line };
+    for (let i = 0; i < forensicEntries.length; i++) {
+        const entry = forensicEntries[i];
+        if (entry.isError) {
+            const sig = getErrorSignature(entry.text);
+            if (sig === lastErrorSig && sig.length > 10) {
+                repeatCount++;
+                if (repeatCount <= 3) {
+                    compressedEntries.push(entry);
+                }
+                continue;
+            } else {
+                if (repeatCount > 3) {
+                    compressedEntries.push({
+                        lineNum: entry.lineNum - 1,
+                        text: `... [Suppressed ${repeatCount - 3} consecutive identical occurrences of this error] ...`,
+                        isError: false
+                    });
+                }
+                repeatCount = 0;
+                lastErrorSig = sig;
             }
-            cur.lines.push(line);
-            idle = 0;
-        } else if (cur && (relevant || idle < 5)) {
-            cur.lines.push(line);
-            if (!relevant) idle++; else idle = 0;
-        } else if (cur) {
-            incidents.push(cur); cur = null; idle = 0;
-        }
-    }
-    if (cur) incidents.push(cur);
-
-    // --- PHASE 2: DE-DUPLICATE & COUNT ---
-    // Group incidents by their key error line (first 120 chars) to find recurring errors
-    const groups = new Map();
-    incidents.forEach(inc => {
-        const key = (inc.keyLine || '').trim().substring(0, 120);
-        if (!groups.has(key)) {
-            groups.set(key, { first: inc, count: 1, timestamps: [inc.ts].filter(Boolean) });
         } else {
-            const g = groups.get(key);
-            g.count++;
-            if (inc.ts) g.timestamps.push(inc.ts);
+            if (repeatCount > 3) {
+                compressedEntries.push({
+                    lineNum: entry.lineNum - 1,
+                    text: `... [Suppressed ${repeatCount - 3} consecutive identical occurrences of this error] ...`,
+                    isError: false
+                });
+            }
+            repeatCount = 0;
+            lastErrorSig = "";
         }
-    });
-
-    // --- PHASE 3: BUILD PRE-STRUCTURED FORENSIC SUMMARY ---
-    let report = '';
-    if (groups.size > 0) {
-        report += '\n\n========================================';
-        report += '\n  FORENSIC ANALYSIS — PRE-PROCESSED';
-        report += `\n  ${lines.length} lines scanned | ${incidents.length} incidents found | ${groups.size} unique error types`;
-        report += '\n========================================\n';
-
-        // SECTION A: Error Summary Table (compact, high-signal)
-        report += '\n[ERROR SUMMARY TABLE]\n';
-        let idx = 0;
-        groups.forEach((g, key) => {
-            idx++;
-            report += `  #${idx}. [${g.first.type}] x${g.count} | First: ${g.timestamps[0] || 'N/A'} | Last: ${g.timestamps[g.timestamps.length - 1] || 'N/A'}\n`;
-            report += `      ${key}\n`;
+        compressedEntries.push(entry);
+    }
+    if (repeatCount > 3) {
+        compressedEntries.push({
+            lineNum: forensicEntries[forensicEntries.length - 1].lineNum,
+            text: `... [Suppressed ${repeatCount - 3} consecutive identical occurrences of this error] ...`,
+            isError: false
         });
-
-        // SECTION B: Full incident details (the first occurrence of each unique error — with full stack trace)
-        report += '\n[FULL INCIDENT DETAILS — first occurrence of each unique error]\n';
-        idx = 0;
-        groups.forEach((g) => {
-            idx++;
-            report += `\n--- INCIDENT #${idx} [${g.first.type}] Line ${g.first.firstLine} | Occurrences: ${g.count} ---\n`;
-            // Limit each incident block to 30 lines to stay within budget
-            const block = g.first.lines.slice(0, 30);
-            block.forEach(l => { report += l + '\n'; });
-            if (g.first.lines.length > 30) report += `  ... (${g.first.lines.length - 30} more lines in this stack trace)\n`;
-        });
-
-        report += '\n======== END FORENSIC ANALYSIS ========';
-    } else {
-        report = '\n\n[FORENSIC SCAN: No exceptions or ERROR-level entries found in this file.]';
     }
 
-    // --- PHASE 4: HEAD + TAIL (small — just for config context and recent activity) ---
-    // Keep these small so the model's context window is used for the forensic data
-    const headSize = 5000;
-    const tailSize = 10000;
+    let forensicReport = "";
+    if (compressedEntries.length > 0) {
+        forensicReport = `\n\n=== FORENSIC INCIDENT REPORT (COMPLETE & CHRONOLOGICAL) ===\n`;
+        forensicReport += `Scanned all ${totalLines} lines. Capturing all exceptions, errors, and relevant context chronologically.\n`;
+        
+        let lastLineNum = -10;
+        compressedEntries.forEach(entry => {
+            if (entry.lineNum - lastLineNum > 1) {
+                forensicReport += `\n[Line ${entry.lineNum}]\n`;
+            }
+            forensicReport += `${entry.text}\n`;
+            lastLineNum = entry.lineNum;
+        });
+        forensicReport += `\n=== END FORENSIC INCIDENT REPORT ===`;
+    } else {
+        forensicReport = `\n\n[FORENSIC SCAN COMPLETE: No exceptions, warnings, or error-level entries detected in this log file.]`;
+    }
+
+    const headSize = 15000;
+    const tailSize = 45000;
     const head = content.slice(0, headSize);
     const tail = content.slice(-tailSize);
 
-    // Put forensic report LAST so it survives any Ollama context truncation
-    return `[LOG HEAD — config/startup — first ${headSize} chars]\n${head}\n\n[LOG TAIL — most recent activity — last ${tailSize} chars]\n${tail}\n${report}`;
+    return `[LOG HEAD — config/startup — first ${headSize} chars]\n${head}\n\n[LOG TAIL — most recent activity — last ${tailSize} chars]\n${tail}\n${forensicReport}`;
 }
 
 function hideToast() {
@@ -583,49 +615,48 @@ SOTI ARCHITECTURE:
 }
 
 function getLeanLogPrompt() {
-    return `You are a Senior SOTI Log Forensics Engineer. Analyse the logs and report every issue accurately.
+    return `You are a Senior SOTI Log Forensics Engineer. Your primary directive is to conduct a high-fidelity chronological triage and root-cause analysis of SOTI log files.
 
-THE LOG DATA YOU RECEIVE HAS BEEN PRE-PROCESSED FOR YOU:
-1. [ERROR SUMMARY TABLE] — a compact list of every unique error type, how many times it occurred, and the first/last timestamps.
-2. [FULL INCIDENT DETAILS] — the first occurrence of each unique error with its full stack trace, inner exceptions, and surrounding context lines.
-3. [LOG HEAD] — startup config and environment info.
-4. [LOG TAIL] — the most recent log activity.
+The log data is presented in three sections:
+1. [LOG HEAD] — startup configurations, environment parameters, and service initialization.
+2. [LOG TAIL] — the most recent raw activities.
+3. === FORENSIC INCIDENT REPORT === — a complete, line-by-line chronological extraction of all exceptions, stack traces, inner exceptions, and warning/error events from the ENTIRE log file. Repeating loops are compressed automatically.
 
-YOU MUST report on EVERY incident listed in the ERROR SUMMARY TABLE. Do not skip any.
-
-OUTPUT THIS EXACT FORMAT:
+YOU MUST OUTPUT THIS EXACT STRUCTURE:
 
 ## LOG ANALYSIS REPORT
 
-### 1. ERROR SUMMARY
-For EACH error in the [ERROR SUMMARY TABLE], report:
-- What it is (exception type and message)
-- How many times it occurred
-- When it first and last appeared
-- The inner exception if any (the ---> chain — the innermost one is the true cause)
-- The stack trace origin (the BOTTOM "at" frame is where it started)
+### 1. CHRONOLOGICAL ERROR TIMELINE
+Trace every single error and exception event chronologically as they occurred in the FORENSIC INCIDENT REPORT.
+Format:
+- [Line Number] [TIMESTAMP] — Error detail / Exception class & message
+*Highlight if a service was restarted or connection dropped.*
 
-### 2. CHRONOLOGICAL TIMELINE
-List all errors/events oldest to newest:
-[TIMESTAMP] — what happened
+### 2. EXCEPTION ANALYSIS & DEEP DIVE
+For the distinct critical failure signatures found:
+- **Exception Class**: (e.g. System.Data.SqlClient.SqlException)
+- **Inner Exception Details**: (If chained via '--->' or 'caused by', extract the innermost root exception and its details)
+- **Stack Trace Origin**: Quote the bottom-most frame (the originating method call in SOTI code) and top-most frame (where it was thrown).
+- **Incident Occurrence & Line Range**: State the line range and occurrences.
 
-### 3. ROOT CAUSE
-The FIRST error chronologically is the prime suspect. State the root cause in one sentence with the exact timestamp and error message that proves it.
+### 3. THE PROPAGATION PATH (DOMINO EFFECT)
+Draw the explicit step-by-step causal chain showing how the first chronological error triggered subsequent failures leading to the final symptom.
+Format:
+[Root Cause Event] -> [Downstream Component Error] -> [User-Visible Symptom]
+*Provide proof citations (line number & timestamp) for each link in the chain.*
 
-### 4. PROPAGATION CHAIN
-[Root Cause] -> [Next failure] -> [Next failure] -> [What the user sees]
+### 4. ROOT CAUSE VERDICT
+A single, definitive sentence declaring the root cause, backed by the exact line number, timestamp, and exception type.
 
-### 5. FIX
-Concrete steps using SOTI service names, ports, and config paths.
+### 5. CONCRETE MITIGATION & FIX
+Provide SOTI-specific resolution steps (e.g., specific port configurations, SQL collations, registry keys, Windows service actions, or SOTI console paths).
 
 RULES:
-- Report on ALL incidents. Do not summarise or skip any.
-- Every claim must cite the timestamp from the log.
-- Stack traces: read BOTTOM-UP. The bottom "at" frame is the origin.
-- Inner exceptions (--->) : the INNERMOST one is the true root cause.
-- FIRST error chronologically = prime suspect, not the loudest.
-- SOTI Architecture: MS <-> SQL <-> DS <-> Agent. Ports: MS/DS=5494, Signal=13131, APNS=2197, Web=443.
-- Web Console is inside SOTI Management Service — never mention IIS.`;
+- Read stack traces bottom-up to locate the originating code framework.
+- The innermost exception in a nested chain is the true root cause, not the outer wrapper.
+- Distinguish between causal errors (the origin) and symptomatic errors (the downstream impact).
+- Port Reference: MS-DS handshake (5494), Signal (13131), APNS (2197), Web (443).
+- The Web Console is hosted directly inside the SOTI Management Service (never mention IIS/Apache).`;
 }
 
 function getSysPrompt(mode = 'full') {
