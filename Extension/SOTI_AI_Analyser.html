@@ -21,7 +21,7 @@
             </div>
         </div>
         <div class="tr">
-            <button class="btn" id="btnSettings" title="Settings" style="padding:6px 8px; display:none">
+            <button class="btn" id="btnSettings" title="Settings" style="padding:6px 8px">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
             </button>
             <button class="btn btn-new" id="btnNew" title="Start New Case">
@@ -72,11 +72,6 @@
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px; opacity:0.8"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
                     </button>
                 </div>
-                <div class="fld" style="display: none"><span class="flbl">AI Model</span>
-                    <select class="fsel" id="modelSel">
-                        <option value="deepseek/deepseek-v4-flash" selected>DeepSeek V4 Flash (Paid) ⚡</option>
-                    </select>
-                </div>
                 <div class="fld">
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <span class="flbl">Meeting Notes</span>
@@ -87,8 +82,8 @@
                     <textarea class="ftxt" id="meetingNotes" rows="6" placeholder="Manual notes..."></textarea>
                 </div>
                 <div class="fld"><span class="flbl">Case Number</span><input class="finput" id="caseNum" placeholder="e.g. 0012345678"></div>
-                <div class="fld"><span class="flbl">Account Scrub</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
-                <div class="fld"><span class="flbl">Customer Scrub</span><input class="finput" id="scrubCustomer" placeholder="e.g. John Doe"></div>
+                <div class="fld" style="display: none;"><span class="flbl">Account Scrub</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
+                <div class="fld" style="display: none;"><span class="flbl">Customer Scrub</span><input class="finput" id="scrubCustomer" placeholder="e.g. John Doe"></div>
                 <div class="fld"><span class="flbl">Product</span>
                     <select class="fsel" id="product">
                         <option value="">— Select —</option>
@@ -174,7 +169,7 @@
                 <div class="welcome" id="welcome">
                     <div class="w-hex-wrap">⬡</div>
                     <div class="w-title">SOTI AI Analyser</div>
-                    <div class="w-sub">Powered by Cloud Intelligence. Fill in the case information, upload logs, and begin secure, Excellent technical analysis.</div>
+                    <div class="w-sub">100% Local AI — powered by Ollama on your machine. No cloud, no API key, no data sent externally.</div>
                     
                     <div class="w-features">
                         <div class="w-card"><span class="w-icon">📋</span> Complete the case form to give the AI full context</div>
@@ -315,51 +310,49 @@
 
     <div id="toast" class="toast"></div>
 
-    <!-- Settings Modal (API Key Management) -->
+    <!-- Settings Modal (Ollama AI) -->
     <div class="backdrop" id="mSettings" style="display:none">
-        <div class="modal" style="max-width:420px">
+        <div class="modal" style="max-width:400px">
             <div class="mhdr" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
                 <div class="mtitle" style="display:flex;align-items:center;gap:8px">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                    Settings
+                    AI Settings — Ollama
                 </div>
                 <button class="mcls" id="mSettingsClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
             </div>
 
-            <!-- API Key Status -->
-            <div id="apiKeyStatus" style="display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:8px;margin-bottom:16px;font-size:12px;font-weight:600;background:rgba(255,255,255,0.04);border:1px solid var(--border)">
-                <div id="apiKeyDot" style="width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0"></div>
-                <span id="apiKeyStatusTxt">No API key configured</span>
-            </div>
+            <!-- Ollama Status -->
+            <div id="localAiStatus" style="font-size:11px;color:var(--txt2);padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid var(--border);margin-bottom:14px">Connecting to Ollama...</div>
 
             <div class="fld">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-                    <span class="flbl" style="margin-bottom:0">OpenRouter API Key</span>
-                    <a href="https://openrouter.ai/keys" target="_blank" style="font-size:10px;color:var(--blue);text-decoration:none;opacity:0.8">Get a key ↗</a>
+                    <span class="flbl" style="margin-bottom:0">Ollama URL</span>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
-                    <input type="password" class="finput" id="apiKeyInput" placeholder="sk-or-v1-..." style="flex:1;font-family:monospace;letter-spacing:0.05em" autocomplete="off" spellcheck="false">
-                    <button class="btn" id="btnToggleKeyVis" title="Show/Hide key" style="padding:6px 8px;flex-shrink:0">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    <input class="finput" id="localAiUrl" value="http://localhost:11434" placeholder="http://localhost:11434" style="flex:1;font-family:monospace;font-size:11px">
+                    <button class="btn" id="btnRefreshModels" title="Detect models" style="padding:6px 8px;flex-shrink:0">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                     </button>
                 </div>
-                <p style="font-size:10px;color:var(--txt2);margin-top:8px;line-height:1.5">
-                    Your key is stored only in this browser's sandboxed extension storage. It is never written to source code, logged, or transmitted anywhere other than OpenRouter's API.
-                </p>
             </div>
 
-            <!-- Data Retention Info -->
-            <div style="padding:10px 12px;border-radius:8px;margin-top:4px;font-size:11px;color:var(--txt2);background:rgba(255,255,255,0.03);border:1px solid var(--border);line-height:1.6">
-                <strong style="color:var(--txt1);display:block;margin-bottom:4px">🔒 Data Retention Policy</strong>
-                Cases and logs are automatically purged after <strong style="color:var(--blue)">30 days</strong>. Logs are stored in PII-scrubbed form only. No data leaves this device except via the OpenRouter API call.
+            <div class="fld" style="margin-top:12px">
+                <span class="flbl">Model</span>
+                <select class="fsel" id="localAiModelSel">
+                    <option value="">Detecting models...</option>
+                </select>
             </div>
 
-            <div class="mact" style="display:flex;justify-content:space-between;gap:10px;margin-top:20px">
-                <button class="btn" id="btnClearKey" style="color:var(--red);border-color:var(--red);opacity:0.8">Clear Key</button>
-                <div style="display:flex;gap:8px">
-                    <button class="btn btn-sec" id="btnSettingsCancel">Cancel</button>
-                    <button class="btn btn-ok" id="btnSaveKey" style="background:var(--blue);color:#fff;border:none">Save Key</button>
-                </div>
+            <div style="padding:10px 12px;border-radius:8px;margin-top:14px;font-size:11px;color:var(--txt2);background:rgba(255,255,255,0.03);border:1px solid var(--border);line-height:1.65">
+                <strong style="color:var(--txt1);display:block;margin-bottom:5px">🖥 Running Ollama locally?</strong>
+                <div>1. Install <a href="https://ollama.com" target="_blank" style="color:var(--blue);text-decoration:none">Ollama</a> — free &amp; open-source.</div>
+                <div>2. Pull a model: <code style="background:rgba(0,0,0,0.3);padding:1px 6px;border-radius:4px;font-size:10px">ollama pull llama3.2</code></div>
+                <div>3. Select it above and click Save.</div>
+            </div>
+
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">
+                <button class="btn btn-sec" onclick="document.getElementById('mSettings').style.display='none'">Cancel</button>
+                <button class="btn btn-ok" id="btnSaveLocalAI" style="background:var(--blue);color:#fff;border:none">Save</button>
             </div>
         </div>
     </div>

@@ -820,3 +820,134 @@ body {
     from { transform: translateY(10px); opacity: 0; }
     to { transform: translateY(0); opacity: 1; }
 }
+
+/* ---- Local AI Toggle Switch ---- */
+.ai-toggle {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.ai-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.ai-slider {
+    position: absolute;
+    inset: 0;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 24px;
+    transition: all 0.25s ease;
+}
+
+.ai-slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--txt2);
+    border-radius: 50%;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+}
+
+.ai-toggle input:checked + .ai-slider {
+    background: var(--blue);
+    border-color: var(--blue);
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.35);
+}
+
+.ai-toggle input:checked + .ai-slider::before {
+    transform: translateX(20px) translateY(-50%);
+    background: #fff;
+}
+
+/* ---- Settings Tab Active State ---- */
+.settings-tab {
+    font-family: var(--font);
+    transition: color 0.2s, border-color 0.2s;
+}
+
+.settings-tab:hover {
+    color: var(--txt1) !important;
+}
+
+.settings-tab.active {
+    border-bottom-color: var(--blue) !important;
+    color: var(--blue) !important;
+}
+
+/* Image Preview Strip */
+.img-preview-strip {
+    display: flex;
+    gap: 8px;
+    padding: 8px 10px 4px;
+    overflow-x: auto;
+    flex-wrap: wrap;
+}
+
+.img-thumb {
+    width: 56px;
+    height: 56px;
+    border-radius: 6px;
+    background-size: cover;
+    background-position: center;
+    border: 1px solid var(--border2);
+    position: relative;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: transform 0.15s;
+}
+
+.img-thumb:hover { transform: scale(1.05); }
+
+.img-thumb.processing {
+    opacity: 0.6;
+    animation: pulse-dot 1.5s infinite;
+}
+
+.img-ocr-tag {
+    position: absolute;
+    bottom: 2px;
+    left: 2px;
+    background: rgba(99,102,241,0.85);
+    color: #fff;
+    font-size: 8px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    letter-spacing: 0.3px;
+}
+
+.img-del {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--red);
+    color: #fff;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    line-height: 1;
+    font-weight: 700;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+    transition: transform 0.15s;
+}
+
+.img-del:hover { transform: scale(1.2); }
+

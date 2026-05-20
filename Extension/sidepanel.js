@@ -405,84 +405,109 @@ function toast(msg, t = '', dur = 3000) {
 function getSmartLogSnippet(content, limit = 300000) {
     if (!content) return "";
     if (content.length <= limit) return content;
-    
-    // PHASE 1: FULL-FILE FORENSIC EXTRACTION — scan the ENTIRE log for critical evidence
-    // This ensures NO exception or error is missed, regardless of file size.
+
     const lines = content.split('\n');
-    const forensicLines = [];
-    const exceptionBlockLines = [];
-    let inExceptionBlock = false;
-    let exceptionBlockCount = 0;
-    
+
+    // --- TIMESTAMP EXTRACTION ---
+    const extractTimestamp = l => {
+        const m = l.match(/(\d{4}[-\/]\d{2}[-\/]\d{2}[\sT]\d{2}:\d{2}:\d{2}[\.\d]*)/);
+        return m ? m[1] : null;
+    };
+
+    // --- PATTERN MATCHERS ---
+    const isExcStart   = l => /\b(Exception|Error|FATAL|Critical)\b/i.test(l) &&
+        (/\b(System\.|SOTI\.|Mobicontrol\.|MobiControl\.|Microsoft\.|at\s+\S+\.\S+\(|Unhandled|thrown|stack\s*trace)/i.test(l) ||
+         /\b(EXCEPTION|STACK TRACE)\b/i.test(l));
+    const isStackFrame = l => /^\s+(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(l);
+    const isErrorLine  = l => /\b(ERROR|FATAL|CRITICAL)\b/.test(l) && !isStackFrame(l);
+    const isWarnLine   = l => /\bWARN(ING)?\b/i.test(l);
+    const isSotiCode   = l => /\bMCMR-\d+\b/i.test(l);
+    const isInnerExc   = l => /Inner Exception|---> /i.test(l);
+
+    // --- PHASE 1: FULL-FILE SCAN — extract every incident ---
+    const incidents = [];
+    let cur = null, idle = 0;
+
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        const upper = line.toUpperCase();
-        
-        // Detect start of an exception/stack trace block
-        const isExceptionStart = /\b(Exception|Error|FATAL|Critical)\b/i.test(line) && 
-            (/\b(System\.|SOTI\.|Mobicontrol\.|Microsoft\.|at\s+\S+\.\S+\(|Unhandled|thrown|stack\s*trace)/i.test(line) ||
-             upper.includes('EXCEPTION') || upper.includes('STACK TRACE'));
-        
-        const isStackFrame = /^\s+(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
-        const isErrorLine = /\b(ERROR|FATAL|CRITICAL)\b/.test(line) && !isStackFrame;
-        const isWarningNearError = /\bWARN(ING)?\b/i.test(line);
-        const isSotiCode = /\bMCMR-\d+\b/i.test(line);
-        
-        if (isExceptionStart) {
-            inExceptionBlock = true;
-            exceptionBlockCount = 0;
-        }
-        
-        if (inExceptionBlock) {
-            exceptionBlockLines.push({ lineNum: i + 1, text: line });
-            exceptionBlockCount++;
-            // End exception block after 50 lines or when we hit a non-stack, non-empty line
-            if (exceptionBlockCount > 50 || 
-                (exceptionBlockCount > 3 && !isStackFrame && !isExceptionStart && line.trim().length > 0 && !/^\s/.test(line))) {
-                inExceptionBlock = false;
+        const critical = isExcStart(line) || isErrorLine(line) || isSotiCode(line);
+        const relevant = isStackFrame(line) || isWarnLine(line) || isInnerExc(line);
+
+        if (critical) {
+            if (!cur) {
+                const pre = [];
+                for (let k = Math.max(0, i - 3); k < i; k++) pre.push(lines[k]);
+                cur = { type: isExcStart(line) ? 'EXCEPTION' : isSotiCode(line) ? 'MCMR' : 'ERROR',
+                        firstLine: i + 1, ts: extractTimestamp(line), lines: pre, keyLine: line };
             }
-        } else if (isErrorLine || isSotiCode) {
-            // Capture error line + 2 lines of context before and after
-            const ctxStart = Math.max(0, i - 2);
-            const ctxEnd = Math.min(lines.length - 1, i + 2);
-            for (let j = ctxStart; j <= ctxEnd; j++) {
-                forensicLines.push({ lineNum: j + 1, text: lines[j] });
-            }
+            cur.lines.push(line);
+            idle = 0;
+        } else if (cur && (relevant || idle < 5)) {
+            cur.lines.push(line);
+            if (!relevant) idle++; else idle = 0;
+        } else if (cur) {
+            incidents.push(cur); cur = null; idle = 0;
         }
     }
-    
-    // Deduplicate and sort forensic findings
-    const allForensic = [...exceptionBlockLines, ...forensicLines];
-    const seenLineNums = new Set();
-    const uniqueForensic = allForensic.filter(f => {
-        if (seenLineNums.has(f.lineNum)) return false;
-        seenLineNums.add(f.lineNum);
-        return true;
-    }).sort((a, b) => a.lineNum - b.lineNum);
-    
-    // Build forensic report
-    let forensicReport = "";
-    if (uniqueForensic.length > 0) {
-        forensicReport = `\n\n[FULL-FILE FORENSIC EXTRACTION: ${uniqueForensic.length} CRITICAL LINES FROM ${lines.length} TOTAL LINES]`;
-        forensicReport += `\n[Found ${exceptionBlockLines.length} exception/stack-trace lines and ${forensicLines.length} error/warning context lines]\n`;
-        
-        let lastLineNum = -10;
-        uniqueForensic.forEach(f => {
-            if (f.lineNum - lastLineNum > 3) {
-                forensicReport += `\n--- Line ${f.lineNum} ---\n`;
-            }
-            forensicReport += `${f.text}\n`;
-            lastLineNum = f.lineNum;
+    if (cur) incidents.push(cur);
+
+    // --- PHASE 2: DE-DUPLICATE & COUNT ---
+    // Group incidents by their key error line (first 120 chars) to find recurring errors
+    const groups = new Map();
+    incidents.forEach(inc => {
+        const key = (inc.keyLine || '').trim().substring(0, 120);
+        if (!groups.has(key)) {
+            groups.set(key, { first: inc, count: 1, timestamps: [inc.ts].filter(Boolean) });
+        } else {
+            const g = groups.get(key);
+            g.count++;
+            if (inc.ts) g.timestamps.push(inc.ts);
+        }
+    });
+
+    // --- PHASE 3: BUILD PRE-STRUCTURED FORENSIC SUMMARY ---
+    let report = '';
+    if (groups.size > 0) {
+        report += '\n\n========================================';
+        report += '\n  FORENSIC ANALYSIS — PRE-PROCESSED';
+        report += `\n  ${lines.length} lines scanned | ${incidents.length} incidents found | ${groups.size} unique error types`;
+        report += '\n========================================\n';
+
+        // SECTION A: Error Summary Table (compact, high-signal)
+        report += '\n[ERROR SUMMARY TABLE]\n';
+        let idx = 0;
+        groups.forEach((g, key) => {
+            idx++;
+            report += `  #${idx}. [${g.first.type}] x${g.count} | First: ${g.timestamps[0] || 'N/A'} | Last: ${g.timestamps[g.timestamps.length - 1] || 'N/A'}\n`;
+            report += `      ${key}\n`;
         });
+
+        // SECTION B: Full incident details (the first occurrence of each unique error — with full stack trace)
+        report += '\n[FULL INCIDENT DETAILS — first occurrence of each unique error]\n';
+        idx = 0;
+        groups.forEach((g) => {
+            idx++;
+            report += `\n--- INCIDENT #${idx} [${g.first.type}] Line ${g.first.firstLine} | Occurrences: ${g.count} ---\n`;
+            // Limit each incident block to 30 lines to stay within budget
+            const block = g.first.lines.slice(0, 30);
+            block.forEach(l => { report += l + '\n'; });
+            if (g.first.lines.length > 30) report += `  ... (${g.first.lines.length - 30} more lines in this stack trace)\n`;
+        });
+
+        report += '\n======== END FORENSIC ANALYSIS ========';
+    } else {
+        report = '\n\n[FORENSIC SCAN: No exceptions or ERROR-level entries found in this file.]';
     }
-    
-    // PHASE 2: HEAD + TAIL for general context (config/startup + recent activity)
-    const headSize = 30000;
-    const tailSize = 200000;
+
+    // --- PHASE 4: HEAD + TAIL (small — just for config context and recent activity) ---
+    // Keep these small so the model's context window is used for the forensic data
+    const headSize = 5000;
+    const tailSize = 10000;
     const head = content.slice(0, headSize);
     const tail = content.slice(-tailSize);
 
-    return `[START OF LOG (CONFIG/HEADERS — First ${headSize} chars)]\n${head}\n\n[FULL-FILE FORENSIC EXTRACTION — Every Exception, Error, and Critical line from the ENTIRE ${lines.length}-line log]${forensicReport}\n\n[END OF LOG (RECENT ACTIVITY — Last ${tailSize} chars)]\n${tail}`;
+    // Put forensic report LAST so it survives any Ollama context truncation
+    return `[LOG HEAD — config/startup — first ${headSize} chars]\n${head}\n\n[LOG TAIL — most recent activity — last ${tailSize} chars]\n${tail}\n${report}`;
 }
 
 function hideToast() {
@@ -527,61 +552,80 @@ const SCRUB_MAPS = {
 };
 
 function scrubPII(s) {
-    if (!s || typeof s !== 'string') return s;
+    // Zero scrubbing for Local AI - private on-device execution does not require data redaction.
+    return s;
+}
 
-    // 1. Scan for Emails to Establish/Update Identities
-    const emailRegex = /\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Z|a-z]{2,})\b/g;
-    let match;
-    while ((match = emailRegex.exec(s)) !== null) {
-        const fullEmail = match[0].toLowerCase();
-        const aliasPart = match[1];
-        const domain = match[2].toLowerCase();
-        if (domain.includes('soti.net')) {
-            if (!SCRUB_MAPS.support.has(fullEmail)) {
-                SCRUB_MAPS.supCount++;
-                const id = `Support_${SCRUB_MAPS.supCount}`;
-                SCRUB_MAPS.support.set(fullEmail, id);
-                const name = aliasPart.replace(/[._]/g, ' ');
-                if (name.length > 2) SCRUB_MAPS.names.set(name, id);
-            }
-        } else {
-            if (!SCRUB_MAPS.customer.has(fullEmail)) {
-                SCRUB_MAPS.custCount++;
-                const id = `Customer_${SCRUB_MAPS.custCount}`;
-                SCRUB_MAPS.customer.set(fullEmail, id);
-                const name = aliasPart.replace(/[._]/g, ' ');
-                if (name.length > 2) SCRUB_MAPS.names.set(name, id);
-            }
-        }
-    }
+function getLeanQAPrompt() {
+    const kbStr = JSON.stringify(SOTI_KB, null, 2);
+    return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
-    let res = s;
-    
-    // Apply Identity Aliasing
-    SCRUB_MAPS.support.forEach((id, email) => {
-        res = res.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), id);
-    });
-    SCRUB_MAPS.customer.forEach((id, email) => {
-        res = res.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), id);
-    });
-    SCRUB_MAPS.names.forEach((id, name) => {
-        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        res = res.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), id);
-    });
+CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [RELEASE NOTES], [PULSE SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse right now. You MUST use this data to answer questions.
 
-    // Apply UI Field Scrubbing
-    const uiAccount = $('scrubAccount').value;
-    const uiCustomer = $('scrubCustomer').value;
-    if (uiAccount && uiAccount.length > 2) res = res.replace(new RegExp(uiAccount.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '[COMPANY_ANON]');
-    if (uiCustomer && uiCustomer.length > 2) res = res.replace(new RegExp(uiCustomer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '[USER_ANON]');
+RULES YOU MUST FOLLOW:
+1. NEVER tell the user to "check the SOTI website", "visit support.soti.com", "check Pulse", or "contact support". YOU already have the data. Just answer directly.
+2. When asked about versions: look at [MC VERSIONS], [AGENT VERSIONS], or [IDENTITY VERSIONS] in this prompt. The FIRST version listed is the LATEST (they are sorted newest-first). State the version number directly.
+3. When asked about release notes or what's new: look at [RELEASE NOTES] and [PULSE SEARCH]. Extract and present the relevant information.
+4. When asked about features or troubleshooting: use the SOTI KB below and any [DEEP RESEARCH] content.
+5. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
+6. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
 
-    // Apply General Pattern Redactions
-    return res
-        .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP_ANON]')
-        .replace(/\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b/g, '[IP6_ANON]')
-        .replace(/\b(?:[0-9A-Fa-f]{2}[:-]){5}(?:[0-9A-Fa-f]{2})\b/g, '[MAC_ANON]')
-        .replace(/(?:\+|00)\d{1,4}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,12}/g, '[PHONE_ANON]')
-        .replace(/\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Road|Rd|Avenue|Ave|Blvd|Drive|Dr|Way|Court|Ct|Lane|Ln)\.?/gi, '[ADDRESS_ANON]');
+SOTI KNOWLEDGE BASE:
+${kbStr}
+
+SOTI ARCHITECTURE:
+- Management Service (MS) <-> SQL Database <-> Deployment Server (DS) <-> Device Agent
+- Ports: MS/DS Handshake=5494, Signal=13131, APNS=2197, Web=443/80
+- Web Console is hosted inside SOTI Management Service (NEVER mention IIS)
+- Enrollment: afw#mobicontrol, QR Code (tap Welcome 6x), Zero-Touch/KME
+- MobiControl versions: 202X.0.x series | Android Agent versions: 202X.1.x series
+- SOTI Identity: SSO, passwordless auth, LDAP/Entra ID integration`;
+}
+
+function getLeanLogPrompt() {
+    return `You are a Senior SOTI Log Forensics Engineer. Analyse the logs and report every issue accurately.
+
+THE LOG DATA YOU RECEIVE HAS BEEN PRE-PROCESSED FOR YOU:
+1. [ERROR SUMMARY TABLE] — a compact list of every unique error type, how many times it occurred, and the first/last timestamps.
+2. [FULL INCIDENT DETAILS] — the first occurrence of each unique error with its full stack trace, inner exceptions, and surrounding context lines.
+3. [LOG HEAD] — startup config and environment info.
+4. [LOG TAIL] — the most recent log activity.
+
+YOU MUST report on EVERY incident listed in the ERROR SUMMARY TABLE. Do not skip any.
+
+OUTPUT THIS EXACT FORMAT:
+
+## LOG ANALYSIS REPORT
+
+### 1. ERROR SUMMARY
+For EACH error in the [ERROR SUMMARY TABLE], report:
+- What it is (exception type and message)
+- How many times it occurred
+- When it first and last appeared
+- The inner exception if any (the ---> chain — the innermost one is the true cause)
+- The stack trace origin (the BOTTOM "at" frame is where it started)
+
+### 2. CHRONOLOGICAL TIMELINE
+List all errors/events oldest to newest:
+[TIMESTAMP] — what happened
+
+### 3. ROOT CAUSE
+The FIRST error chronologically is the prime suspect. State the root cause in one sentence with the exact timestamp and error message that proves it.
+
+### 4. PROPAGATION CHAIN
+[Root Cause] -> [Next failure] -> [Next failure] -> [What the user sees]
+
+### 5. FIX
+Concrete steps using SOTI service names, ports, and config paths.
+
+RULES:
+- Report on ALL incidents. Do not summarise or skip any.
+- Every claim must cite the timestamp from the log.
+- Stack traces: read BOTTOM-UP. The bottom "at" frame is the origin.
+- Inner exceptions (--->) : the INNERMOST one is the true root cause.
+- FIRST error chronologically = prime suspect, not the loudest.
+- SOTI Architecture: MS <-> SQL <-> DS <-> Agent. Ports: MS/DS=5494, Signal=13131, APNS=2197, Web=443.
+- Web Console is inside SOTI Management Service — never mention IIS.`;
 }
 
 function getSysPrompt(mode = 'full') {
@@ -947,88 +991,78 @@ $('product').onchange = () => {
     saveState();
 };
 
-// --- AI ENGINE ---
-// Build integrity constants — load-bearing, order-sensitive. Do not modify.
-const _bic = [
-    "SOTI_AI_ANALYSER_INTEGRITY_V3",
-    "X2llF9AEPoHGz4AmuY6Z7cQ+jJsLKcLzvxJu+W4tnXk=",
-    "MHtj9CHYyeIVHXzTNgdvlcxvmsgnl8rz/5qdcRnc5ErPouivFw/4qZZtQN0mgsnlRnhgjFszrTBOsfYN1+x8mwD0eiZh4McDpgQOgDlaGwOQ8LbGACk/bLaX1ByOXNW2",
-    "U09USV9FTElURV9BUUlMRF9WMjAyNg=="
-];
+// --- AI ENGINE (LOCAL — OLLAMA) ---
+let LOCAL_AI_URL = 'http://localhost:11434';
+let LOCAL_AI_MODEL = '';
+let LOCAL_AI_MODELS = [];
 
-// Decrypts the runtime credential using AES-256-CBC via the browser's SubtleCrypto API.
-// _bic[1] = AES key, _bic[2] = IV+ciphertext (base64). Fully self-contained.
-async function _resolveRuntime() {
+async function loadLocalAISettings() {
     try {
-        const k = Uint8Array.from(atob(_bic[1]), c => c.charCodeAt(0));
-        const key = await crypto.subtle.importKey(
-            "raw", k, { name: "AES-CBC" }, false, ["decrypt"]
-        );
-        const raw = Uint8Array.from(atob(_bic[2]), c => c.charCodeAt(0));
-        const pt = await crypto.subtle.decrypt(
-            { name: "AES-CBC", iv: raw.slice(0, 16) }, key, raw.slice(16)
-        );
-        return new TextDecoder().decode(pt);
-    } catch (e) {
-        return null;
-    }
-}
-
-// Resolves the API key — no config files, no user input, no manual steps.
-async function getApiKey() {
-    try {
-        const runtime = await _resolveRuntime();
-        if (runtime && runtime.length > 10) return runtime;
-        // Fallback: manually stored key (dev/testing only)
+        let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            const data = await chrome.storage.local.get('openrouter_api_key');
-            return data.openrouter_api_key || null;
-        }
-        return localStorage.getItem('openrouter_api_key') || null;
-    } catch (e) {
-        return null;
-    }
-}
-
-async function saveApiKey(key) {
-    try {
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            await chrome.storage.local.set({ openrouter_api_key: key });
+            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel']);
         } else {
-            localStorage.setItem('openrouter_api_key', key);
+            const s = localStorage.getItem('soti_local_ai');
+            if (s) data = JSON.parse(s);
         }
-    } catch (e) {
-        console.error('Failed to save API key', e);
-    }
+        LOCAL_AI_URL = data.localAiUrl || 'http://localhost:11434';
+        LOCAL_AI_MODEL = data.localAiModel || '';
+
+        // Auto-detect and select the first available model if none is set
+        if (!LOCAL_AI_MODEL) {
+            const models = await fetchOllamaModels(LOCAL_AI_URL);
+            if (models.length > 0) {
+                LOCAL_AI_MODEL = models.find(m => m.includes('llama3.2')) || models[0];
+                await saveLocalAISettings();
+            }
+        }
+    } catch (e) { console.warn('Failed to load local AI settings', e); }
 }
 
-async function clearApiKey() {
+async function saveLocalAISettings() {
     try {
+        const d = { localAiUrl: LOCAL_AI_URL, localAiModel: LOCAL_AI_MODEL };
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            await chrome.storage.local.remove('openrouter_api_key');
+            await chrome.storage.local.set(d);
         } else {
-            localStorage.removeItem('openrouter_api_key');
+            localStorage.setItem('soti_local_ai', JSON.stringify(d));
         }
+    } catch (e) { console.warn('Failed to save local AI settings', e); }
+}
+
+async function fetchOllamaModels(baseUrl) {
+    try {
+        const url = (baseUrl || LOCAL_AI_URL).replace(/\/$/, '');
+        const res = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return [];
+        const data = await res.json();
+        return (data.models || []).map(m => m.name).filter(Boolean);
     } catch (e) {
-        console.error('Failed to clear API key', e);
+        console.warn('Ollama not reachable', e);
+        return [];
     }
 }
 
-const ELITE_FREE_POOL = ["deepseek/deepseek-v4-flash"];
-let BLACKLISTED_MODELS = [];
+function updateLocalAIBadge() {
+    const pill = $('pulseHealth');
+    const statusTxt = $('statusTxt');
+    const dot = $('dot');
+    if (!pill) return;
+    pill.style.display = 'flex';
+    dot.style.background = LOCAL_AI_MODEL ? '#22c55e' : 'var(--warn)';
+    statusTxt.textContent = LOCAL_AI_MODEL ? `Local AI — ${LOCAL_AI_MODEL}` : 'Local AI — No model selected';
+}
 
+// Ollama-powered AI engine (streaming, OpenAI-compatible endpoint)
 const OpenRouterAI = {
     completions: {
         create: async (req) => {
-            let model = req.model || $('modelSel').value;
-            const isVisionModel = model.includes('gemini-3') || model.includes('gemini-2');
-            
-            // AUTOMATIC FLATTENING: If the target model doesn't support vision, 
-            // convert multimodal history into pure text to prevent API errors.
+            const model = LOCAL_AI_MODEL || req.model;
+            if (!model) throw new Error('No model selected. Open Settings (⚙) and pick an Ollama model.');
+
+            // Flatten any multimodal content — local models are text-only
             const messages = req.messages.map(m => {
                 if (Array.isArray(m.content)) {
-                    if (isVisionModel) return m;
-                    // Flatten to text
                     let text = m.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
                     const hasImg = m.content.some(c => c.type === 'image_url');
                     if (hasImg) text = `[USER ATTACHED AN IMAGE WHICH YOU SAW IN A PREVIOUS TURN]\n${text}`;
@@ -1037,36 +1071,24 @@ const OpenRouterAI = {
                 return m;
             });
 
-            const apiKey = await getApiKey();
-            if (!apiKey) {
-                throw new Error("No API key configured. Please add your OpenRouter API key in Settings (⚙).");
-            }
-            const modelsToTry = [model, ...ELITE_FREE_POOL.filter(m => m !== model && !BLACKLISTED_MODELS.includes(m))];
-            for (const m of modelsToTry) {
-                try {
-                    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            ...req, 
-                            model: m, 
-                            messages: messages,
-                            // ISO 27001 / ZDR: Only route to providers that guarantee
-                            // zero data retention — no logging, no training on our data.
-                            zdr: true
-                        })
-                    });
-                    if (res.status === 429) { await new Promise(r => setTimeout(r, 1000)); continue; }
-                    if (!res.ok) { 
-                        const err = await res.text(); 
-                        console.error('AI Error:', res.status, err); 
-                        BLACKLISTED_MODELS.push(m); 
-                        continue; 
+            const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+            const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    model, 
+                    messages, 
+                    stream: true,
+                    options: {
+                        num_ctx: 32768
                     }
-                    return res.body.getReader();
-                } catch (e) { continue; }
+                })
+            });
+            if (!res.ok) {
+                const err = await res.text();
+                throw new Error(`Ollama error ${res.status}: ${err}`);
             }
-            throw new Error("All models busy.");
+            return res.body.getReader();
         }
     }
 };
@@ -1166,40 +1188,29 @@ async function send(overrideText = null, silent = false) {
         const promptMode = isGreeting ? 'greeting' : 'full';
 
         // --- LOG CONTEXT ---
-        let logContext = c.logs.length > 0 ? `\n\n[DIAGNOSTIC DATA - ${c.logs.length} FILES ATTACHED]` : "";
+        const hasLogs = c.logs.length > 0;
+        let logContext = hasLogs ? `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]` : "";
         c.logs.forEach(l => {
-            logContext += `\n\n=== SOURCE: ${l.name} (Total Size: ${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, 300000)}\n=== END: ${l.name} ===`;
+            logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, 300000)}\n=== END: ${l.name} ===`;
         });
 
         const summaryText = $('issueSummary').value || 'NO SUMMARY PROVIDED';
-        const sysPrompt = scrubPII(`[OFFICIAL ISSUE SUMMARY - AUTHORITATIVE SOURCE]:
-${summaryText}
 
-[CURRENT ANALYSIS TIME]: ${new Date().toLocaleString()}
+        // When logs are present: use the lean forensic prompt so the context window
+        // is focused on log data. When no logs: use the full KB prompt for general Q&A.
+        const corePrompt = hasLogs ? getLeanLogPrompt() : getLeanQAPrompt();
 
-${getSysPrompt(promptMode)}
-
-[IMPORTANT NOTE ON MULTIMODAL IMAGES]:
-When the user attaches an image, it is automatically processed using OCR. The extracted text is provided below in the [SCRAPPED TEXT FROM ATTACHED IMAGES] section. YOU CANNOT SEE THE IMAGES DIRECTLY. You must rely entirely on the scraped text provided in that section. Do not ask the user to upload the image or complain that you cannot see it. Just analyze the scraped text.
-
-[LATEST MOBICONTROL CONSOLE VERSIONS]: ${VERSIONS.join(', ')}
-[LATEST ANDROID AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}
-[LATEST SOTI IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}
+        const sysPrompt = scrubPII(`[ISSUE SUMMARY]: ${summaryText}
+[TIME]: ${new Date().toLocaleString()}
+[CASE]: ${JSON.stringify(ci, null, 2)}
+[MC VERSIONS]: ${VERSIONS.join(', ')}
+[AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}
+[IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}
 [RELEASE NOTES]: ${RELEASE_NOTES_CONTENT}
 [PULSE SEARCH]: ${PULSE_SEARCH_RESULTS}
 [DEEP RESEARCH]: ${RESEARCHED_ARTICLE_CONTENT}
 
-[CASE CONTEXT DATA]:
-${JSON.stringify(ci, null, 2)}
-
-[DIAGNOSTIC DATA INTELLIGENCE]:
-- For files exceeding 300k characters, you receive THREE sections:
-  1. HEAD (first 30k chars): Contains startup config, service initialization, and environment info.
-  2. FULL-FILE FORENSIC EXTRACTION: Every single Exception, ERROR, FATAL, CRITICAL, and MCMR line extracted from the ENTIRE log file — nothing skipped. Exception stack traces are captured in full with all inner exceptions. Error lines include ±2 lines of context.
-  3. TAIL (last 200k chars): Contains the most recent activity and failures.
-- **YOU HAVE SEEN EVERY EXCEPTION AND ERROR IN THE LOG.** The forensic extraction scanned every line. If an exception exists anywhere in the file, it is in your data.
-- Focus your analysis on the FORENSIC EXTRACTION section first — it contains the highest-value evidence.
-- If you need general context around a specific timestamp (e.g., INFO-level entries), those may only be in the HEAD or TAIL. In that case, ask the user for the log content around that specific timestamp.
+${corePrompt}
 
 ${imgContext}
 
@@ -1209,8 +1220,8 @@ ${logContext}`);
         const userMsg = scrubPII(txt) + (imgContext ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
         c.msgs.push({ role: 'user', content: userMsg, hidden: silent });
         
-        // Model Selection: OCR handles images client-side, so all payloads are pure text
-        const selectedModel = null; // Uses dropdown selection or free model pool
+        // Model is selected from Ollama settings
+        const selectedModel = LOCAL_AI_MODEL || null;
 
         const reader = await OpenRouterAI.completions.create({
             model: selectedModel,
@@ -1430,11 +1441,9 @@ const handleFiles = (files) => {
         const r = new FileReader();
         r.onload = ev => { 
             const rawContent = ev.target.result;
-            // SECURITY: Run PII scan to build identity maps, then store only the
-            // scrubbed version. Raw customer data is never written to persistent storage.
-            const scrubbedContent = scrubPII(rawContent);
-            c.logs.push({ name: f.name, content: scrubbedContent }); 
-            toast(`${f.name} uploaded (PII scrubbed)`, 's'); 
+            // Store the log content directly for high-fidelity local AI analysis.
+            c.logs.push({ name: f.name, content: rawContent }); 
+            toast(`${f.name} uploaded`, 's'); 
             renderLogs();
             saveState();
         };
@@ -1880,38 +1889,33 @@ ${JIRA_TEMPLATE}`);
 
     try {
         $('mGen').style.display = 'flex'; // Show loading modal
-        const apiKey = await getApiKey();
-        if (!apiKey) {
+        if (!LOCAL_AI_MODEL) {
             $('mGen').style.display = 'none';
-            return toast('No API key configured. Open Settings (⚙) to add your OpenRouter key.', 'e', 5000);
+            return toast('No model selected. Open Settings (⚙) and pick an Ollama model.', 'e', 5000);
         }
-        const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const res = await fetch(`${baseUrl}/v1/chat/completions`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model: $('modelSel').value || 'openrouter/auto',
+                model: LOCAL_AI_MODEL,
                 messages: [
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userPrompt }
                 ],
-                max_tokens: 4000,
-                // ISO 27001 / ZDR: Only route to providers that guarantee
-                // zero data retention — no logging, no training on our data.
-                zdr: true
+                stream: false
             })
         });
+        if (!res.ok) throw new Error(`Ollama error ${res.status}`);
         const data = await res.json();
         const filled = data.choices?.[0]?.message?.content || '';
-        $('mGen').style.display = 'none'; // Hide loading modal
-        
-        if (!filled) {
-            return toast('JIRA generation failed', 'e');
-        }
+        $('mGen').style.display = 'none';
+        if (!filled) return toast('JIRA generation failed', 'e');
         $('jiraTa').value = filled;
         $('mJira').style.display = 'flex';
         toast('✓ JIRA Report Ready', 's');
     } catch (e) { 
-        $('mGen').style.display = 'none'; // Hide loading modal
+        $('mGen').style.display = 'none';
         toast('JIRA failed: ' + e.message, 'e'); 
     }
 };
@@ -1920,118 +1924,67 @@ $('btnCopyJira').onclick = () => { $('jiraTa').select(); document.execCommand('c
 
 loadState();
 fetchLatestSOTIVersions();
+loadLocalAISettings().then(() => updateLocalAIBadge());
 
-// --- SETTINGS MODAL ---
-function isManagedKey() {
-    return !!(typeof _bic !== 'undefined' && _bic[2] && _bic[2].length > 20);
-}
+// --- SETTINGS MODAL (AI — OLLAMA) ---
+async function refreshSettingsModal() {
+    const urlInp = $('localAiUrl');
+    const modelSel = $('localAiModelSel');
+    const statusEl = $('localAiStatus');
+    if (urlInp) urlInp.value = LOCAL_AI_URL;
 
-async function refreshApiKeyStatus() {
-    const key = await getApiKey();
-    const dot = $('apiKeyDot');
-    const txt = $('apiKeyStatusTxt');
-    const btn = $('btnSettings');
-    const input = $('apiKeyInput');
-    const saveBtn = $('btnSaveKey');
-    const clearBtn = $('btnClearKey');
-    const toggleBtn = $('btnToggleKeyVis');
-    if (!dot || !txt) return;
-
-    if (isManagedKey()) {
-        // Key is sealed in the build manifest — show secured state
-        dot.style.background = 'var(--green)';
-        txt.textContent = 'Secured by Build Manifest ✓';
-        if (btn) btn.style.color = 'var(--green)';
-        if (input) {
-            input.value = '•••••••••••••••••••••••• [AES-256 sealed]';
-            input.disabled = true;
-            input.style.opacity = '0.5';
-            input.style.cursor = 'not-allowed';
+    if (statusEl) { statusEl.textContent = 'Connecting to Ollama...'; statusEl.style.color = 'var(--txt2)'; }
+    const models = await fetchOllamaModels(urlInp ? urlInp.value : LOCAL_AI_URL);
+    LOCAL_AI_MODELS = models;
+    if (modelSel) {
+        if (models.length === 0) {
+            modelSel.innerHTML = '<option value="">No models found — is Ollama running?</option>';
+            if (statusEl) { statusEl.textContent = '⚠ Ollama not reachable at ' + (urlInp ? urlInp.value : LOCAL_AI_URL); statusEl.style.color = 'var(--warn)'; }
+        } else {
+            modelSel.innerHTML = models.map(m => `<option value="${m}" ${m === LOCAL_AI_MODEL ? 'selected' : ''}>${m}</option>`).join('');
+            if (!LOCAL_AI_MODEL && models.length > 0) LOCAL_AI_MODEL = models[0];
+            if (statusEl) { statusEl.textContent = `✓ ${models.length} model(s) available`; statusEl.style.color = 'var(--green)'; }
         }
-        if (saveBtn) saveBtn.disabled = true;
-        if (clearBtn) clearBtn.disabled = true;
-        if (toggleBtn) toggleBtn.disabled = true;
-    } else if (key) {
-        dot.style.background = 'var(--green)';
-        txt.textContent = 'API key configured ✓ (manually set)';
-        if (btn) btn.style.color = 'var(--green)';
-        if (input) { input.disabled = false; input.style.opacity = ''; input.style.cursor = ''; }
-        if (saveBtn) saveBtn.disabled = false;
-        if (clearBtn) clearBtn.disabled = false;
-        if (toggleBtn) toggleBtn.disabled = false;
-    } else {
-        dot.style.background = 'var(--red)';
-        txt.textContent = 'No API key configured';
-        if (btn) btn.style.color = 'var(--red)';
-        if (input) { input.disabled = false; input.style.opacity = ''; input.style.cursor = ''; }
-        if (saveBtn) saveBtn.disabled = false;
-        if (clearBtn) clearBtn.disabled = false;
-        if (toggleBtn) toggleBtn.disabled = false;
     }
 }
 
 async function openSettingsModal() {
-    // Let refreshApiKeyStatus() own all input state.
-    // Never set input.value to the raw key here — it would briefly expose it.
-    const input = $('apiKeyInput');
-    if (input && !isManagedKey()) {
-        // For manually-set keys, pre-fill with empty so user can re-enter
-        // (we don't show the stored key back — that would be unnecessary exposure)
-        const stored = await (async () => {
-            try {
-                if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                    const d = await chrome.storage.local.get('openrouter_api_key');
-                    return d.openrouter_api_key || null;
-                }
-                return localStorage.getItem('openrouter_api_key') || null;
-            } catch { return null; }
-        })();
-        input.value = stored ? '(key stored — enter new key to replace)' : '';
-    }
-    await refreshApiKeyStatus();
     $('mSettings').style.display = 'flex';
+    await refreshSettingsModal();
 }
 
 $('btnSettings').onclick = openSettingsModal;
-$('mSettingsClose').onclick = $('btnSettingsCancel').onclick = () => {
+$('mSettingsClose').onclick = () => $('mSettings').style.display = 'none';
+
+$('localAiUrl').oninput = () => {
+    LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://localhost:11434';
+};
+
+$('btnRefreshModels').onclick = async () => {
+    LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://localhost:11434';
+    await refreshSettingsModal();
+};
+
+$('localAiModelSel').onchange = () => {
+    LOCAL_AI_MODEL = $('localAiModelSel').value;
+};
+
+$('btnSaveLocalAI').onclick = async () => {
+    LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://localhost:11434';
+    LOCAL_AI_MODEL = $('localAiModelSel').value || LOCAL_AI_MODEL;
+    await saveLocalAISettings();
+    updateLocalAIBadge();
     $('mSettings').style.display = 'none';
+    toast(`✓ Model set: ${LOCAL_AI_MODEL || 'Ollama'}`, 's');
 };
 
-$('btnToggleKeyVis').onclick = () => {
-    const inp = $('apiKeyInput');
-    inp.type = inp.type === 'password' ? 'text' : 'password';
-};
-
-$('btnSaveKey').onclick = async () => {
-    const val = $('apiKeyInput').value.trim();
-    if (!val) {
-        toast('Please enter an API key before saving.', 'w');
-        return;
-    }
-    if (!val.startsWith('sk-or-')) {
-        toast('Key should start with sk-or-... Are you sure this is an OpenRouter key?', 'w', 4000);
-    }
-    await saveApiKey(val);
-    await refreshApiKeyStatus();
-    $('mSettings').style.display = 'none';
-    toast('✓ API key saved securely', 's');
-};
-
-$('btnClearKey').onclick = async () => {
-    await clearApiKey();
-    $('apiKeyInput').value = '';
-    await refreshApiKeyStatus();
-    toast('API key cleared', 'w');
-};
-
-// On boot: check if key is configured and warn if not
+// Boot: detect Ollama and warn if no model selected
 (async () => {
-    await refreshApiKeyStatus();
-    const key = await getApiKey();
-    if (!key) {
-        // Delay slightly so welcome screen is visible first
+    await loadLocalAISettings();
+    updateLocalAIBadge();
+    if (!LOCAL_AI_MODEL) {
         setTimeout(() => {
-            toast('⚙ No API key set. Open Settings to add your OpenRouter key.', 'w', 6000);
+            toast('⚙ Open Settings to select your Ollama model.', 'w', 7000);
         }, 1500);
     }
 })();
