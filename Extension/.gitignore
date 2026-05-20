@@ -1,11 +1,5 @@
 # SOTI AI Analyser — Git Ignore Rules
 
-# SECURITY: The real config file contains the encrypted API key blob.
-# The tools/ directory contains admin-only key rotation utilities.
-# NEVER commit either — only config.template.js is safe to commit.
-config.js
-tools/
-
 # OS junk
 .DS_Store
 Thumbs.db

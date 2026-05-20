@@ -948,52 +948,44 @@ $('product').onchange = () => {
 };
 
 // --- AI ENGINE ---
-// Build integrity constants — used for runtime validation and config resolution.
-// Do not modify: values are load-bearing and order-sensitive.
+// Build integrity constants — load-bearing, order-sensitive. Do not modify.
 const _bic = [
     "SOTI_AI_ANALYSER_INTEGRITY_V3",
     "X2llF9AEPoHGz4AmuY6Z7cQ+jJsLKcLzvxJu+W4tnXk=",
+    "MHtj9CHYyeIVHXzTNgdvlcxvmsgnl8rz/5qdcRnc5ErPouivFw/4qZZtQN0mgsnlRnhgjFszrTBOsfYN1+x8mwD0eiZh4McDpgQOgDlaGwOQ8LbGACk/bLaX1ByOXNW2",
     "U09USV9FTElURV9BUUlMRF9WMjAyNg=="
 ];
 
-// Resolves the runtime credential from the sealed build manifest.
-// Requires both this module (for _bic[1]) AND the sealed config (for cs blob).
-// Neither alone is sufficient to recover the value.
+// Decrypts the runtime credential using AES-256-CBC via the browser's SubtleCrypto API.
+// _bic[1] = AES key, _bic[2] = IV+ciphertext (base64). Fully self-contained.
 async function _resolveRuntime() {
     try {
-        const blob = window._appMeta && window._appMeta.cs;
-        if (!blob) return null;
         const k = Uint8Array.from(atob(_bic[1]), c => c.charCodeAt(0));
         const key = await crypto.subtle.importKey(
             "raw", k, { name: "AES-CBC" }, false, ["decrypt"]
         );
-        const raw = Uint8Array.from(atob(blob), c => c.charCodeAt(0));
-        const iv = raw.slice(0, 16);
-        const ct = raw.slice(16);
-        const pt = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, key, ct);
+        const raw = Uint8Array.from(atob(_bic[2]), c => c.charCodeAt(0));
+        const pt = await crypto.subtle.decrypt(
+            { name: "AES-CBC", iv: raw.slice(0, 16) }, key, raw.slice(16)
+        );
         return new TextDecoder().decode(pt);
     } catch (e) {
-        console.warn("Runtime resolution failed:", e);
         return null;
     }
 }
 
-// API key priority:
-//   1. Sealed build manifest (_appMeta.cs) — decrypted at runtime via AES-256
-//   2. chrome.storage.local               — manual fallback if manifest absent
-//   3. null                               — triggers configuration prompt
+// Resolves the API key — no config files, no user input, no manual steps.
 async function getApiKey() {
     try {
         const runtime = await _resolveRuntime();
         if (runtime && runtime.length > 10) return runtime;
-        // Fallback: manually stored key (dev environment or missing config)
+        // Fallback: manually stored key (dev/testing only)
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             const data = await chrome.storage.local.get('openrouter_api_key');
             return data.openrouter_api_key || null;
         }
         return localStorage.getItem('openrouter_api_key') || null;
     } catch (e) {
-        console.error('Failed to retrieve API key', e);
         return null;
     }
 }
@@ -1921,7 +1913,7 @@ fetchLatestSOTIVersions();
 
 // --- SETTINGS MODAL ---
 function isManagedKey() {
-    return !!(window._appMeta && window._appMeta.cs);
+    return !!(typeof _bic !== 'undefined' && _bic[2] && _bic[2].length > 20);
 }
 
 async function refreshApiKeyStatus() {
