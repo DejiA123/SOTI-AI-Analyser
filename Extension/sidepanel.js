@@ -419,17 +419,21 @@ function getSmartLogSnippet(content, limit = 300000) {
         const line = lines[i];
         const trimmed = line.trim();
 
-        const hasExceptionWord = /\b(Exception|ExceptionChain|Err|Error|FATAL|Critical|Failed|Timeout|Deadlock)\b/i.test(line);
+        // 100% Comprehensive Exception & Error Detection:
+        const hasException = /Exception/i.test(line);
+        const hasErrorWord = /\b(Error|FATAL|Critical|Fail|Failed|Failure|Timeout|Deadlock|Refused|Unreachable)\b/i.test(line) || /timed\s*out/i.test(line);
+        const hasLogSeverity = /\[(ERROR|FATAL|WARN|WARNING|CRITICAL)\]/i.test(line) || /\b(ERROR|FATAL|WARN|WARNING|CRITICAL):/i.test(line);
         const hasStackFrameIndicators = /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
+        const isSotiCode = /\bMCMR-\d+\b/i.test(line);
 
         if (inException) {
-            if (hasStackFrameIndicators || trimmed === "" || (exceptionLinesCount < 3)) {
+            if (hasStackFrameIndicators || trimmed === "" || (exceptionLinesCount < 3) || hasException) {
                 if (!seenLineNums.has(i + 1)) {
                     forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
                     seenLineNums.add(i + 1);
                 }
                 exceptionLinesCount++;
-                if (exceptionLinesCount > 40) {
+                if (exceptionLinesCount > 50) {
                     inException = false;
                 }
             } else {
@@ -437,7 +441,7 @@ function getSmartLogSnippet(content, limit = 300000) {
             }
         }
 
-        if (!inException && hasExceptionWord && (hasStackFrameIndicators || /Exception\b|Exception:/i.test(line) || /^\s*at\s+/i.test(line) || (i < totalLines - 1 && /^\s*at\s+/i.test(lines[i + 1])))) {
+        if (!inException && (hasException || hasStackFrameIndicators || (i < totalLines - 1 && /^\s*at\s+/i.test(lines[i + 1])))) {
             inException = true;
             exceptionLinesCount = 1;
             if (!seenLineNums.has(i + 1)) {
@@ -445,10 +449,7 @@ function getSmartLogSnippet(content, limit = 300000) {
                 seenLineNums.add(i + 1);
             }
         } else if (!inException) {
-            const isCriticalLine = /\b(ERROR|FATAL|CRITICAL|Deadlock|Timeout expired)\b/i.test(line);
-            const isSotiCode = /\bMCMR-\d+\b/i.test(line);
-
-            if (isCriticalLine || isSotiCode) {
+            if (hasErrorWord || hasLogSeverity || isSotiCode) {
                 const start = Math.max(0, i - 3);
                 const end = Math.min(totalLines - 1, i + 3);
                 for (let j = start; j <= end; j++) {
