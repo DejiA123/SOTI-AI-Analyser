@@ -42,7 +42,8 @@ function getDefaultCase(name = 'Case 1') {
         msgs: [],
         logs: [],
         imgs: [], // { name, data, text }
-        ci: getDefaultCI()
+        ci: getDefaultCI(),
+        createdAt: Date.now() // Used for data retention enforcement
     };
 }
 
@@ -117,10 +118,36 @@ async function loadState() {
                     c.ci.meetingNotes = template;
                 }
                 if (!c.imgs) c.imgs = [];
+                if (!c.createdAt) c.createdAt = Date.now(); // Backfill for older cases
             });
-            
+
+            // DATA RETENTION: Auto-purge cases older than 30 days
+            const RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+            const now = Date.now();
+            const before = cases.length;
+            cases = cases.filter(c => (now - (c.createdAt || now)) < RETENTION_MS);
+            const purged = before - cases.length;
+            if (purged > 0) {
+                console.warn(`[Security] Data retention: purged ${purged} case(s) older than 30 days.`);
+                toast(`${purged} old case(s) auto-cleared (30-day retention policy)`, 'w', 5000);
+                if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                    chrome.storage.local.set({ cases });
+                }
+            }
+
+            // If all cases were purged, create a fresh default
+            if (cases.length === 0) {
+                const newCase = getDefaultCase('Case 1');
+                cases = [newCase];
+                activeCaseId = newCase.id;
+                renderTabs();
+                switchCase(activeCaseId);
+                return;
+            }
+
+            const safeTargetId = cases.find(c => c.id === targetId) ? targetId : cases[0].id;
             renderTabs();
-            switchCase(targetId);
+            switchCase(safeTargetId);
             return;
         } 
         
@@ -921,11 +948,51 @@ $('product').onchange = () => {
 };
 
 // --- AI ENGINE ---
-const _cfgSalt = "S0T1_CL0UD", _cfgIv = "_SC4L3_v2", _vaultPayload = "IFt5Xi1uOgF4IGgxdQ0oAm9FUDBWNlJvey4BbH1tYnoGdQo8EFYxAGcHPnV6Ajcna2J6Ui5SbxRQYAkyBj13fQU0d2gydQAqCg==";
-function _resolveCredential() {
-    const s = _cfgSalt + _cfgIv;
-    const b = Uint8Array.from(atob(_vaultPayload), c => c.charCodeAt(0));
-    return Array.from(b, (v, i) => String.fromCharCode(v ^ s.charCodeAt(i % s.length))).join('');
+// API key priority:
+//   1. config.js  → window.SOTI_AI_CONFIG.apiKey (admin-distributed, not in source control)
+//   2. chrome.storage.local → manually entered via Settings modal (fallback)
+//   3. null → user is prompted to configure
+async function getApiKey() {
+    try {
+        // Priority 1: Centrally managed key from config.js (preferred for corporate deployment)
+        const configKey = window.SOTI_AI_CONFIG && window.SOTI_AI_CONFIG.apiKey;
+        if (configKey && configKey !== 'PASTE_YOUR_OPENROUTER_KEY_HERE' && configKey.length > 10) {
+            return configKey;
+        }
+        // Priority 2: Manually stored key (fallback for dev or if config.js is absent)
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            const data = await chrome.storage.local.get('openrouter_api_key');
+            return data.openrouter_api_key || null;
+        }
+        return localStorage.getItem('openrouter_api_key') || null;
+    } catch (e) {
+        console.error('Failed to retrieve API key', e);
+        return null;
+    }
+}
+
+async function saveApiKey(key) {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            await chrome.storage.local.set({ openrouter_api_key: key });
+        } else {
+            localStorage.setItem('openrouter_api_key', key);
+        }
+    } catch (e) {
+        console.error('Failed to save API key', e);
+    }
+}
+
+async function clearApiKey() {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            await chrome.storage.local.remove('openrouter_api_key');
+        } else {
+            localStorage.removeItem('openrouter_api_key');
+        }
+    } catch (e) {
+        console.error('Failed to clear API key', e);
+    }
 }
 
 const ELITE_FREE_POOL = ["deepseek/deepseek-v4-flash"];
@@ -951,12 +1018,16 @@ const OpenRouterAI = {
                 return m;
             });
 
+            const apiKey = await getApiKey();
+            if (!apiKey) {
+                throw new Error("No API key configured. Please add your OpenRouter API key in Settings (⚙).");
+            }
             const modelsToTry = [model, ...ELITE_FREE_POOL.filter(m => m !== model && !BLACKLISTED_MODELS.includes(m))];
             for (const m of modelsToTry) {
                 try {
                     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: 'POST',
-                        headers: { 'Authorization': `Bearer ${_resolveCredential()}`, 'Content-Type': 'application/json' },
+                        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
                         body: JSON.stringify({ ...req, model: m, messages: messages })
                     });
                     if (res.status === 429) { await new Promise(r => setTimeout(r, 1000)); continue; }
@@ -1332,10 +1403,12 @@ const handleFiles = (files) => {
     for (const f of files) {
         const r = new FileReader();
         r.onload = ev => { 
-            const content = ev.target.result;
-            scrubPII(content); // Scan for identities on upload
-            c.logs.push({ name: f.name, content: content }); 
-            toast(`${f.name} uploaded`, 's'); 
+            const rawContent = ev.target.result;
+            // SECURITY: Run PII scan to build identity maps, then store only the
+            // scrubbed version. Raw customer data is never written to persistent storage.
+            const scrubbedContent = scrubPII(rawContent);
+            c.logs.push({ name: f.name, content: scrubbedContent }); 
+            toast(`${f.name} uploaded (PII scrubbed)`, 's'); 
             renderLogs();
             saveState();
         };
@@ -1781,9 +1854,14 @@ ${JIRA_TEMPLATE}`);
 
     try {
         $('mGen').style.display = 'flex'; // Show loading modal
+        const apiKey = await getApiKey();
+        if (!apiKey) {
+            $('mGen').style.display = 'none';
+            return toast('No API key configured. Open Settings (⚙) to add your OpenRouter key.', 'e', 5000);
+        }
         const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${_resolveCredential()}`, 'Content-Type': 'application/json' },
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 model: $('modelSel').value || 'openrouter/auto',
                 messages: [
@@ -1813,6 +1891,122 @@ $('btnCopyJira').onclick = () => { $('jiraTa').select(); document.execCommand('c
 
 loadState();
 fetchLatestSOTIVersions();
+
+// --- SETTINGS MODAL ---
+function isManagedKey() {
+    const k = window.SOTI_AI_CONFIG && window.SOTI_AI_CONFIG.apiKey;
+    return k && k !== 'PASTE_YOUR_OPENROUTER_KEY_HERE' && k.length > 10;
+}
+
+async function refreshApiKeyStatus() {
+    const key = await getApiKey();
+    const dot = $('apiKeyDot');
+    const txt = $('apiKeyStatusTxt');
+    const btn = $('btnSettings');
+    const input = $('apiKeyInput');
+    const saveBtn = $('btnSaveKey');
+    const clearBtn = $('btnClearKey');
+    const toggleBtn = $('btnToggleKeyVis');
+    if (!dot || !txt) return;
+
+    if (isManagedKey()) {
+        // Key is coming from config.js — show managed state
+        dot.style.background = 'var(--green)';
+        txt.textContent = 'Managed by Administrator ✓';
+        if (btn) btn.style.color = 'var(--green)';
+        if (input) {
+            input.value = '••••••••••••••••••••••••' + (window.SOTI_AI_CONFIG.apiKey.slice(-4));
+            input.disabled = true;
+            input.style.opacity = '0.5';
+            input.style.cursor = 'not-allowed';
+        }
+        if (saveBtn) saveBtn.disabled = true;
+        if (clearBtn) clearBtn.disabled = true;
+        if (toggleBtn) toggleBtn.disabled = true;
+    } else if (key) {
+        dot.style.background = 'var(--green)';
+        txt.textContent = 'API key configured ✓ (manually set)';
+        if (btn) btn.style.color = 'var(--green)';
+        if (input) { input.disabled = false; input.style.opacity = ''; input.style.cursor = ''; }
+        if (saveBtn) saveBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+        if (toggleBtn) toggleBtn.disabled = false;
+    } else {
+        dot.style.background = 'var(--red)';
+        txt.textContent = 'No API key configured';
+        if (btn) btn.style.color = 'var(--red)';
+        if (input) { input.disabled = false; input.style.opacity = ''; input.style.cursor = ''; }
+        if (saveBtn) saveBtn.disabled = false;
+        if (clearBtn) clearBtn.disabled = false;
+        if (toggleBtn) toggleBtn.disabled = false;
+    }
+}
+
+async function openSettingsModal() {
+    // Let refreshApiKeyStatus() own all input state.
+    // Never set input.value to the raw key here — it would briefly expose it.
+    const input = $('apiKeyInput');
+    if (input && !isManagedKey()) {
+        // For manually-set keys, pre-fill with empty so user can re-enter
+        // (we don't show the stored key back — that would be unnecessary exposure)
+        const stored = await (async () => {
+            try {
+                if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                    const d = await chrome.storage.local.get('openrouter_api_key');
+                    return d.openrouter_api_key || null;
+                }
+                return localStorage.getItem('openrouter_api_key') || null;
+            } catch { return null; }
+        })();
+        input.value = stored ? '(key stored — enter new key to replace)' : '';
+    }
+    await refreshApiKeyStatus();
+    $('mSettings').style.display = 'flex';
+}
+
+$('btnSettings').onclick = openSettingsModal;
+$('mSettingsClose').onclick = $('btnSettingsCancel').onclick = () => {
+    $('mSettings').style.display = 'none';
+};
+
+$('btnToggleKeyVis').onclick = () => {
+    const inp = $('apiKeyInput');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+};
+
+$('btnSaveKey').onclick = async () => {
+    const val = $('apiKeyInput').value.trim();
+    if (!val) {
+        toast('Please enter an API key before saving.', 'w');
+        return;
+    }
+    if (!val.startsWith('sk-or-')) {
+        toast('Key should start with sk-or-... Are you sure this is an OpenRouter key?', 'w', 4000);
+    }
+    await saveApiKey(val);
+    await refreshApiKeyStatus();
+    $('mSettings').style.display = 'none';
+    toast('✓ API key saved securely', 's');
+};
+
+$('btnClearKey').onclick = async () => {
+    await clearApiKey();
+    $('apiKeyInput').value = '';
+    await refreshApiKeyStatus();
+    toast('API key cleared', 'w');
+};
+
+// On boot: check if key is configured and warn if not
+(async () => {
+    await refreshApiKeyStatus();
+    const key = await getApiKey();
+    if (!key) {
+        // Delay slightly so welcome screen is visible first
+        setTimeout(() => {
+            toast('⚙ No API key set. Open Settings to add your OpenRouter key.', 'w', 6000);
+        }, 1500);
+    }
+})();
 
 // Ensure text is copied as plain text from the chat container
 $('chatMsgs').addEventListener('copy', (e) => {

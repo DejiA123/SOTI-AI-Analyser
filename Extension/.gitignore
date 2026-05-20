@@ -1,0 +1,15 @@
+# SOTI AI Analyser — Git Ignore Rules
+
+# SECURITY: The real config file contains the API key.
+# NEVER commit config.js — only config.template.js is safe to commit.
+config.js
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor artifacts
+.vscode/
+*.swp
+*~

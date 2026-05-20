@@ -25,8 +25,12 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["lib/*", "lib/*.js", "lib/*.wasm", "lib/*.gz", "*.js", "*.wasm", "*.gz"],
-      "matches": ["<all_urls>"]
+      "resources": ["lib/worker.min.js", "lib/*.wasm", "lib/*.gz"],
+      "matches": [
+        "https://*.soti.net/*",
+        "https://*.salesforce.com/*",
+        "https://*.force.com/*"
+      ]
     }
   ],
   "action": {
