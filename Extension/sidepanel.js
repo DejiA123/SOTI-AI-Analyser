@@ -3951,24 +3951,12 @@ const renderLogs = () => {
     none.style.display = c.logs.length > 0 ? 'none' : 'block';
     const frag = document.createDocumentFragment();
     c.logs.forEach((f, i) => {
-        const intel = getLogPanelIntel(f);
-        const meta = [
-            intel ? `${intel.lineCount.toLocaleString()} lines` : "",
-            intel ? formatBytes(intel.size) : "",
-            intel && intel.eventCount ? `${intel.eventCount.toLocaleString()} events` : "no error signatures",
-            intel && intel.focusLine ? intel.focusLine : ""
-        ].filter(Boolean).join(" | ");
-        const detail = intel ? `${intel.confidence}${intel.topCategory ? ` | ${intel.topCategory}` : ""}${intel.azureSql ? " | Azure SQL" : ""}` : "";
-        const verdict = intel && intel.topException ? `${intel.verdict} (${intel.topException})` : (intel ? intel.verdict : "Ready for analysis");
         const item = document.createElement('div');
         item.className = 'log-item';
+        item.title = f.name;
         item.innerHTML = `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
-            <div class="log-file">
-                <span class="log-name">${escapeHtml(f.name)}</span>
-                <span class="log-meta">${escapeHtml(meta)}</span>
-                <span class="log-verdict" title="${escapeHtml(detail)}">${escapeHtml(verdict)}</span>
-            </div>
+            <span class="log-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
             <button class="log-del" data-index="${i}">×</button>`;
         
         item.querySelector('.log-del').addEventListener('click', () => removeLog(i));
