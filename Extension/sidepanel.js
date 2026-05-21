@@ -434,7 +434,7 @@ function getSmartLogSnippet(content, limit = 300000) {
         // === COMPREHENSIVE PATTERN DETECTION ENGINE ===
         const hasException = /Exception/i.test(line);
         const hasErrorWord = /\b(Error|FATAL|Critical|Fail|Failed|Failure|Timeout|Deadlock|Refused|Unreachable|Aborted|Crashed|Faulted|Corrupt)\b/i.test(line) || /timed\s*out/i.test(line);
-        const hasLogSeverity = /\[(ERROR|FATAL|WARN|WARNING|CRITICAL)\]/i.test(line) || /\b(ERROR|FATAL|WARN|WARNING|CRITICAL):/i.test(line);
+        const hasLogSeverity = /(?:\[|\b)(ERROR|FATAL|WARN|WARNING|CRITICAL)(?:\]|\b|:)/i.test(line);
         const hasStackFrameIndicators = /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
         const isSotiCode = /\bMCMR-\d+\b/i.test(line);
 
@@ -603,13 +603,14 @@ function getSmartLogSnippet(content, limit = 300000) {
     
     // If the file is small enough, just return the whole thing plus the report
     if (content.length <= (headSize + tailSize)) {
-        return `[FULL LOG CONTENT]\n${content}\n${forensicReport}`;
+        return `${forensicReport}\n\n[FULL LOG CONTENT]\n${content}`;
     }
 
     const head = content.slice(0, headSize);
     const tail = content.slice(-tailSize);
 
-    return `[LOG HEAD — config/startup — first ${headSize} chars]\n${head}\n\n[LOG TAIL — most recent activity — last ${tailSize} chars]\n${tail}\n${forensicReport}`;
+    // Place the forensic report at the TOP so it is never truncated by local AI context limits!
+    return `${forensicReport}\n\n[LOG HEAD — config/startup — first ${headSize} chars]\n${head}\n\n[LOG TAIL — most recent activity — last ${tailSize} chars]\n${tail}`;
 }
 
 function hideToast() {
@@ -689,9 +690,9 @@ function getLeanLogPrompt() {
     return `You are the world's best SOTI Log Forensics Engineer — a Level 3 Escalation specialist. Your SOLE mission is to find the EXACT root cause from the log data. You NEVER guess, generalize, or skip evidence.
 
 The log data has three sections:
-1. [LOG HEAD] — startup config, environment, service initialization. Check for misconfiguration here.
-2. [LOG TAIL] — most recent raw activity. The user's symptom usually manifests here.
-3. === FORENSIC INCIDENT REPORT === — a COMPLETE chronological extraction of EVERY exception, error, stack trace, inner exception chain, and warning from the ENTIRE log file. The ERROR CATEGORY BREAKDOWN at the top tells you what types of errors were found and how many. Repeating identical errors are compressed.
+1. === FORENSIC INCIDENT REPORT === — a COMPLETE chronological extraction of EVERY exception, error, stack trace, inner exception chain, and warning from the ENTIRE log file. The ERROR CATEGORY BREAKDOWN at the top tells you what types of errors were found and how many. Repeating identical errors are compressed.
+2. [LOG HEAD] — startup config, environment, service initialization. Check for misconfiguration here.
+3. [LOG TAIL] — most recent raw activity. The user's symptom usually manifests here.
 
 YOU MUST SCAN THE ENTIRE FORENSIC INCIDENT REPORT LINE BY LINE. DO NOT SKIP ANY ENTRY.
 

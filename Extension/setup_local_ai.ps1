@@ -32,33 +32,22 @@ $installed = Test-Path $ollamaPath
 if ($installed) {
     Write-Success "Ollama is already installed at $ollamaPath"
 } else {
-    Write-Header "Step 1: Downloading Ollama"
-    $tempDir = Join-Path $env:TEMP "OllamaSetup"
-    if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir | Out-Null }
+    Write-Header "Step 1: Install Ollama"
+    Write-Info "To prevent Antivirus blocks, we will open the official download page in your browser."
+    Write-Info "Please download and install Ollama, then return to this window."
+    Start-Sleep -Seconds 3
+    Start-Process "https://ollama.com/download/windows"
     
-    $installerPath = Join-Path $tempDir "OllamaSetup.exe"
-    $downloadUrl = "https://ollama.com/download/OllamaSetup.exe"
+    Write-Host ""
+    Write-Host "Press ENTER once you have finished installing Ollama..." -ForegroundColor Yellow
+    Read-Host
     
-    Write-Info "Downloading Ollama installer from $downloadUrl..."
-    try {
-        Start-BitsTransfer -Source $downloadUrl -Destination $installerPath -Priority Foreground -ErrorAction Stop
-    } catch {
-        Write-Info "BITS download failed/unavailable. Falling back to curl.exe..."
-        & curl.exe -L -o $installerPath $downloadUrl
+    $installed = Test-Path $ollamaPath
+    if (-not $installed) {
+        Write-Err "Ollama still not found at $ollamaPath. Please try installing again."
+        Exit 1
     }
-    Write-Success "Download complete: $installerPath"
-    
-    Write-Header "Step 2: Installing Ollama (Silent Mode)"
-    Write-Info "Running installer... This will take about a minute. Please wait."
-    
-    # Run the installer silently
-    $process = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES" -PassThru -Wait
-    
-    if ($process.ExitCode -eq 0) {
-        Write-Success "Ollama installed successfully!"
-    } else {
-        Write-Err "Ollama installation exited with code $($process.ExitCode). Trying to continue..."
-    }
+    Write-Success "Ollama detected successfully!"
 }
 
 # 2. Start Ollama if it is not running
