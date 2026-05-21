@@ -1262,8 +1262,20 @@ function updateLocalAIBadge() {
     const dot = $('dot');
     if (!pill) return;
     pill.style.display = 'flex';
-    dot.style.background = LOCAL_AI_MODEL ? '#22c55e' : 'var(--warn)';
-    statusTxt.textContent = LOCAL_AI_MODEL ? `Local AI — ${LOCAL_AI_MODEL}` : 'Local AI — No model selected';
+    
+    if (LOCAL_AI_MODEL) {
+        // Clean model name: strip ':latest' tag since it's noise
+        let cleanName = LOCAL_AI_MODEL.replace(/:latest$/i, '');
+        dot.style.background = '#22c55e';
+        dot.classList.add('on');
+        statusTxt.textContent = cleanName;
+        pill.title = `Connected — ${LOCAL_AI_MODEL}`;
+    } else {
+        dot.style.background = 'var(--warn)';
+        dot.classList.remove('on');
+        statusTxt.textContent = 'No model';
+        pill.title = 'No Ollama model selected';
+    }
 }
 
 // Ollama-powered AI engine (streaming, OpenAI-compatible endpoint)
