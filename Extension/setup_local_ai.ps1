@@ -89,13 +89,56 @@ function Install-OllamaViaSetupExe {
     }
 }
 
-function Wait-OllamaApi {
-    Write-Info "Waiting for Ollama API on http://localhost:11434 ..."
-    for ($i = 1; $i -le 45; $i++) {
+function Test-OllamaApiReachable {
+    # Bypass corporate proxy for local Ollama (common cause: browser works, PowerShell/extension fail)
+    try {
+        [System.Net.WebRequest]::DefaultWebProxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+    } catch {
+        try { [System.Net.WebRequest]::DefaultWebProxy = $null } catch { }
+    }
+
+    $endpoints = @(
+        "http://127.0.0.1:11434/api/tags",
+        "http://localhost:11434/api/tags",
+        "http://127.0.0.1:11434/",
+        "http://localhost:11434/"
+    )
+
+    foreach ($uri in $endpoints) {
         try {
-            $r = Invoke-WebRequest -Uri "http://localhost:11434" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-            if ($r.StatusCode -eq 200) { return $true }
+            $r = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
+                Write-Info "API responded at $uri (HTTP $($r.StatusCode))"
+                return $true
+            }
         } catch { }
+    }
+
+    # Fallback: ollama CLI responds even when Invoke-WebRequest is blocked by proxy/AV
+    $ollamaExe = Get-OllamaExePath
+    if (Test-Path $ollamaExe) {
+        try {
+            $out = & $ollamaExe list 2>&1
+            if ($LASTEXITCODE -eq 0 -and $out) {
+                Write-Info "Ollama CLI responded (ollama list) — API is running."
+                return $true
+            }
+        } catch { }
+    }
+
+    $tcp = Test-NetConnection -ComputerName 127.0.0.1 -Port 11434 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    if ($tcp -and $tcp.TcpTestSucceeded) {
+        Write-Info "Port 11434 is open on 127.0.0.1 (TCP check passed)."
+        return $true
+    }
+
+    return $false
+}
+
+function Wait-OllamaApi {
+    Write-Info "Waiting for Ollama API (trying 127.0.0.1 and localhost:11434) ..."
+    for ($i = 1; $i -le 60; $i++) {
+        if (Test-OllamaApiReachable) { return $true }
         Start-Sleep -Seconds 1
     }
     return $false
@@ -148,7 +191,11 @@ if (-not (Get-Process ollama -ErrorAction SilentlyContinue)) {
     Start-Sleep -Seconds 2
 }
 if (-not (Wait-OllamaApi)) {
-    Write-Err "Ollama API not responding. Check the system tray icon or restart Ollama."
+    Write-Err "Ollama API not responding to setup checks."
+    Write-Info "If http://127.0.0.1:11434 works in your browser, continue manually:"
+    Write-Info "  1. In extension Settings set URL to: http://127.0.0.1:11434"
+    Write-Info "  2. Run in PowerShell: ollama pull llama3.2"
+    Write-Info "Corporate proxy/AV often blocks PowerShell HTTP to localhost — 127.0.0.1 usually works."
     exit 1
 }
 Write-Success "Ollama API is running."
@@ -161,7 +208,7 @@ if (-not (Install-Llama32Model -OllamaExe $ollamaExe)) {
 Write-Header "Setup complete"
 Write-Success "Local AI is ready."
 Write-Info "1. Reload the SOTI AI Analyser extension in Chrome."
-Write-Info "2. Open Settings (three dots menu) - refresh models - Save."
+Write-Info "2. Open Settings - set URL to http://127.0.0.1:11434 - refresh models - Save."
 Write-Info "3. Optional Bitdefender exclusion: $env:LOCALAPPDATA\Programs\Ollama"
 Write-Host ""
 pause
