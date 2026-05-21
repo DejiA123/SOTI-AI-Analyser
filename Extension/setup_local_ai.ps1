@@ -1,7 +1,8 @@
-# SOTI AI Analyser - Local AI Auto-Setup (silent, no browser redirect)
-# Installs Ollama via winget or direct download, starts the service, pulls llama3.2.
+# SOTI AI Analyser - Local AI Auto-Setup
+# Uses official https://ollama.com/install.ps1 then downloads llama3.2.
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 function Write-Header ($text) {
     Write-Host ""
@@ -14,101 +15,153 @@ function Write-Info ($text) { Write-Host "[*] $text" -ForegroundColor White }
 function Write-Success ($text) { Write-Host "[+] $text" -ForegroundColor Green }
 function Write-Err ($text) { Write-Host "[!] $text" -ForegroundColor Red }
 
-Write-Header "SOTI AI Analyser - Local AI Setup"
+function Refresh-PathEnv {
+    $machine = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $user = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machine;$user"
+}
 
-$ollamaPath = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
-$installerUrl = "https://ollama.com/download/OllamaSetup.exe"
-$setupDir = Join-Path $env:TEMP "SOTI-AI-OllamaSetup"
-$setupExe = Join-Path $setupDir "OllamaSetup.exe"
+function Get-OllamaExePath {
+    $defaultPath = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+    if (Test-Path $defaultPath) { return $defaultPath }
+    Refresh-PathEnv
+    $cmd = Get-Command ollama -ErrorAction SilentlyContinue
+    if ($cmd -and (Test-Path $cmd.Source)) { return $cmd.Source }
+    return $defaultPath
+}
 
 function Test-OllamaInstalled {
-    return Test-Path $ollamaPath
+    $path = Get-OllamaExePath
+    return Test-Path $path
+}
+
+function Install-OllamaOfficial {
+    Write-Info "Running official installer: irm https://ollama.com/install.ps1 | iex"
+    Write-Info "If Bitdefender prompts, choose Allow - this is the official Ollama script from ollama.com."
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $installScript = (Invoke-WebRequest -Uri "https://ollama.com/install.ps1" -UseBasicParsing -TimeoutSec 300).Content
+        if ($installScript -is [byte[]]) {
+            $installScript = [System.Text.Encoding]::UTF8.GetString($installScript)
+        }
+        Invoke-Expression $installScript
+        Start-Sleep -Seconds 3
+        Refresh-PathEnv
+        return Test-OllamaInstalled
+    } catch {
+        Write-Err "Official install.ps1 failed: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 function Install-OllamaViaWinget {
-    Write-Info "Trying winget (recommended - often allowed by corporate AV)..."
+    Write-Info "Trying winget fallback (Ollama.Ollama)..."
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $winget) { return $false }
     try {
         & winget install --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements --silent
-        if ($LASTEXITCODE -eq 0 -or (Test-OllamaInstalled)) { return $true }
-    } catch { }
-    return $false
+        Start-Sleep -Seconds 3
+        Refresh-PathEnv
+        return Test-OllamaInstalled
+    } catch {
+        return $false
+    }
 }
 
-function Install-OllamaViaDownload {
-    Write-Info "Downloading Ollama installer from ollama.com..."
+function Install-OllamaViaSetupExe {
+    Write-Info "Trying OllamaSetup.exe fallback..."
+    $installerUrl = "https://ollama.com/download/OllamaSetup.exe"
+    $setupDir = Join-Path $env:TEMP "SOTI-AI-OllamaSetup"
+    $setupExe = Join-Path $setupDir "OllamaSetup.exe"
     New-Item -ItemType Directory -Force -Path $setupDir | Out-Null
     try {
         Invoke-WebRequest -Uri $installerUrl -OutFile $setupExe -UseBasicParsing -TimeoutSec 300
+        if (-not (Test-Path $setupExe)) { return $false }
+        $proc = Start-Process -FilePath $setupExe -ArgumentList "/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+        if ($proc.ExitCode -ne 0 -and -not (Test-OllamaInstalled)) {
+            Start-Process -FilePath $setupExe -ArgumentList "/SILENT" -Wait | Out-Null
+        }
+        Refresh-PathEnv
+        return Test-OllamaInstalled
     } catch {
-        Write-Err "Download failed: $($_.Exception.Message)"
+        Write-Err "Setup.exe fallback failed: $($_.Exception.Message)"
         return $false
     }
-    if (-not (Test-Path $setupExe)) { return $false }
-
-    Write-Info "Running silent install (no browser, no click-through)..."
-    Write-Info "If Bitdefender blocks this, add an exclusion for: $setupExe and $ollamaPath"
-    $proc = Start-Process -FilePath $setupExe -ArgumentList "/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
-    if ($proc.ExitCode -ne 0 -and -not (Test-OllamaInstalled)) {
-        Write-Info "Silent flags returned $($proc.ExitCode); retrying with /SILENT..."
-        Start-Process -FilePath $setupExe -ArgumentList "/SILENT" -Wait | Out-Null
-    }
-    return Test-OllamaInstalled
 }
 
-# --- Step 1: Install ---
+function Wait-OllamaApi {
+    Write-Info "Waiting for Ollama API on http://localhost:11434 ..."
+    for ($i = 1; $i -le 45; $i++) {
+        try {
+            $r = Invoke-WebRequest -Uri "http://localhost:11434" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            if ($r.StatusCode -eq 200) { return $true }
+        } catch { }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Install-Llama32Model {
+    param([string]$OllamaExe)
+    Write-Header "Step 3: Install llama3.2 model (~2GB)"
+    Write-Info "Running: ollama pull llama3.2 (downloads the model used by ollama run llama3.2)..."
+    & $OllamaExe pull llama3.2
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Model download failed. Try manually: ollama pull llama3.2"
+        return $false
+    }
+    Write-Success "llama3.2 is installed and ready for ollama run llama3.2"
+    return $true
+}
+
+Write-Header "SOTI AI Analyser - Local AI Setup"
+Refresh-PathEnv
+
+# --- Step 1: Install Ollama ---
 if (Test-OllamaInstalled) {
-    Write-Success "Ollama already installed at $ollamaPath"
+    Write-Success "Ollama is already installed."
 } else {
     Write-Header "Step 1: Install Ollama"
-    $ok = Install-OllamaViaWinget
-    if (-not $ok) { $ok = Install-OllamaViaDownload }
+    $ok = Install-OllamaOfficial
+    if (-not $ok) { $ok = Install-OllamaViaWinget }
+    if (-not $ok) { $ok = Install-OllamaViaSetupExe }
     if (-not $ok) {
         Write-Err "Automatic install did not complete."
-        Write-Info "Manual fallback: run this file again as Administrator, or ask IT to allow Ollama.Ollama via winget."
-        Write-Info "Installer URL (official): $installerUrl"
+        Write-Info "If Bitdefender blocked the script, allow PowerShell and https://ollama.com for your user."
+        Write-Info "Manual install: open PowerShell and run: irm https://ollama.com/install.ps1 | iex"
         exit 1
     }
     Write-Success "Ollama installed successfully."
 }
 
-# --- Step 2: Start service ---
+$ollamaExe = Get-OllamaExePath
+if (-not (Test-Path $ollamaExe)) {
+    Write-Err "Ollama executable not found after install."
+    exit 1
+}
+
+# --- Step 2: Start / verify service ---
 Write-Header "Step 2: Start Ollama"
 if (-not (Get-Process ollama -ErrorAction SilentlyContinue)) {
     Write-Info "Starting Ollama..."
-    Start-Process -FilePath $ollamaPath -WindowStyle Hidden
+    Start-Process -FilePath $ollamaExe -WindowStyle Hidden
     Start-Sleep -Seconds 2
 }
-
-Write-Info "Waiting for API on http://localhost:11434 ..."
-$connected = $false
-for ($i = 1; $i -le 30; $i++) {
-    try {
-        $r = Invoke-WebRequest -Uri "http://localhost:11434" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-        if ($r.StatusCode -eq 200) { $connected = $true; break }
-    } catch { }
-    Start-Sleep -Seconds 1
-}
-if (-not $connected) {
+if (-not (Wait-OllamaApi)) {
     Write-Err "Ollama API not responding. Check the system tray icon or restart Ollama."
     exit 1
 }
 Write-Success "Ollama API is running."
 
-# --- Step 3: Pull model ---
-Write-Header "Step 3: Download llama3.2 model (~2GB)"
-Write-Info "This runs once; later use is offline."
-& $ollamaPath pull llama3.2
-if ($LASTEXITCODE -ne 0) {
-    Write-Err "Model pull failed. Run manually: ollama pull llama3.2"
+# --- Step 3: Model ---
+if (-not (Install-Llama32Model -OllamaExe $ollamaExe)) {
     exit 1
 }
 
 Write-Header "Setup complete"
 Write-Success "Local AI is ready."
 Write-Info "1. Reload the SOTI AI Analyser extension in Chrome."
-Write-Info "2. Open Settings - refresh models - Save."
-Write-Info "3. Optional AV exclusion path: $env:LOCALAPPDATA\Programs\Ollama"
+Write-Info "2. Open Settings (three dots menu) - refresh models - Save."
+Write-Info "3. Optional Bitdefender exclusion: $env:LOCALAPPDATA\Programs\Ollama"
 Write-Host ""
 pause
