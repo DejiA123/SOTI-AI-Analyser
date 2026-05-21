@@ -2166,7 +2166,7 @@ async function openSettingsModal() {
     await refreshSettingsModal();
 }
 
-$('btnSettings').onclick = openSettingsModal;
+if ($('btnSettings')) $('btnSettings').onclick = openSettingsModal;
 $('mSettingsClose').onclick = () => $('mSettings').style.display = 'none';
 
 $('localAiUrl').oninput = () => {
