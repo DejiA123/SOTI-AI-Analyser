@@ -414,13 +414,15 @@ function toast(msg, t = '', dur = 3000) {
 
 function getSmartLogSnippet(content, limit = 300000) {
     if (!content) return "";
-    if (content.length <= limit) return content;
 
     const lines = content.split('\n');
     const totalLines = lines.length;
 
     const forensicEntries = [];
     const seenLineNums = new Set();
+    const errorTypeCounts = {}; // Track distinct error type frequencies
+    let firstErrorLine = null;
+    let lastErrorLine = null;
 
     let inException = false;
     let exceptionLinesCount = 0;
@@ -429,21 +431,59 @@ function getSmartLogSnippet(content, limit = 300000) {
         const line = lines[i];
         const trimmed = line.trim();
 
-        // 100% Comprehensive Exception & Error Detection:
+        // === COMPREHENSIVE PATTERN DETECTION ENGINE ===
         const hasException = /Exception/i.test(line);
-        const hasErrorWord = /\b(Error|FATAL|Critical|Fail|Failed|Failure|Timeout|Deadlock|Refused|Unreachable)\b/i.test(line) || /timed\s*out/i.test(line);
+        const hasErrorWord = /\b(Error|FATAL|Critical|Fail|Failed|Failure|Timeout|Deadlock|Refused|Unreachable|Aborted|Crashed|Faulted|Corrupt)\b/i.test(line) || /timed\s*out/i.test(line);
         const hasLogSeverity = /\[(ERROR|FATAL|WARN|WARNING|CRITICAL)\]/i.test(line) || /\b(ERROR|FATAL|WARN|WARNING|CRITICAL):/i.test(line);
         const hasStackFrameIndicators = /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
         const isSotiCode = /\bMCMR-\d+\b/i.test(line);
 
+        // SQL & Database Intelligence
+        const hasSqlIssue = /\b(SqlException|SqlError|Deadlock|deadlocked|Login failed|Cannot open database|Connection pool|connection string|SQL Server|transaction|rollback|schema|collation|stored procedure|sp_|xp_)\b/i.test(line);
+
+        // Certificate & TLS Intelligence
+        const hasCertIssue = /\b(certificate|cert |SSL|TLS|handshake failed|X509|trust|chain|CRL|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors)\b/i.test(line);
+
+        // HTTP & Network Intelligence
+        const hasHttpIssue = /\b(HTTP\/|HTTP [45]\d\d|StatusCode|BadRequest|Unauthorized|Forbidden|NotFound|InternalServerError|BadGateway|ServiceUnavailable|GatewayTimeout|WebException|SocketException|ConnectFailure|ConnectionReset|DNS|resolve|ECONNREFUSED|ENOTFOUND)\b/i.test(line);
+
+        // Service Lifecycle Intelligence
+        const hasServiceEvent = /\b(service start|service stop|starting service|stopping service|service failed|restarting|OnStart|OnStop|ServiceBase|hosted service|application pool|recycl)\b/i.test(line);
+
+        // Memory & Thread Intelligence
+        const hasMemoryIssue = /\b(OutOfMemory|StackOverflow|ThreadAbort|thread pool|GC heap|memory pressure|heap size|working set|AccessViolation)\b/i.test(line);
+
+        // Authentication & Permissions Intelligence
+        const hasAuthIssue = /\b(Access denied|Unauthorized|forbidden|permission|credentials|login|logon|authentication failed|token expired|bearer|OAuth|LDAP bind|Kerberos|NTLM|impersonat)\b/i.test(line);
+
+        // Composite: is this line forensically interesting?
+        const isForensic = hasException || hasErrorWord || hasLogSeverity || hasStackFrameIndicators || isSotiCode || hasSqlIssue || hasCertIssue || hasHttpIssue || hasServiceEvent || hasMemoryIssue || hasAuthIssue;
+
+        // Track error type for summary
+        if (isForensic && !hasStackFrameIndicators) {
+            const categories = [];
+            if (hasSqlIssue) categories.push('SQL/Database');
+            if (hasCertIssue) categories.push('Certificate/TLS');
+            if (hasHttpIssue) categories.push('HTTP/Network');
+            if (hasServiceEvent) categories.push('Service Lifecycle');
+            if (hasMemoryIssue) categories.push('Memory/Thread');
+            if (hasAuthIssue) categories.push('Auth/Permission');
+            if (hasException) categories.push('Exception');
+            if (categories.length === 0 && (hasErrorWord || hasLogSeverity)) categories.push('Error/Warning');
+            categories.forEach(cat => { errorTypeCounts[cat] = (errorTypeCounts[cat] || 0) + 1; });
+            if (firstErrorLine === null) firstErrorLine = i + 1;
+            lastErrorLine = i + 1;
+        }
+
+        // === EXCEPTION CHAIN TRACKER ===
         if (inException) {
-            if (hasStackFrameIndicators || trimmed === "" || (exceptionLinesCount < 3) || hasException) {
+            if (hasStackFrameIndicators || trimmed === "" || (exceptionLinesCount < 5) || hasException) {
                 if (!seenLineNums.has(i + 1)) {
                     forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
                     seenLineNums.add(i + 1);
                 }
                 exceptionLinesCount++;
-                if (exceptionLinesCount > 50) {
+                if (exceptionLinesCount > 80) {
                     inException = false;
                 }
             } else {
@@ -451,7 +491,7 @@ function getSmartLogSnippet(content, limit = 300000) {
             }
         }
 
-        if (!inException && (hasException || hasStackFrameIndicators || (i < totalLines - 1 && /^\s*at\s+/i.test(lines[i + 1])))) {
+        if (!inException && (hasException || hasSqlIssue || hasCertIssue || hasMemoryIssue || hasStackFrameIndicators || (i < totalLines - 1 && /^\s*at\s+/i.test(lines[i + 1])))) {
             inException = true;
             exceptionLinesCount = 1;
             if (!seenLineNums.has(i + 1)) {
@@ -459,9 +499,9 @@ function getSmartLogSnippet(content, limit = 300000) {
                 seenLineNums.add(i + 1);
             }
         } else if (!inException) {
-            if (hasErrorWord || hasLogSeverity || isSotiCode) {
-                const start = Math.max(0, i - 3);
-                const end = Math.min(totalLines - 1, i + 3);
+            if (isForensic) {
+                const start = Math.max(0, i - 5);
+                const end = Math.min(totalLines - 1, i + 5);
                 for (let j = start; j <= end; j++) {
                     if (!seenLineNums.has(j + 1)) {
                         forensicEntries.push({ lineNum: j + 1, text: lines[j], isError: (j === i) });
@@ -527,10 +567,23 @@ function getSmartLogSnippet(content, limit = 300000) {
         });
     }
 
+    // === BUILD FORENSIC REPORT WITH INTELLIGENCE SUMMARY ===
     let forensicReport = "";
     if (compressedEntries.length > 0) {
         forensicReport = `\n\n=== FORENSIC INCIDENT REPORT (COMPLETE & CHRONOLOGICAL) ===\n`;
-        forensicReport += `Scanned all ${totalLines} lines. Capturing all exceptions, errors, and relevant context chronologically.\n`;
+        forensicReport += `Scanned all ${totalLines} lines. Found ${forensicEntries.length} forensic entries (${compressedEntries.length} after compression).\n`;
+        if (firstErrorLine && lastErrorLine) {
+            forensicReport += `Error window: Line ${firstErrorLine} through Line ${lastErrorLine}.\n`;
+        }
+        // Intelligence Summary
+        const cats = Object.entries(errorTypeCounts).sort((a, b) => b[1] - a[1]);
+        if (cats.length > 0) {
+            forensicReport += `\n--- ERROR CATEGORY BREAKDOWN ---\n`;
+            cats.forEach(([cat, count]) => {
+                forensicReport += `  ${cat}: ${count} occurrence(s)\n`;
+            });
+            forensicReport += `--- END BREAKDOWN ---\n`;
+        }
         
         let lastLineNum = -10;
         compressedEntries.forEach(entry => {
@@ -545,8 +598,14 @@ function getSmartLogSnippet(content, limit = 300000) {
         forensicReport = `\n\n[FORENSIC SCAN COMPLETE: No exceptions, warnings, or error-level entries detected in this log file.]`;
     }
 
-    const headSize = 15000;
-    const tailSize = 45000;
+    const headSize = 30000;
+    const tailSize = 100000;
+    
+    // If the file is small enough, just return the whole thing plus the report
+    if (content.length <= (headSize + tailSize)) {
+        return `[FULL LOG CONTENT]\n${content}\n${forensicReport}`;
+    }
+
     const head = content.slice(0, headSize);
     const tail = content.slice(-tailSize);
 
@@ -607,11 +666,12 @@ CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [MC
 
 RULES YOU MUST FOLLOW:
 1. NEVER tell the user to "check the SOTI website", "visit support.soti.com", "check Pulse", or "contact support". YOU already have the data. Just answer directly.
-2. When asked about versions: look at [MC VERSIONS], [AGENT VERSIONS], or [IDENTITY VERSIONS] in this prompt. The FIRST version listed is the LATEST (they are sorted newest-first). State the version number directly.
-3. When asked about release notes or what's new: look at [RELEASE NOTES] and [PULSE SEARCH]. Extract and present the relevant information.
-4. When asked about features or troubleshooting: use the SOTI KB below and any [DEEP RESEARCH] content.
-5. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
-6. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
+2. LATEST VERSION QUERIES: When asked "what is the latest version" of any SOTI product, you MUST look ONLY at [MC VERSIONS], [AGENT VERSIONS], or [IDENTITY VERSIONS]. The FIRST entry in each list is the LATEST official release (sorted newest-first). State that version number directly. Do NOT confuse version numbers found in [CASE] context (which is the customer's currently installed version) with the latest available release.
+3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
+4. When asked about release notes or what's new: look at [RELEASE NOTES] and [PULSE SEARCH]. Extract and present the relevant information. If specific details or features are NOT present in [RELEASE NOTES] or [DEEP RESEARCH], you MUST explicitly say "I do not have the release notes for that version." DO NOT fabricate or hallucinate features, fixes, or bullet points.
+5. When asked about features or troubleshooting: use the SOTI KB below, [DEEP RESEARCH] content, and [RELEASE NOTES].
+6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
+7. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
 
 SOTI KNOWLEDGE BASE:
 ${kbStr}
@@ -626,48 +686,91 @@ SOTI ARCHITECTURE:
 }
 
 function getLeanLogPrompt() {
-    return `You are a Senior SOTI Log Forensics Engineer. Your primary directive is to conduct a high-fidelity chronological triage and root-cause analysis of SOTI log files.
+    return `You are the world's best SOTI Log Forensics Engineer — a Level 3 Escalation specialist. Your SOLE mission is to find the EXACT root cause from the log data. You NEVER guess, generalize, or skip evidence.
 
-The log data is presented in three sections:
-1. [LOG HEAD] — startup configurations, environment parameters, and service initialization.
-2. [LOG TAIL] — the most recent raw activities.
-3. === FORENSIC INCIDENT REPORT === — a complete, line-by-line chronological extraction of all exceptions, stack traces, inner exceptions, and warning/error events from the ENTIRE log file. Repeating loops are compressed automatically.
+The log data has three sections:
+1. [LOG HEAD] — startup config, environment, service initialization. Check for misconfiguration here.
+2. [LOG TAIL] — most recent raw activity. The user's symptom usually manifests here.
+3. === FORENSIC INCIDENT REPORT === — a COMPLETE chronological extraction of EVERY exception, error, stack trace, inner exception chain, and warning from the ENTIRE log file. The ERROR CATEGORY BREAKDOWN at the top tells you what types of errors were found and how many. Repeating identical errors are compressed.
+
+YOU MUST SCAN THE ENTIRE FORENSIC INCIDENT REPORT LINE BY LINE. DO NOT SKIP ANY ENTRY.
 
 YOU MUST OUTPUT THIS EXACT STRUCTURE:
 
 ## LOG ANALYSIS REPORT
 
-### 1. CHRONOLOGICAL ERROR TIMELINE
-Trace every single error and exception event chronologically as they occurred in the FORENSIC INCIDENT REPORT.
-Format:
-- [Line Number] [TIMESTAMP] — Error detail / Exception class & message
-*Highlight if a service was restarted or connection dropped.*
+### 1. ENVIRONMENT SNAPSHOT
+Extract from [LOG HEAD]:
+- SOTI product & version detected
+- OS / .NET / SQL Server version if visible
+- Service name and startup mode
+- Any config warnings or deprecation notices at startup
 
-### 2. EXCEPTION ANALYSIS & DEEP DIVE
-For the distinct critical failure signatures found:
-- **Exception Class**: (e.g. System.Data.SqlClient.SqlException)
-- **Inner Exception Details**: (If chained via '--->' or 'caused by', extract the innermost root exception and its details)
-- **Stack Trace Origin**: Quote the bottom-most frame (the originating method call in SOTI code) and top-most frame (where it was thrown).
-- **Incident Occurrence & Line Range**: State the line range and occurrences.
+### 2. CHRONOLOGICAL ERROR TIMELINE
+List EVERY error and exception from the FORENSIC INCIDENT REPORT in strict chronological order.
+Format per entry:
+> **[Line XXXX]** [TIMESTAMP] — \`ExceptionClass\`: message summary
+> *Context: what operation was in progress*
 
-### 3. THE PROPAGATION PATH (DOMINO EFFECT)
-Draw the explicit step-by-step causal chain showing how the first chronological error triggered subsequent failures leading to the final symptom.
-Format:
-[Root Cause Event] -> [Downstream Component Error] -> [User-Visible Symptom]
-*Provide proof citations (line number & timestamp) for each link in the chain.*
+DO NOT SKIP or summarize entries. Each distinct error event MUST appear.
+Highlight: service restarts, connection drops, authentication failures, certificate errors.
 
-### 4. ROOT CAUSE VERDICT
-A single, definitive sentence declaring the root cause, backed by the exact line number, timestamp, and exception type.
+### 3. EXCEPTION DEEP DIVE
+For EACH distinct exception type found:
 
-### 5. CONCRETE MITIGATION & FIX
-Provide SOTI-specific resolution steps (e.g., specific port configurations, SQL collations, registry keys, Windows service actions, or SOTI console paths).
+#### Exception: [Full.Namespace.ExceptionClass]
+- **Message**: exact error message
+- **Inner Exception Chain**: trace the FULL chain: Outer → Inner → Innermost. The INNERMOST exception is the true cause.
+- **Stack Trace Origin**: read the stack trace BOTTOM-UP.
+  - **Originating Frame** (bottom): the SOTI method that started the operation
+  - **Throwing Frame** (top): where the exception was thrown
+  - Quote both frames exactly.
+- **Occurrences**: how many times, first/last line numbers and timestamps
+- **SQL-Specific Analysis** (if SqlException/Deadlock/Timeout):
+  - Error Number & Severity if present
+  - Was it a login failure, schema issue, timeout, deadlock, or connection pool exhaustion?
+  - Which database/server/query if visible?
+- **Certificate/TLS Analysis** (if cert-related):
+  - Which certificate failed? Expired? Untrusted chain? Name mismatch?
+  - Which component was performing the TLS handshake?
+- **HTTP/Network Analysis** (if HTTP error or SocketException):
+  - Status code & target URL if visible
+  - Was it outbound (SOTI → external) or inbound (client → SOTI)?
 
-RULES:
-- Read stack traces bottom-up to locate the originating code framework.
-- The innermost exception in a nested chain is the true root cause, not the outer wrapper.
-- Distinguish between causal errors (the origin) and symptomatic errors (the downstream impact).
-- Port Reference: MS-DS handshake (5494), Signal (13131), APNS (2197), Web (443).
-- The Web Console is hosted directly inside the SOTI Management Service (never mention IIS/Apache).`;
+### 4. THE PROPAGATION PATH (DOMINO EFFECT)
+Draw the EXACT causal chain from root cause to user-visible symptom:
+\`\`\`
+[ROOT CAUSE: exact exception @ Line X, Timestamp] 
+  → [DOWNSTREAM FAILURE 1: what broke next @ Line Y, Timestamp]
+  → [DOWNSTREAM FAILURE 2: cascading impact @ Line Z, Timestamp]
+  → [USER-VISIBLE SYMPTOM: what the user sees]
+\`\`\`
+Every link in the chain MUST cite a specific line number and timestamp from the FORENSIC INCIDENT REPORT.
+
+### 5. ROOT CAUSE VERDICT
+State in ONE sentence:
+> **ROOT CAUSE**: [ExceptionClass] at Line [X] ([TIMESTAMP]) — [exact reason]. This caused [downstream effect chain].
+
+This must be backed by direct evidence. If insufficient evidence exists, say: "Insufficient log evidence to determine root cause — additional logs needed: [specify which]." NEVER fabricate a root cause.
+
+### 6. CONCRETE MITIGATION & FIX
+Provide SOTI-specific resolution steps. Be surgical:
+- Exact Windows service names to restart
+- Exact registry paths or config file paths to modify
+- Exact SQL commands if database-related
+- Exact port numbers to check (MS-DS: 5494, Signal: 13131, APNS: 2197, Web: 443)
+- Exact SOTI Console navigation paths for settings changes
+- If an upgrade fixes it, cite the exact version and MCMR code
+
+CRITICAL RULES:
+- The Web Console is hosted INSIDE the SOTI Management Service. NEVER mention IIS or Apache.
+- Read stack traces BOTTOM-UP. The bottom frame is the origin.
+- The INNERMOST exception in a nested chain (after ---> or Inner Exception) is the TRUE root cause.
+- A SqlException, Timeout, or Deadlock is ALWAYS a high-priority root cause candidate.
+- Certificate errors and authentication failures are ALWAYS high-priority — they block entire subsystems.
+- Distinguish CAUSAL errors (the origin) from SYMPTOMATIC errors (downstream noise). Only the FIRST chronological error in a cascade is the root cause.
+- If the same error repeats 100+ times, it is likely a loop caused by a persistent upstream failure. Find that upstream failure.
+- NEVER say "multiple issues were found" without ranking them. ALWAYS identify THE primary root cause.`;
 }
 
 function getSysPrompt(mode = 'full') {
@@ -694,6 +797,7 @@ ${kbStr}
 - **Contextual Distinction**: You MUST check the [CASE CONTEXT] (product field) and query context to distinguish between the Android Agent and SOTI Identity. 
 - **Version Strictness (CRITICAL)**: You MUST match the specific version number requested (e.g., 2026.0.0) with the EXACT section in [RELEASE NOTES]. Features from one version (e.g., 2026.1.0) MUST NOT be attributed to another (e.g., 2026.0.0). If you are unsure, cite the version header you are looking at.
 - **SOTI Identity Queries**: When asked about "SOTI Identity [Version]", prioritize passwordless authentication, SSO, and user management features found in that specific release.
+- **LATEST vs CASE Versions (CRITICAL)**: The [CASE] section contains the customer's CURRENTLY INSTALLED version — use it for troubleshooting and comparison. The [MC VERSIONS], [AGENT VERSIONS], and [IDENTITY VERSIONS] lists contain ALL available official releases sorted newest-first. When asked "what is the latest version?", ALWAYS answer with the FIRST entry from the appropriate list. When troubleshooting, compare the customer's [CASE] version against [RELEASE NOTES] to find fixes in newer versions.
 
 ### SOTI ARCHITECT'S HANDBOOK:
 - **SOTI ONLY**: You are a SOTI specialist. NEVER recommend Microsoft or non-SOTI documentation unless it is a specific, known integration (e.g., KME, Zero-touch). For enrollment, ALWAYS use the afw#mobicontrol, QR, and EMM portal workflows defined in the handbook.
@@ -996,6 +1100,14 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         if (agentVerMatch) queryVersions.push(agentVerMatch[1]);
                     }
                     
+                    // Release Notes generic query fallback
+                    if (queryVersions.length === 0 && (query.toLowerCase().includes('release notes') || query.toLowerCase().includes('what is new') || query.toLowerCase().includes("what's new"))) {
+                        const qLowerIdentity = query.toLowerCase().includes('identity') || history.includes('identity');
+                        if (asksAgent && typeof AGENT_VERSIONS !== 'undefined' && AGENT_VERSIONS.length > 0) queryVersions.push(AGENT_VERSIONS[0]);
+                        else if (qLowerIdentity && typeof IDENTITY_VERSIONS !== 'undefined' && IDENTITY_VERSIONS.length > 0) queryVersions.push(IDENTITY_VERSIONS[0]);
+                        else if (typeof VERSIONS !== 'undefined' && VERSIONS.length > 0) queryVersions.push(VERSIONS[0]);
+                    }
+                    
                     const scoredBlocks = blocks.map(b => {
                         let score = 0;
                         const bTextLower = b.text.toLowerCase();
@@ -1111,34 +1223,64 @@ async function searchPulseAndDocs(query, msgs, ci) {
             asksIdentity ? sotiFetch(`https://pulse.soti.net/support/soti-identity/search/?q=${keywords}`, 8000) : Promise.resolve(null)
         ]);
 
+        // Helper to resolve relative URLs to absolute (DOMParser resolves to chrome-extension:// otherwise)
+        function resolveLink(href, baseOrigin) {
+            if (!href || href.startsWith('#') || href.startsWith('javascript:')) return null;
+            if (href.startsWith('http://') || href.startsWith('https://')) return href;
+            if (href.startsWith('/')) return baseOrigin + href;
+            return baseOrigin + '/' + href;
+        }
+
         const deepLinks = [];
         if (pHtml) {
             const doc = new DOMParser().parseFromString(pHtml, 'text/html');
-            const items = [...doc.querySelectorAll('a')].filter(a => a.href && a.href.includes('pulse.soti.net/support')).slice(0, 3);
-            PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.textContent.trim()}`; }).join('\n');
+            const items = [...doc.querySelectorAll('a')].map(a => ({
+                href: resolveLink(a.getAttribute('href'), 'https://pulse.soti.net'),
+                text: a.textContent.trim()
+            })).filter(a => a.href && a.href.includes('pulse.soti.net/support')).slice(0, 3);
+            PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
         if (dHtml) {
             const doc = new DOMParser().parseFromString(dHtml, 'text/html');
-            const items = [...doc.querySelectorAll('a')].filter(a => a.href && a.href.includes('/help/')).slice(0, 3);
-            DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.textContent.trim()}`; }).join('\n');
+            const items = [...doc.querySelectorAll('a')].map(a => ({
+                href: resolveLink(a.getAttribute('href'), 'https://docs.soti.net'),
+                text: a.textContent.trim()
+            })).filter(a => a.href && a.href.includes('/help/')).slice(0, 3);
+            DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
         if (iHtml) {
             const doc = new DOMParser().parseFromString(iHtml, 'text/html');
-            const items = [...doc.querySelectorAll('a')].filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
-            DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.textContent.trim()}`; }).join('\n');
+            const items = [...doc.querySelectorAll('a')].map(a => ({
+                href: resolveLink(a.getAttribute('href'), 'https://pulse.soti.net'),
+                text: a.textContent.trim()
+            })).filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
+            DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
 
+        // Parallel deep research: fetch top 3 links concurrently for broader context
         if (deepLinks.length > 0) {
-            const content = await sotiFetch(deepLinks[0], 15000);
-            if (content) {
-                const doc = new DOMParser().parseFromString(content, 'text/html');
-                doc.querySelectorAll('script, style, nav, footer, header').forEach(el => el.remove());
-                // Capture more procedurally relevant tags
-                let article = "";
-                doc.querySelectorAll('h1, h2, h3, h4, p, li, td, strong, span').forEach(el => {
-                    article += `${el.innerText.trim()}\n`;
-                });
-                RESEARCHED_ARTICLE_CONTENT = `[DEEP RESEARCH - ${deepLinks[0]}]:\n${article.slice(0, 7500)}`;
+            const linksToFetch = deepLinks.slice(0, 3);
+            const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
+            const articles = [];
+            const perArticleBudget = Math.floor(15000 / linksToFetch.length);
+
+            fetched.forEach((content, idx) => {
+                if (content) {
+                    const doc = new DOMParser().parseFromString(content, 'text/html');
+                    doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
+                    let article = "";
+                    doc.querySelectorAll('h1, h2, h3, h4, p, li, td, strong').forEach(el => {
+                        const t = (el.innerText || el.textContent || '').trim();
+                        if (t && t.length > 2) article += t + '\n';
+                    });
+                    if (article.length > 100) {
+                        articles.push(`[DEEP RESEARCH - ${linksToFetch[idx]}]:\n${article.slice(0, perArticleBudget)}`);
+                    }
+                }
+            });
+
+            if (articles.length > 0) {
+                RESEARCHED_ARTICLE_CONTENT = articles.join('\n\n---\n\n');
             }
         }
     } catch (e) { console.warn('Research failed', e); }
@@ -1151,19 +1293,43 @@ async function fetchLatestSOTIVersions() {
         sotiFetch('https://pulse.soti.net/support/soti-identity/release-notes/', 15000)
     ]);
 
-    const verRegex = /\b(20\d\d\.\d+(?:\.\d+)?)\b/g;
+    // DOM-targeted version extraction: parse HTML and target version headers/navigation
+    // elements rather than running a loose regex over the entire raw HTML body
+    function extractVersionsFromDOM(html) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        doc.querySelectorAll('script, style, nav, footer, svg, path, iframe, link').forEach(el => el.remove());
+        const versions = new Set();
+        const vRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/;
+        // Target 1: <h4> elements containing version numbers (release note headers)
+        doc.querySelectorAll('h4').forEach(h4 => {
+            const match = h4.textContent.match(vRx);
+            if (match) versions.add(match[1]);
+        });
+        // Target 2: Version navigation spans (sidebar links with onclick="setQueryParam('version',...)")
+        doc.querySelectorAll('[onclick*="setQueryParam"]').forEach(el => {
+            const match = el.textContent.match(vRx);
+            if (match) versions.add(match[1]);
+        });
+        // Target 3: Fallback — if DOM targets found nothing, use regex on body text only (not script/style)
+        if (versions.size === 0) {
+            const bodyText = doc.body ? doc.body.textContent : '';
+            const globalRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/g;
+            const matches = bodyText.match(globalRx) || [];
+            matches.forEach(v => versions.add(v));
+        }
+        return [...versions].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
+    }
 
     if (consoleHtml) {
-        VERSIONS = [...new Set(consoleHtml.match(verRegex) || [])].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
+        VERSIONS = extractVersionsFromDOM(consoleHtml);
     }
 
     if (agentHtml) {
-        const agentVerRegex = /\b(20\d\d\.\d+\.\d+)\b/g;
-        AGENT_VERSIONS = [...new Set(agentHtml.match(agentVerRegex) || [])].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
+        AGENT_VERSIONS = extractVersionsFromDOM(agentHtml);
     }
 
     if (identityHtml) {
-        IDENTITY_VERSIONS = [...new Set(identityHtml.match(verRegex) || [])].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
+        IDENTITY_VERSIONS = extractVersionsFromDOM(identityHtml);
     }
     
     updateVersionDropdowns();
