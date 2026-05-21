@@ -89,11 +89,21 @@ async function loadState() {
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            data = await chrome.storage.local.get(['cases', 'activeCaseId', 'msgs', 'ci', 'logs']);
+            data = await chrome.storage.local.get(['cases', 'activeCaseId', 'msgs', 'ci', 'logs', 'cachedVersions']);
         } else {
             // Fallback to localStorage if chrome API is missing (standalone mode)
             const local = localStorage.getItem('soti_ai_state');
             if (local) data = JSON.parse(local);
+            const cached = localStorage.getItem('soti_ai_cached_versions');
+            if (cached) data.cachedVersions = JSON.parse(cached);
+        }
+        
+        // Populate cached versions immediately on startup to avoid race conditions
+        if (data.cachedVersions) {
+            VERSIONS = data.cachedVersions.VERSIONS || [];
+            AGENT_VERSIONS = data.cachedVersions.AGENT_VERSIONS || [];
+            IDENTITY_VERSIONS = data.cachedVersions.IDENTITY_VERSIONS || [];
+            updateVersionDropdowns();
         }
         
         // Migration logic for old single-session data
@@ -867,7 +877,12 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const asksAgent = qLower.includes('agent') || history.includes('agent');
         const asksConsole = qLower.includes('mobicontrol') || qLower.includes('console') || history.includes('mobicontrol');
         const asksIdentity = qLower.includes('identity') || history.includes('identity') || (ci && ci.product === 'SOTI Identity');
-        const asksVersion = qLower.includes('latest') || qLower.includes('version') || qLower.includes('release') || qLower.includes('update') || /\d{4}\.\d\.\d/.test(query);
+        
+        // Expanded to capture troubleshooting keywords that should retrieve release notes
+        const asksVersion = qLower.includes('latest') || qLower.includes('version') || qLower.includes('release') || 
+                            qLower.includes('update') || qLower.includes('fixed') || qLower.includes('resolved') || 
+                            qLower.includes('mcmr') || qLower.includes('bug') || qLower.includes('upgrade') || 
+                            /\d{4}/.test(query);
 
         if (asksVersion) {
             let notes = [];
@@ -886,39 +901,114 @@ async function searchPulseAndDocs(query, msgs, ci) {
                 const html = await sotiFetch(url, 15000);
                 if (html) {
                     const doc = new DOMParser().parseFromString(html, 'text/html');
-                    doc.querySelectorAll('script, style, nav, footer, header, svg, path').forEach(el => el.remove());
+                    doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
                     
-                    let clean = "";
-                    const bodyText = doc.body.innerText.replace(/\s+/g, ' ');
+                    // Split the HTML using a regex that captures the version headers (typically H4 elements)
+                    const h4Regex = /(<h4[^>]*>\s*(?:v|Version)?\s*20\d\d\.\d+(?:\.\d+)?\s*<\/h4>)/gi;
+                    const parts = html.split(h4Regex);
                     
-                    // Version-Specific Extraction
-                    const verMatch = query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
-                    if (verMatch) {
-                        const targetVer = verMatch[1].replace(/\./g, '\\.');
-                        const verRegex = new RegExp(`(?:v|Version)?\\s*${targetVer}[\\s\\S]{1,4000}?(?=\\bv?\\s*\\d+\\.\\d+\\.\\d+|$)`, 'i');
-                        const verSection = bodyText.match(verRegex);
-                        if (verSection) {
-                            clean = `[EXACT VERSION ${verMatch[1]} MATCH]:\n${verSection[0].trim()}`;
+                    const blocks = [];
+                    // parts elements alternate between text before headers, headers, and content after headers
+                    for (let idx = 1; idx < parts.length; idx += 2) {
+                        const headerHtml = parts[idx];
+                        const blockHtml = parts[idx + 1] || "";
+                        
+                        const verMatch = headerHtml.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+                        if (verMatch) {
+                            const ver = verMatch[1];
+                            
+                            const blockDoc = new DOMParser().parseFromString(blockHtml, 'text/html');
+                            blockDoc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
+                            
+                            const blockText = blockDoc.body.innerText.replace(/\s+/g, ' ').trim();
+                            if (blockText.length > 50) {
+                                blocks.push({
+                                    version: ver,
+                                    text: blockText
+                                });
+                            }
                         }
                     }
-
-                    // Fallback to broad search if no exact version match or content is thin
-                    if (clean.length < 500) {
-                        const blocks = doc.querySelectorAll('h1, h2, h3, h4, table, .product-notes-content, .resolved-issues, .maintenance-release, [id*="Resolved"]');
-                        blocks.forEach(el => {
-                            const t = el.innerText.replace(/\s+/g, ' ').trim();
-                            if (t.length > 5) clean += `\n[${el.tagName || 'SECTION'}]: ${t}\n`;
-                        });
+                    
+                    // Score each version block by keyword overlap & requested versions
+                    const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for']);
+                    const queryWords = query.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
+                    
+                    const queryVersions = query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || [];
+                    const queryYears = query.match(/\b(20\d\d)\b/g) || [];
+                    
+                    const scoredBlocks = blocks.map(b => {
+                        let score = 0;
+                        const bTextLower = b.text.toLowerCase();
+                        
+                        // Exact Version Boost
+                        for (const qv of queryVersions) {
+                            if (b.version === qv) {
+                                score += 200;
+                            } else if (b.version.startsWith(qv)) {
+                                score += 100;
+                            }
+                        }
+                        
+                        // Year Boost
+                        for (const qy of queryYears) {
+                            if (b.version.startsWith(qy)) {
+                                score += 50;
+                            }
+                        }
+                        
+                        // Keyword Overlap
+                        for (const word of queryWords) {
+                            if (bTextLower.includes(word)) {
+                                score += 10;
+                                const occurrences = (bTextLower.split(word).length - 1);
+                                score += Math.min(occurrences, 5);
+                            }
+                        }
+                        
+                        return { block: b, score: score };
+                    });
+                    
+                    // Sort descending by score, then by version
+                    scoredBlocks.sort((a, b) => {
+                        if (b.score !== a.score) return b.score - a.score;
+                        return b.block.version.localeCompare(a.block.version, undefined, { numeric: true });
+                    });
+                    
+                    // Build context up to ~15k characters
+                    let clean = "";
+                    let charBudget = 15000;
+                    let includedCount = 0;
+                    const highestScore = scoredBlocks[0]?.score || 0;
+                    
+                    for (const sb of scoredBlocks) {
+                        // Skip unrelevant older blocks if we have high-scoring ones
+                        if (sb.score === 0 && includedCount >= 2 && highestScore > 0) {
+                            continue;
+                        }
+                        
+                        const formatBlock = `\n### VERSION ${sb.block.version} RELEASE NOTES:\n${sb.block.text}\n`;
+                        if (clean.length + formatBlock.length <= charBudget) {
+                            clean += formatBlock;
+                            includedCount++;
+                        } else {
+                            if (sb.score >= 100 && clean.length < 5000) {
+                                const remaining = charBudget - clean.length;
+                                clean += `\n### VERSION ${sb.block.version} RELEASE NOTES (TRUNCATED):\n${sb.block.text.slice(0, remaining - 100)}\n`;
+                                includedCount++;
+                            }
+                            break;
+                        }
                     }
-
-                    if (clean.length < 1000 && !clean.includes('[EXACT VERSION')) {
-                        const mcmrs = bodyText.match(/MCMR-\d+/g);
-                        if (mcmrs) clean += `\n[FOUND MCMRS]: ${mcmrs.join(', ')}\n\n${bodyText.slice(0, 5000)}`;
+                    
+                    // Fallback to broad block slice if split did not capture anything
+                    if (clean.length < 100) {
+                        clean = doc.body.innerText.replace(/\s+/g, ' ').slice(0, 10000);
                     }
-
+                    
                     if (clean.length > 200) {
-                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]:\n${clean.slice(0, 10000)}`);
-                        toast(`✓ ${type} Data Ready`, 's');
+                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA - RELEVANT NOTES]:\n${clean}`);
+                        toast(`✓ ${type} RAG Context Loaded`, 's');
                     }
                 }
             }
@@ -997,6 +1087,17 @@ async function fetchLatestSOTIVersions() {
     }
     
     updateVersionDropdowns();
+
+    // Cache the successfully loaded versions to storage to prevent startup race conditions
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            await chrome.storage.local.set({ cachedVersions: { VERSIONS, AGENT_VERSIONS, IDENTITY_VERSIONS } });
+        } else {
+            localStorage.setItem('soti_ai_cached_versions', JSON.stringify({ VERSIONS, AGENT_VERSIONS, IDENTITY_VERSIONS }));
+        }
+    } catch (e) {
+        console.error('Failed to cache versions:', e);
+    }
 }
 
 function updateVersionDropdowns() {
