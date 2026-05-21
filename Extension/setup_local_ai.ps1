@@ -26,7 +26,7 @@ function Test-OllamaInstalled {
 }
 
 function Install-OllamaViaWinget {
-    Write-Info "Trying winget (recommended — often allowed by corporate AV)..."
+    Write-Info "Trying winget (recommended - often allowed by corporate AV)..."
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $winget) { return $false }
     try {
@@ -108,7 +108,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Header "Setup complete"
 Write-Success "Local AI is ready."
 Write-Info "1. Reload the SOTI AI Analyser extension in Chrome."
-Write-Info "2. Open Settings (gear) → refresh models → Save."
+Write-Info "2. Open Settings - refresh models - Save."
 Write-Info "3. Optional AV exclusion path: $env:LOCALAPPDATA\Programs\Ollama"
 Write-Host ""
 pause
