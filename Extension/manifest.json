@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SOTI AI Analyser",
-  "version": "2.4.0",
+  "version": "2.4.4",
   "description": "Intelligent SOTI Log Analysis & Salesforce Integration",
   "permissions": [
     "sidePanel",
@@ -10,13 +10,17 @@
     "scripting",
     "storage",
     "unlimitedStorage",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "downloads"
   ],
   "host_permissions": [
     "https://*.soti.net/*",
     "https://*.salesforce.com/*",
     "https://*.force.com/*",
     "https://api.allorigins.win/*",
+    "https://api.codetabs.com/*",
+    "https://ollama.com/*",
+    "https://github.com/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],

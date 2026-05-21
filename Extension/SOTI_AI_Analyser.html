@@ -35,6 +35,10 @@
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
                 </button>
                 <div class="dropdown" id="moreDropdown" style="display:none">
+                    <button class="drop-item" id="btnSettings">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                        Settings
+                    </button>
                     <button class="drop-item" id="btnExport">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
                         Export Session
@@ -342,10 +346,13 @@
             </div>
 
             <div style="padding:10px 12px;border-radius:8px;margin-top:14px;font-size:11px;color:var(--txt2);background:rgba(255,255,255,0.03);border:1px solid var(--border);line-height:1.65">
-                <strong style="color:var(--txt1);display:block;margin-bottom:5px">🖥 Running Ollama locally?</strong>
-                <div>1. Install <a href="https://ollama.com" target="_blank" style="color:var(--blue);text-decoration:none">Ollama</a> — free &amp; open-source.</div>
-                <div>2. Pull a model: <code style="background:rgba(0,0,0,0.3);padding:1px 6px;border-radius:4px;font-size:10px">ollama pull llama3.2</code></div>
-                <div>3. Select it above and click Save.</div>
+                <strong style="color:var(--txt1);display:block;margin-bottom:5px">🖥 First-time Local AI setup</strong>
+                <div style="margin-bottom:8px">One automated installer — no browser, no manual Ollama download.</div>
+                <button type="button" class="btn" id="btnDownloadLocalAISetup" style="width:100%;margin-bottom:8px;background:var(--blue);color:#fff;border:none">Download setup_local_ai.bat</button>
+                <div>1. Run the downloaded <strong>setup_local_ai.bat</strong> (double-click).</div>
+                <div>2. Wait for “Setup complete” (~2GB model download once).</div>
+                <div>3. Reload this extension → refresh models above → Save.</div>
+                <div style="margin-top:6px;opacity:0.85">If Bitdefender blocks it: allow <code style="font-size:10px">setup_local_ai.bat</code> and <code style="font-size:10px">%LOCALAPPDATA%\Programs\Ollama</code>.</div>
             </div>
 
             <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">

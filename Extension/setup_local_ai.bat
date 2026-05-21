@@ -1,10 +1,11 @@
 @echo off
-title SOTI AI Analyser - Local AI Setup Helper
+title SOTI AI Analyser - Local AI Setup
 echo ==========================================
-echo Starting SOTI AI Analyser Local AI Setup
+echo SOTI AI Analyser - Automated Local AI Setup
 echo ==========================================
 echo.
-echo This helper script will configure your system for Local AI.
+echo Installs Ollama silently (winget or direct download).
+echo No browser or manual ollama.com steps required.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup_local_ai.ps1"
 if %errorlevel% neq 0 (

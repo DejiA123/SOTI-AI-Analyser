@@ -8,6 +8,9 @@ let PULSE_SEARCH_RESULTS = "";
 let DOCS_SEARCH_RESULTS = "";
 let RESEARCHED_ARTICLE_CONTENT = "";
 let VERSIONS = [], AGENT_VERSIONS = [], IDENTITY_VERSIONS = [];
+const PULSE_ORIGIN = 'https://pulse.soti.net';
+const DOCS_ORIGIN = 'https://docs.soti.net';
+let PULSE_RELEASE_NOTE_CATALOG = {};
 
 function md(t) {
     if (!t) return "";
@@ -23,6 +26,18 @@ function md(t) {
         .replace(/\n/g, '<br>')
         .replace(/^\s*(\d+\.)\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
         .replace(/^\s*[•*-]\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>');
+}
+
+function sanitizeAssistantResponse(text) {
+    return (text || "")
+        .replace(/\bAccording to\s+(?:available information|\[(?:MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE NOTES|PULSE SEARCH|DOCS SEARCH|DEEP RESEARCH|CASE|CASE CONTEXT|RELEASE_NOTES)\])\s*,?\s*/gi, "")
+        .replace(/\bbased on\s+\[(?:MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE NOTES|PULSE SEARCH|DOCS SEARCH|DEEP RESEARCH|CASE|CASE CONTEXT|RELEASE_NOTES)\]\s*,?\s*/gi, "")
+        .replace(/\s*\[(?:MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE NOTES|PULSE SEARCH|DOCS SEARCH|DEEP RESEARCH|CASE|CASE CONTEXT|RELEASE_NOTES)\]\s*,?\s*/gi, " ")
+        .replace(/\b(?:for more (?:detailed )?information|reference|see)\s*,?\s*(?:at\s*)?\[(?:DEEP RESEARCH|DOCS SEARCH|PULSE SEARCH)\][^\n.]*/gi, "")
+        .replace(/\bNo specific highlights[^.]*\./gi, "")
+        .replace(/\s{2,}/g, " ")
+        .replace(/\n {1,}/g, "\n")
+        .trim();
 }
 
 function getDefaultCI() {
@@ -2717,30 +2732,27 @@ function scrubPII(s) {
 }
 
 function getLeanQAPrompt() {
-    const kbStr = JSON.stringify(SOTI_KB, null, 2);
     return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
-CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [RELEASE NOTES], [PULSE SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse right now. You MUST use this data to answer questions.
+CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
 
 RULES YOU MUST FOLLOW:
 1. NEVER tell the user to "check the SOTI website", "visit support.soti.com", "check Pulse", or "contact support". YOU already have the data. Just answer directly.
-2. LATEST VERSION QUERIES: When asked "what is the latest version" of any SOTI product, you MUST look ONLY at [MC VERSIONS], [AGENT VERSIONS], or [IDENTITY VERSIONS]. The FIRST entry in each list is the LATEST official release (sorted newest-first). State that version number directly. Do NOT confuse version numbers found in [CASE] context (which is the customer's currently installed version) with the latest available release.
+2. LATEST VERSION QUERIES: When asked "what is the latest version" of any SOTI product, use the relevant version list internally and answer directly in plain language, e.g. "The latest Android Agent version is 2026.1.0." Do NOT mention internal prompt section names such as [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [CASE], [RELEASE NOTES], [PULSE SEARCH], or [DEEP RESEARCH]. Do NOT confuse version numbers found in case context (the customer's currently installed version) with the latest available release.
 3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
-4. When asked about release notes or what's new: look at [RELEASE NOTES] and [PULSE SEARCH]. Extract and present the relevant information. If specific details or features are NOT present in [RELEASE NOTES] or [DEEP RESEARCH], you MUST explicitly say "I do not have the release notes for that version." DO NOT fabricate or hallucinate features, fixes, or bullet points.
-5. When asked about features or troubleshooting: use the SOTI KB below, [DEEP RESEARCH] content, and [RELEASE NOTES].
+4. When asked about release notes or what's new for a SPECIFIC version (e.g. 2026.1.0): use ONLY the blocks labeled ### VERSION 2026.1.0 in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. If Highlights are empty but Resolved Issues exist for that version, present the resolved issues — do not claim the version has no information. If there is truly no ### VERSION block for the requested version, say you do not have that version's Pulse notes. NEVER tell the user to check [DEEP RESEARCH], [DOCS SEARCH], or any internal prompt label.
+5. When asked about features, configuration, or troubleshooting: use [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES] first. Only state facts that appear in those sections or in attached logs.
 6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
 7. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
+8. NEVER expose internal prompt/source labels to the user. Use natural phrasing like "The latest version is..." instead of "According to [AGENT VERSIONS]...".
+9. If [ISSUE SUMMARY] is empty but [CASE] meeting_notes has content, treat meeting_notes as the authoritative issue description (especially the Summary and Next steps sections).
+10. When asked for a short subject/title/name for a case, produce one concise line (about 6–12 words) from the case facts, e.g. "Certificate retrieval failure blocking device API calls" — not a generic label like "Critical SOTI MobiControl Issue Investigation".
 
-SOTI KNOWLEDGE BASE:
-${kbStr}
-
-SOTI ARCHITECTURE:
-- Management Service (MS) <-> SQL Database <-> Deployment Server (DS) <-> Device Agent
-- Ports: MS/DS Handshake=5494, Signal=13131, APNS=2197, Web=443/80
-- Web Console is hosted inside SOTI Management Service (NEVER mention IIS)
-- Enrollment: afw#mobicontrol, QR Code (tap Welcome 6x), Zero-Touch/KME
-- MobiControl versions: 202X.0.x series | Android Agent versions: 202X.1.x series
-- SOTI Identity: SSO, passwordless auth, LDAP/Entra ID integration`;
+VERSIONING (always apply):
+- MobiControl Console/Server: 202X.0.x | Android Agent / SOTI Identity: 202X.1.x
+- Middle digit 0 = Console; middle digit 1 = Agent or Identity (use product context to distinguish)
+- Web Console is hosted inside SOTI Management Service (NEVER mention IIS or a separate web hosting service)
+- Core topology: Management Service <-> SQL <-> Deployment Server <-> Device Agent | Ports: 5494, 13131, 2197, 443`;
 }
 
 function getLeanLogPrompt() {
@@ -2922,7 +2934,7 @@ ${kbStr}
 - **Contextual Distinction**: You MUST check the [CASE CONTEXT] (product field) and query context to distinguish between the Android Agent and SOTI Identity. 
 - **Version Strictness (CRITICAL)**: You MUST match the specific version number requested (e.g., 2026.0.0) with the EXACT section in [RELEASE NOTES]. Features from one version (e.g., 2026.1.0) MUST NOT be attributed to another (e.g., 2026.0.0). If you are unsure, cite the version header you are looking at.
 - **SOTI Identity Queries**: When asked about "SOTI Identity [Version]", prioritize passwordless authentication, SSO, and user management features found in that specific release.
-- **LATEST vs CASE Versions (CRITICAL)**: The [CASE] section contains the customer's CURRENTLY INSTALLED version — use it for troubleshooting and comparison. The [MC VERSIONS], [AGENT VERSIONS], and [IDENTITY VERSIONS] lists contain ALL available official releases sorted newest-first. When asked "what is the latest version?", ALWAYS answer with the FIRST entry from the appropriate list. When troubleshooting, compare the customer's [CASE] version against [RELEASE NOTES] to find fixes in newer versions.
+- **LATEST vs CASE Versions (CRITICAL)**: The case context contains the customer's CURRENTLY INSTALLED version — use it for troubleshooting and comparison. The product version lists contain ALL available official releases sorted newest-first. When asked "what is the latest version?", answer directly with the first entry from the appropriate list using natural language, for example "The latest Android Agent version is 2026.1.0." NEVER mention internal prompt labels such as [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [CASE], [RELEASE NOTES], [PULSE SEARCH], or [DEEP RESEARCH]. When troubleshooting, compare the customer's case version against release notes to find fixes in newer versions.
 
 ### SOTI ARCHITECT'S HANDBOOK:
 - **SOTI ONLY**: You are a SOTI specialist. NEVER recommend Microsoft or non-SOTI documentation unless it is a specific, known integration (e.g., KME, Zero-touch). For enrollment, ALWAYS use the afw#mobicontrol, QR, and EMM portal workflows defined in the handbook.
@@ -3085,16 +3097,386 @@ async function sotiFetch(url, timeout = 12000) {
 }
 
 async function fetchReleaseNotes(type, version) {
-    let url = 'https://pulse.soti.net/support/soti-mobicontrol/product-notes/release-notes/';
-    if (type === 'agent') url = 'https://pulse.soti.net/support/soti-mobicontrol/product-notes/android-agent-release-notes/';
-    if (type === 'identity') url = 'https://pulse.soti.net/support/soti-identity/release-notes/';
-    const html = await sotiFetch(url, 12000);
+    const catalog = type === 'identity' ? [] : await discoverPulseReleaseNoteCatalog('soti-mobicontrol');
+    const sources = type === 'identity'
+        ? [{ url: `${PULSE_ORIGIN}/support/soti-identity/release-notes/`, type: 'Identity' }]
+        : selectReleaseNoteSources(`${type} ${version}`, '', null, catalog);
+    const preferred = sources.find(s => s.type.toLowerCase().includes(type)) || sources[0];
+    if (!preferred) return null;
+    const html = await sotiFetch(preferred.url, 12000);
     if (!html) return null;
+    const blocks = extractPulseReleaseNoteBlocks(html).filter(b => b.version === version || b.version.startsWith(version));
+    if (blocks.length) {
+        return `[RAW ${preferred.type.toUpperCase()} ${version} NOTES]:\n` + blocks.map(b => `### ${b.version} - ${b.type}\n${b.text}`).join('\n\n').slice(0, 4000);
+    }
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const text = doc.body.textContent;
     const regex = new RegExp(`(?:v|Version)?\\s*${version.replace('.', '\\.')}[\\s\\S]{1,1000}?(?=\\bv?\\s*\\d+\\.\\d+|$)`, 'i');
     const match = text.match(regex);
-    return match ? `[RAW ${type.toUpperCase()} ${version} NOTES]:\n${match[0].trim().slice(0, 1500)}` : null;
+    return match ? `[RAW ${preferred.type.toUpperCase()} ${version} NOTES]:\n${match[0].trim().slice(0, 1500)}` : null;
+}
+
+function cleanPulseText(text) {
+    return (text || "")
+        .replace(/\u2011/g, "-")
+        .replace(/\u00a0/g, " ")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
+function flushPulseNoteBuckets(version, buckets, blocks) {
+    if (!version) return;
+    Object.entries(buckets).forEach(([type, values]) => {
+        const text = cleanPulseText(values.join("\n"));
+        if (text.length > 20) blocks.push({ version, type, text });
+    });
+}
+
+function classifyPulseSectionHeading(text) {
+    const t = cleanPulseText(text).toLowerCase();
+    if (/^resolved issues?$/.test(t)) return "Resolved Issues";
+    if (/^known issues?$/.test(t)) return "Known Issues";
+    if (/release highlights|highlights|what'?s new/.test(t)) return "Highlights";
+    return null;
+}
+
+function extractPulseReleaseNoteBlocks(html) {
+    const doc = new DOMParser().parseFromString(html || "", 'text/html');
+    doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
+    const versionHeadingRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/;
+    const blocks = [];
+    const layoutItems = Array.from(doc.querySelectorAll('.umb-block-grid__layout-item'));
+
+    if (layoutItems.length > 0) {
+        let currentVersion = null;
+        let currentType = "Highlights";
+        const buckets = { Highlights: [], "Resolved Issues": [], "Known Issues": [] };
+
+        layoutItems.forEach(item => {
+            const h1 = item.querySelector('h1');
+            if (h1 && versionHeadingRx.test(h1.textContent || "")) {
+                flushPulseNoteBuckets(currentVersion, buckets, blocks);
+                currentVersion = ((h1.textContent || "").match(versionHeadingRx) || [])[1];
+                Object.keys(buckets).forEach(k => { buckets[k] = []; });
+                currentType = "Highlights";
+                return;
+            }
+            const h2 = item.querySelector('h2');
+            if (h2) {
+                const section = classifyPulseSectionHeading(h2.textContent || "");
+                if (section) {
+                    currentType = section;
+                    return;
+                }
+            }
+            if (!currentVersion) return;
+
+            const table = item.querySelector('table');
+            if (table) {
+                table.querySelectorAll('tr').forEach(tr => {
+                    const cells = tr.querySelectorAll('td');
+                    if (cells.length >= 2) {
+                        const code = cleanPulseText(cells[0].textContent);
+                        const desc = cleanPulseText(cells[1].textContent);
+                        if (code && desc) buckets["Resolved Issues"].push(`- ${code}: ${desc}`);
+                    } else if (cells.length === 1) {
+                        const t = cleanPulseText(cells[0].textContent);
+                        if (t) buckets[currentType].push(`- ${t}`);
+                    }
+                });
+                return;
+            }
+
+            const rich = item.querySelector('.umbBlockGridRichTextBlock, .contents');
+            if (rich) {
+                const parts = [];
+                rich.querySelectorAll('p, li, h3, h4').forEach(el => {
+                    const t = cleanPulseText(el.textContent || "");
+                    if (t && t.length > 2) parts.push(`- ${t}`);
+                });
+                if (!parts.length) {
+                    const t = cleanPulseText(rich.textContent || "");
+                    if (t.length > 20) parts.push(t);
+                }
+                if (parts.length) buckets[currentType].push(parts.join("\n"));
+            }
+        });
+        flushPulseNoteBuckets(currentVersion, buckets, blocks);
+        if (blocks.length > 0) return blocks;
+    }
+
+    const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4'))
+        .filter(h => versionHeadingRx.test(h.textContent || ""));
+    headings.forEach((heading, idx) => {
+        const ver = ((heading.textContent || "").match(versionHeadingRx) || [])[1];
+        if (!ver) return;
+        const nextHeading = headings[idx + 1] || null;
+        const sectionNodes = [];
+        let node = heading.nextElementSibling;
+        while (node && node !== nextHeading) {
+            if (/^H[1-4]$/i.test(node.tagName || "") && versionHeadingRx.test(node.textContent || "")) break;
+            sectionNodes.push(node);
+            node = node.nextElementSibling;
+        }
+        const sectionHtml = sectionNodes.map(n => n.outerHTML || n.textContent || "").join("\n");
+        const sectionDoc = new DOMParser().parseFromString(`<div>${sectionHtml}</div>`, 'text/html');
+        let currentType = "Highlights";
+        const buckets = { Highlights: [], "Resolved Issues": [], "Known Issues": [] };
+        Array.from(sectionDoc.body.querySelector('div')?.children || sectionDoc.body.children).forEach(child => {
+            const section = classifyPulseSectionHeading(child.textContent || "");
+            if (section) { currentType = section; return; }
+            let text = "";
+            child.querySelectorAll && child.querySelectorAll('p, li, td, th').forEach(el => {
+                const t = cleanPulseText(el.textContent || "");
+                if (t && !/^resolved issues?$|^known issues?$/i.test(t)) text += `- ${t}\n`;
+            });
+            if (!text) text = cleanPulseText(child.textContent || "");
+            if (text && !/^resolved issues?$|^known issues?$/i.test(text)) buckets[currentType].push(text);
+        });
+        flushPulseNoteBuckets(ver, buckets, blocks);
+    });
+    return blocks;
+}
+
+async function readPulseCatalogCache(supportSlug) {
+    const key = `pulse_catalog_${supportSlug}`;
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+            const data = await chrome.storage.local.get(key);
+            const entry = data[key];
+            if (entry?.entries?.length && (Date.now() - (entry.ts || 0)) < 86400000) return entry.entries;
+        } else {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+                const entry = JSON.parse(raw);
+                if (entry?.entries?.length && (Date.now() - (entry.ts || 0)) < 86400000) return entry.entries;
+            }
+        }
+    } catch (_) { }
+    return null;
+}
+
+async function writePulseCatalogCache(supportSlug, entries) {
+    const key = `pulse_catalog_${supportSlug}`;
+    const payload = { entries, ts: Date.now() };
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+            await chrome.storage.local.set({ [key]: payload });
+        } else {
+            localStorage.setItem(key, JSON.stringify(payload));
+        }
+    } catch (_) { }
+}
+
+async function discoverPulseReleaseNoteCatalog(supportSlug = 'soti-mobicontrol') {
+    if (PULSE_RELEASE_NOTE_CATALOG[supportSlug]?.length) return PULSE_RELEASE_NOTE_CATALOG[supportSlug];
+    const cached = await readPulseCatalogCache(supportSlug);
+    if (cached?.length) {
+        PULSE_RELEASE_NOTE_CATALOG[supportSlug] = cached;
+        return cached;
+    }
+    const entries = [];
+    const indexUrl = `${PULSE_ORIGIN}/support/${supportSlug}/product-notes/`;
+    const html = await sotiFetch(indexUrl, 12000);
+    if (html) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        doc.querySelectorAll('a[href*="/product-notes/"]').forEach(a => {
+            let href = (a.getAttribute('href') || '').split('?')[0];
+            if (!href || href.endsWith('/product-notes/') || href.endsWith('/product-notes')) return;
+            if (href.startsWith('http')) {
+                try { href = new URL(href).pathname; } catch (_) { return; }
+            }
+            if (!href.startsWith('/support/')) href = `/support/${supportSlug}${href.startsWith('/') ? '' : '/'}${href}`;
+            if (!href.includes(`/support/${supportSlug}/product-notes/`)) return;
+            const label = cleanPulseText(a.textContent || '') || href.split('/').filter(Boolean).pop();
+            if (!entries.some(e => e.path === href)) entries.push({ path: href, label });
+        });
+    }
+    PULSE_RELEASE_NOTE_CATALOG[supportSlug] = entries;
+    if (entries.length) await writePulseCatalogCache(supportSlug, entries);
+    return entries;
+}
+
+function versionToPulseSlug(version) {
+    return (version || "").replace(/\./g, "-");
+}
+
+/** Read version=… slugs from Pulse sidebar (setQueryParam) — not a fixed version list. */
+function discoverPulseVersionParamVariants(html, version) {
+    const slug = versionToPulseSlug(version);
+    const variants = new Set([slug]);
+    if (!html) return [...variants];
+    const re = /setQueryParam\s*\(\s*['"]version['"]\s*,\s*['"]([^'"]+)['"]/gi;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+        const param = m[1];
+        if (param === slug || param.startsWith(slug + "~")) variants.add(param);
+    }
+    return [...variants];
+}
+
+function buildPulseVersionFetchUrls(baseUrl, version, pageHtml) {
+    const base = (baseUrl || "").replace(/\?.*$/, "");
+    if (!version) return [base];
+    const params = discoverPulseVersionParamVariants(pageHtml, version);
+    return [base, ...params.map(v => `${base}?version=${encodeURIComponent(v)}`)];
+}
+
+function isPulseBoilerplateHighlight(text) {
+    const t = cleanPulseText(text).toLowerCase();
+    if (!t) return true;
+    if (/^download the android enterprise device agent/i.test(t)) return true;
+    return t.length < 100 && /google play store|agent downloads page/i.test(t);
+}
+
+async function fetchPulseReleaseBlocksForVersion(baseUrl, primaryVersion) {
+    const base = (baseUrl || "").replace(/\?.*$/, "");
+    const pageHtml = await sotiFetch(base, 15000);
+    const urls = buildPulseVersionFetchUrls(baseUrl, primaryVersion, pageHtml);
+    for (const fetchUrl of urls) {
+        const html = await sotiFetch(fetchUrl, 15000);
+        if (!html) continue;
+        let blocks = extractPulseReleaseNoteBlocks(html);
+        if (primaryVersion) {
+            const matched = blocks.filter(b => b.version === primaryVersion);
+            if (matched.length) {
+                blocks = blocks
+                    .filter(b => b.version === primaryVersion)
+                    .map(b => (b.type === "Highlights" && isPulseBoilerplateHighlight(b.text) ? { ...b, text: "" } : b))
+                    .filter(b => cleanPulseText(b.text).length > 15);
+                return { blocks, fetchUrl };
+            }
+        } else if (blocks.length) {
+            return { blocks, fetchUrl };
+        }
+    }
+    if (!pageHtml) return { blocks: [], fetchUrl: base };
+    let blocks = extractPulseReleaseNoteBlocks(pageHtml);
+    if (primaryVersion) {
+        blocks = blocks.filter(b => b.version === primaryVersion);
+    }
+    return { blocks, fetchUrl: base };
+}
+
+function buildEffectiveIssueSummary(ci) {
+    const summary = ((ci && ci.issue_summary) || ($('issueSummary') && $('issueSummary').value) || '').trim();
+    if (summary) return summary;
+    const notes = ((ci && ci.meeting_notes) || ($('meetingNotes') && $('meetingNotes').value) || '').trim();
+    const template = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
+    if (!notes || notes === template) return '';
+    const summaryMatch = notes.match(/Summary:\s*([\s\S]*?)(?=\n\s*(?:Troubleshooting steps|Next steps):|$)/i);
+    if (summaryMatch && summaryMatch[1].trim()) return summaryMatch[1].trim();
+    return notes.slice(0, 2500);
+}
+
+function getCaseResearchContext(query, history, ci) {
+    return [
+        query || '',
+        history || '',
+        ci?.issue_summary || '',
+        ci?.meeting_notes || '',
+        ci?.email_chain || '',
+        ci?.product || '',
+        ci?.soti_version || '',
+        ci?.agent_version || ''
+    ].join('\n');
+}
+
+function isUsefulPulseResearchLink(href, text) {
+    if (!href) return false;
+    const u = href.toLowerCase().replace(/\/$/, '');
+    const label = (text || '').trim();
+    if (!label || /^product support$/i.test(label)) return false;
+    if (/\/support\/soti-mobicontrol$/.test(u) || /\/support\/soti-identity$/.test(u)) return false;
+    return /product-notes|\/articles\/|\/help\/|\/videos\/|\/faqs\/|certified-devices|android-agent|release-notes/i.test(u);
+}
+
+function extractDeepResearchArticle(doc) {
+    doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link, form').forEach(el => el.remove());
+    const root = doc.querySelector('main, article, .umb-block-grid, [role="main"]') || doc.body;
+    if (!root) return '';
+    let article = '';
+    root.querySelectorAll('h1, h2, h3, h4, p, li, td, strong').forEach(el => {
+        const t = (el.innerText || el.textContent || '').trim();
+        if (t && t.length > 2) article += t + '\n';
+    });
+    return article.trim();
+}
+
+function isLowQualityResearchArticle(text) {
+    const t = (text || '').toLowerCase();
+    if (t.length < 120) return true;
+    const noise = ['choose login type', 'reset your password', 'verify your email', 'recaptcha', 'privacy policy', 'terms of service', 'soti customers', 'download soti mobicontrol installer'];
+    const hits = noise.filter(p => t.includes(p)).length;
+    return hits >= 2;
+}
+
+function parseRequestedVersions(query, history, ci) {
+    const fromQuery = [...new Set((query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []))];
+    if (fromQuery.length) return fromQuery;
+    const caseText = [ci?.meeting_notes, ci?.issue_summary, ci?.email_chain, history].filter(Boolean).join('\n');
+    const fromCase = [...new Set((caseText.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []))];
+    if (fromCase.length) return fromCase;
+    const fromHistory = [...new Set((history.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []))];
+    if (fromHistory.length) return fromHistory.slice(0, 2);
+    const combined = `${query} ${history}`.toLowerCase();
+    const asksAgent = /\b(android|agent|aea|device agent)\b/.test(combined);
+    if (ci) {
+        if (asksAgent && ci.agent_version) {
+            const m = ci.agent_version.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+            if (m) return [m[1]];
+        }
+        if (ci.soti_version) {
+            const m = ci.soti_version.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+            if (m) return [m[1]];
+        }
+    }
+    return [];
+}
+
+function selectReleaseNoteSources(query, history, ci, catalog) {
+    const combined = `${query || ''} ${history || ''} ${ci?.product || ''} ${ci?.soti_version || ''} ${ci?.agent_version || ''}`.toLowerCase();
+    const sources = [];
+    const addPath = (path, type) => {
+        const normalized = path.startsWith('http') ? path : `${PULSE_ORIGIN}${path.startsWith('/') ? path : '/' + path}`;
+        if (!sources.some(s => s.url === normalized)) sources.push({ url: normalized, type });
+    };
+    const addByFragment = (fragment, type) => {
+        const entry = catalog.find(e => e.path.includes(fragment));
+        if (entry) addPath(entry.path, type);
+    };
+
+    if (/identity/.test(combined) || (ci?.product || '').toLowerCase().includes('identity')) {
+        addPath('/support/soti-identity/release-notes/', 'Identity');
+        return sources;
+    }
+
+    const rules = [
+        { rx: /\b(ios|iphone|ipad)\b/, fragment: 'ios-agent-release-notes', type: 'iOS Agent' },
+        { rx: /\b(linux)\b/, fragment: 'linux-agent-release-notes', type: 'Linux Agent' },
+        { rx: /\b(macos|mac\s*os)\b/, fragment: 'macos-agent-release-notes', type: 'macOS Agent' },
+        { rx: /\b(soti\s+surf|surf\s+client)\b/, fragment: 'soti-surf-release-notes', type: 'SOTI Surf' },
+        { rx: /\b(soti\s+hub)\b/, fragment: 'soti-hub-release-notes', type: 'SOTI Hub' },
+        { rx: /\b(settings\s+manager)\b/, fragment: 'settings-manager-release-notes', type: 'Settings Manager' },
+        { rx: /\b(cloud\s*link)\b/, fragment: 'cloud-link-release-notes', type: 'Cloud Link' },
+        { rx: /\b(companion)\b/, fragment: 'android-companion', type: 'Android Companion' },
+        { rx: /\b(stella)\b/, fragment: 'stella', type: 'Stella' },
+        { rx: /\b(android|aea|device agent|play store agent)\b/, fragment: 'android-agent-release-notes', type: 'Agent' },
+        { rx: /\b(console|server|management service|mc\s+version|soti\s+version)\b/, fragment: 'product-notes/release-notes', type: 'Console' },
+        { rx: /\b(mobicontrol)\b/, fragment: 'product-notes/release-notes', type: 'Console' }
+    ];
+    rules.forEach(rule => {
+        if (rule.rx.test(combined)) addByFragment(rule.fragment, rule.type);
+    });
+
+    if (!sources.length) {
+        ['release-notes', 'android-agent-release-notes'].forEach(fragment => {
+            const entry = catalog.find(e => e.path.includes(fragment));
+            if (entry) addPath(entry.path, fragment.includes('android') ? 'Agent' : 'Console');
+        });
+    }
+    return sources;
 }
 
 async function searchPulseAndDocs(query, msgs, ci) {
@@ -3102,148 +3484,63 @@ async function searchPulseAndDocs(query, msgs, ci) {
         PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
         const qLower = query.toLowerCase();
         const history = (msgs || []).map(m => m.content.toLowerCase()).join(' ');
+        const caseBlob = getCaseResearchContext(query, history, ci);
+        const combinedLower = caseBlob.toLowerCase();
         
-        const asksAgent = qLower.includes('agent') || history.includes('agent');
-        const asksConsole = qLower.includes('mobicontrol') || qLower.includes('console') || history.includes('mobicontrol');
-        const asksIdentity = qLower.includes('identity') || history.includes('identity') || (ci && ci.product === 'SOTI Identity');
+        const asksIdentity = combinedLower.includes('identity') || (ci && ci.product === 'SOTI Identity');
+        const asksReleaseNotes = /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|mcmr[\s-]*\d|fixed\s+in|fixed\s+since)\b/i.test(combinedLower);
+        const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(combinedLower);
         
-        // Expanded to capture troubleshooting keywords that should retrieve release notes
-        const asksVersion = qLower.includes('latest') || qLower.includes('version') || qLower.includes('release') || 
-                            qLower.includes('update') || qLower.includes('fixed') || qLower.includes('resolved') || 
-                            qLower.includes('mcmr') || qLower.includes('bug') || qLower.includes('upgrade') || 
-                            /\d{4}/.test(query);
+        const asksVersion = asksReleaseNotes || /\b(latest|version|release|update|fixed|resolved|mcmr|bug|upgrade|certificate|cert\b)\b/i.test(combinedLower) ||
+                            /\b(what about|how about)\b/i.test(query) ||
+                            /\b(20\d\d\.\d+(?:\.\d+)?)\b/.test(caseBlob);
 
         if (asksVersion) {
             let notes = [];
-            
-            const pulseUrls = [];
-            if (asksAgent || (!asksAgent && !asksConsole && !asksIdentity)) pulseUrls.push('https://pulse.soti.net/support/soti-mobicontrol/product-notes/android-agent-release-notes/');
-            if (asksConsole || (!asksAgent && !asksConsole && !asksIdentity)) pulseUrls.push('https://pulse.soti.net/support/soti-mobicontrol/product-notes/release-notes/');
-            if (asksIdentity) pulseUrls.push('https://pulse.soti.net/support/soti-identity/release-notes/');
+            const catalog = asksIdentity
+                ? []
+                : await discoverPulseReleaseNoteCatalog('soti-mobicontrol');
+            const pulseSources = asksIdentity
+                ? [{ url: `${PULSE_ORIGIN}/support/soti-identity/release-notes/`, type: 'Identity' }]
+                : selectReleaseNoteSources(query, history, ci, catalog);
 
-            for (const url of pulseUrls) {
-                let type = 'Console';
-                if (url.includes('android-agent')) type = 'Agent';
-                if (url.includes('soti-identity')) type = 'Identity';
-                toast(`Scraping ${type} Notes...`, 'i');
+            for (const { url, type } of pulseSources) {
+                toast(`Fetching ${type} notes from Pulse...`, 'i');
                 
-                const html = await sotiFetch(url, 15000);
-                if (html) {
-                    const doc = new DOMParser().parseFromString(html, 'text/html');
-                    doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
-                    
-                    // Split the HTML using a regex that captures the version headers (typically H4 elements)
-                    const h4Regex = /(<h4[^>]*>\s*(?:v|Version)?\s*20\d\d\.\d+(?:\.\d+)*(?:\.x)?\s*<\/h4>)/gi;
-                    const parts = html.split(h4Regex);
-                    
-                    const blocks = [];
-                    // parts elements alternate between text before headers, headers, and content after headers
-                    for (let idx = 1; idx < parts.length; idx += 2) {
-                        const headerHtml = parts[idx];
-                        const blockHtml = parts[idx + 1] || "";
-                        
-                        const verMatch = headerHtml.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
-                        if (verMatch) {
-                            const ver = verMatch[1];
-                            
-                            const blockDoc = new DOMParser().parseFromString(blockHtml, 'text/html');
-                            blockDoc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
-                            
-                            // Segment the block into Highlights and Resolved Issues if "Resolved Issues" exists
-                            let highlightsText = "";
-                            let resolvedText = "";
-                            let foundResolved = false;
-                            
-                            const children = Array.from(blockDoc.body.children);
-                            if (children.length > 0) {
-                                for (const child of children) {
-                                    let isHeading = false;
-                                    if (child.tagName.match(/^H[1-4]$/i) && child.textContent.trim().toLowerCase() === 'resolved issues') {
-                                        isHeading = true;
-                                    } else {
-                                        const h = child.querySelector('h1, h2, h3, h4');
-                                        if (h && h.textContent.trim().toLowerCase() === 'resolved issues') {
-                                            isHeading = true;
-                                        }
-                                    }
-                                    
-                                    if (isHeading) {
-                                        foundResolved = true;
-                                    }
-                                    
-                                    // Normalize non-breaking hyphens (\u2011) to standard hyphens (-) for perfect matching
-                                    const childText = child.innerText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').trim();
-                                    if (childText) {
-                                        if (foundResolved) {
-                                            resolvedText += childText + "\n";
-                                        } else {
-                                            highlightsText += childText + "\n";
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Fallback for flat text block
-                                highlightsText = blockDoc.body.innerText;
-                            }
-                            
-                            highlightsText = highlightsText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').trim();
-                            resolvedText = resolvedText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').trim();
-                            
-                            if (highlightsText.length > 50) {
-                                blocks.push({
-                                    version: ver,
-                                    type: 'Highlights',
-                                    text: highlightsText
-                                });
-                            }
-                            if (resolvedText.length > 50) {
-                                blocks.push({
-                                    version: ver,
-                                    type: 'Resolved Issues',
-                                    text: resolvedText
-                                });
-                            }
-                        }
-                    }
-                    
+                const queryVersionsEarly = parseRequestedVersions(query, history, ci);
+                const primaryVersionEarly = queryVersionsEarly[0] || null;
+                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, primaryVersionEarly);
+                const blocks = pulseLoad.blocks;
+                const resolvedUrl = pulseLoad.fetchUrl;
+                if (blocks.length) {
                     // Score each version block by keyword overlap & requested versions
                     const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for']);
                     const queryWords = query.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
                     
-                    // Extract query versions and include conversation history context
-                    const queryVersions = [...new Set([
-                        ...(query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []),
-                        ...(history.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || [])
-                    ])];
+                    const queryVersions = parseRequestedVersions(query, history, ci);
+                    const primaryVersion = queryVersions[0] || null;
                     const queryYears = query.match(/\b(20\d\d)\b/g) || [];
                     
-                    // Inject case-configured version if present
-                    if (ci && (ci.soti_version || ci.agent_version)) {
-                        const sotiVerMatch = (ci.soti_version || '').match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
-                        if (sotiVerMatch) queryVersions.push(sotiVerMatch[1]);
-                        const agentVerMatch = (ci.agent_version || '').match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
-                        if (agentVerMatch) queryVersions.push(agentVerMatch[1]);
-                    }
-                    
-                    // Release Notes generic query fallback
-                    if (queryVersions.length === 0 && (query.toLowerCase().includes('release notes') || query.toLowerCase().includes('what is new') || query.toLowerCase().includes("what's new"))) {
-                        const qLowerIdentity = query.toLowerCase().includes('identity') || history.includes('identity');
-                        if (asksAgent && typeof AGENT_VERSIONS !== 'undefined' && AGENT_VERSIONS.length > 0) queryVersions.push(AGENT_VERSIONS[0]);
-                        else if (qLowerIdentity && typeof IDENTITY_VERSIONS !== 'undefined' && IDENTITY_VERSIONS.length > 0) queryVersions.push(IDENTITY_VERSIONS[0]);
-                        else if (typeof VERSIONS !== 'undefined' && VERSIONS.length > 0) queryVersions.push(VERSIONS[0]);
+                    // Release Notes generic query fallback — use live Pulse version lists (no static version table)
+                    if (queryVersions.length === 0 && asksReleaseNotes) {
+                        const pageVersions = [...new Set(blocks.map(b => b.version))].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+                        if (pageVersions.length > 0) queryVersions.push(pageVersions[0]);
+                        else if (type === 'Agent' && AGENT_VERSIONS.length > 0) queryVersions.push(AGENT_VERSIONS[0]);
+                        else if (type === 'Identity' && IDENTITY_VERSIONS.length > 0) queryVersions.push(IDENTITY_VERSIONS[0]);
+                        else if (VERSIONS.length > 0) queryVersions.push(VERSIONS[0]);
                     }
                     
                     const scoredBlocks = blocks.map(b => {
                         let score = 0;
                         const bTextLower = b.text.toLowerCase();
                         
-                        // Exact Version Boost
+                        if (primaryVersion) {
+                            if (b.version === primaryVersion) score += 500;
+                            else score -= 800;
+                        }
                         for (const qv of queryVersions) {
-                            if (b.version === qv) {
-                                score += 200;
-                            } else if (b.version.startsWith(qv)) {
-                                score += 100;
-                            }
+                            if (b.version === qv) score += 200;
+                            else if (b.version.startsWith(qv)) score += 100;
                         }
                         
                         // Year Boost
@@ -3297,10 +3594,17 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     
                     let includedCount = 0;
                     const highestScore = scoredBlocks[0]?.score || 0;
+                    const strictVersionFilter = !!primaryVersion;
+                    
+                    if (primaryVersion) {
+                        clean += `\n[USER REQUESTED VERSION: ${primaryVersion} — cite ONLY ### VERSION ${primaryVersion} sections below]\n`;
+                    }
                     
                     for (const sb of scoredBlocks) {
+                        if (strictVersionFilter && sb.block.version !== primaryVersion) continue;
+                        if (sb.score < 0) continue;
                         // Skip unrelevant older blocks if we have high-scoring ones
-                        if (sb.score === 0 && includedCount >= 2 && highestScore > 0) {
+                        if (!strictVersionFilter && sb.score === 0 && includedCount >= 2 && highestScore > 0) {
                             continue;
                         }
                         
@@ -3318,13 +3622,8 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         }
                     }
                     
-                    // Fallback to broad block slice if split did not capture anything
-                    if (clean.length < 100) {
-                        clean = doc.body.innerText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').slice(0, 10000);
-                    }
-                    
                     if (clean.length > 200) {
-                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA - RELEVANT NOTES]:\n${clean}`);
+                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA - RELEVANT NOTES]\nOfficial source: ${resolvedUrl}\n${clean}`);
                         toast(`✓ ${type} RAG Context Loaded`, 's');
                     }
                 }
@@ -3338,14 +3637,19 @@ async function searchPulseAndDocs(query, msgs, ci) {
         }
             
 
-        const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for']);
-        const keywords = query.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w)).slice(-5).join('%20');
+        const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for', 'give', 'short', 'subject', 'name', 'meeting', 'notes', 'critical', 'investigation']);
+        let keywordParts = caseBlob.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
+        const seenKw = new Set();
+        keywordParts = keywordParts.filter(w => { if (seenKw.has(w)) return false; seenKw.add(w); return true; });
+        if (asksMobiControl && !keywordParts.includes('mobicontrol')) keywordParts.unshift('mobicontrol');
+        if (/\bcertificate|cert\b/i.test(combinedLower) && !keywordParts.includes('certificate')) keywordParts.unshift('certificate');
+        const keywords = keywordParts.slice(0, 6).join('%20');
         if (!keywords) return;
 
         const [pHtml, dHtml, iHtml] = await Promise.all([
-            sotiFetch(`https://pulse.soti.net/search/?q=${keywords}`, 8000),
-            sotiFetch(`https://docs.soti.net/soti-mobicontrol/search/?q=${keywords}`, 8000),
-            asksIdentity ? sotiFetch(`https://pulse.soti.net/support/soti-identity/search/?q=${keywords}`, 8000) : Promise.resolve(null)
+            sotiFetch(`${PULSE_ORIGIN}/search/?q=${keywords}`, 10000),
+            sotiFetch(`${DOCS_ORIGIN}/soti-mobicontrol/search/?q=${keywords}`, 10000),
+            asksIdentity ? sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/search/?q=${keywords}`, 10000) : Promise.resolve(null)
         ]);
 
         // Helper to resolve relative URLs to absolute (DOMParser resolves to chrome-extension:// otherwise)
@@ -3360,45 +3664,42 @@ async function searchPulseAndDocs(query, msgs, ci) {
         if (pHtml) {
             const doc = new DOMParser().parseFromString(pHtml, 'text/html');
             const items = [...doc.querySelectorAll('a')].map(a => ({
-                href: resolveLink(a.getAttribute('href'), 'https://pulse.soti.net'),
+                href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
                 text: a.textContent.trim()
-            })).filter(a => a.href && a.href.includes('pulse.soti.net/support')).slice(0, 3);
+            })).filter(a => a.href && a.href.includes('pulse.soti.net/support') && isUsefulPulseResearchLink(a.href, a.text))
+                .slice(0, asksMobiControl ? 5 : 3);
             PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
         if (dHtml) {
             const doc = new DOMParser().parseFromString(dHtml, 'text/html');
             const items = [...doc.querySelectorAll('a')].map(a => ({
-                href: resolveLink(a.getAttribute('href'), 'https://docs.soti.net'),
+                href: resolveLink(a.getAttribute('href'), DOCS_ORIGIN),
                 text: a.textContent.trim()
-            })).filter(a => a.href && a.href.includes('/help/')).slice(0, 3);
+            })).filter(a => a.href && a.href.includes('/help/')).slice(0, asksMobiControl ? 5 : 3);
             DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
         if (iHtml) {
             const doc = new DOMParser().parseFromString(iHtml, 'text/html');
             const items = [...doc.querySelectorAll('a')].map(a => ({
-                href: resolveLink(a.getAttribute('href'), 'https://pulse.soti.net'),
+                href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
                 text: a.textContent.trim()
             })).filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
             DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
 
-        // Parallel deep research: fetch top 3 links concurrently for broader context
+        const deepLinkLimit = asksMobiControl || asksReleaseNotes ? 5 : 3;
+        const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 25000 : 15000;
         if (deepLinks.length > 0) {
-            const linksToFetch = deepLinks.slice(0, 3);
+            const linksToFetch = deepLinks.slice(0, deepLinkLimit);
             const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
             const articles = [];
-            const perArticleBudget = Math.floor(15000 / linksToFetch.length);
+            const perArticleBudget = Math.floor(deepArticleBudget / linksToFetch.length);
 
             fetched.forEach((content, idx) => {
                 if (content) {
                     const doc = new DOMParser().parseFromString(content, 'text/html');
-                    doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
-                    let article = "";
-                    doc.querySelectorAll('h1, h2, h3, h4, p, li, td, strong').forEach(el => {
-                        const t = (el.innerText || el.textContent || '').trim();
-                        if (t && t.length > 2) article += t + '\n';
-                    });
-                    if (article.length > 100) {
+                    const article = extractDeepResearchArticle(doc);
+                    if (article.length > 100 && !isLowQualityResearchArticle(article)) {
                         articles.push(`[DEEP RESEARCH - ${linksToFetch[idx]}]:\n${article.slice(0, perArticleBudget)}`);
                     }
                 }
@@ -3412,50 +3713,41 @@ async function searchPulseAndDocs(query, msgs, ci) {
 }
 
 async function fetchLatestSOTIVersions() {
+    const mcCatalog = await discoverPulseReleaseNoteCatalog('soti-mobicontrol');
+    const consolePath = mcCatalog.find(e => e.path.includes('product-notes/release-notes'))?.path
+        || '/support/soti-mobicontrol/product-notes/release-notes/';
+    const agentPath = mcCatalog.find(e => e.path.includes('android-agent-release-notes'))?.path
+        || '/support/soti-mobicontrol/product-notes/android-agent-release-notes/';
+
     const [consoleHtml, agentHtml, identityHtml] = await Promise.all([
-        sotiFetch('https://pulse.soti.net/support/soti-mobicontrol/product-notes/release-notes/', 15000),
-        sotiFetch('https://pulse.soti.net/support/soti-mobicontrol/product-notes/android-agent-release-notes/', 15000),
-        sotiFetch('https://pulse.soti.net/support/soti-identity/release-notes/', 15000)
+        sotiFetch(`${PULSE_ORIGIN}${consolePath}`, 15000),
+        sotiFetch(`${PULSE_ORIGIN}${agentPath}`, 15000),
+        sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/release-notes/`, 15000)
     ]);
 
-    // DOM-targeted version extraction: parse HTML and target version headers/navigation
-    // elements rather than running a loose regex over the entire raw HTML body
     function extractVersionsFromDOM(html) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         doc.querySelectorAll('script, style, nav, footer, svg, path, iframe, link').forEach(el => el.remove());
         const versions = new Set();
         const vRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/;
-        // Target 1: <h4> elements containing version numbers (release note headers)
-        doc.querySelectorAll('h4').forEach(h4 => {
-            const match = h4.textContent.match(vRx);
+        doc.querySelectorAll('h1.release-note-h1, h1[class*="release-note"], h4').forEach(el => {
+            const match = (el.textContent || '').match(vRx);
             if (match) versions.add(match[1]);
         });
-        // Target 2: Version navigation spans (sidebar links with onclick="setQueryParam('version',...)")
         doc.querySelectorAll('[onclick*="setQueryParam"]').forEach(el => {
-            const match = el.textContent.match(vRx);
+            const match = (el.textContent || '').match(vRx);
             if (match) versions.add(match[1]);
         });
-        // Target 3: Fallback — if DOM targets found nothing, use regex on body text only (not script/style)
         if (versions.size === 0) {
             const bodyText = doc.body ? doc.body.textContent : '';
-            const globalRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/g;
-            const matches = bodyText.match(globalRx) || [];
-            matches.forEach(v => versions.add(v));
+            (bodyText.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []).forEach(v => versions.add(v));
         }
         return [...versions].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
     }
 
-    if (consoleHtml) {
-        VERSIONS = extractVersionsFromDOM(consoleHtml);
-    }
-
-    if (agentHtml) {
-        AGENT_VERSIONS = extractVersionsFromDOM(agentHtml);
-    }
-
-    if (identityHtml) {
-        IDENTITY_VERSIONS = extractVersionsFromDOM(identityHtml);
-    }
+    if (consoleHtml) VERSIONS = extractVersionsFromDOM(consoleHtml);
+    if (agentHtml) AGENT_VERSIONS = extractVersionsFromDOM(agentHtml);
+    if (identityHtml) IDENTITY_VERSIONS = extractVersionsFromDOM(identityHtml);
     
     updateVersionDropdowns();
 
@@ -3516,7 +3808,7 @@ async function loadLocalAISettings() {
         if (!LOCAL_AI_MODEL) {
             const models = await fetchOllamaModels(LOCAL_AI_URL);
             if (models.length > 0) {
-                LOCAL_AI_MODEL = models.find(m => m.includes('llama3.2')) || models[0];
+                LOCAL_AI_MODEL = pickPreferredOllamaModel(models);
                 await saveLocalAISettings();
             }
         }
@@ -3534,13 +3826,27 @@ async function saveLocalAISettings() {
     } catch (e) { console.warn('Failed to save local AI settings', e); }
 }
 
+function sortOllamaModels(models) {
+    return [...models].sort((a, b) => {
+        const aLlama = /llama3\.2/i.test(a) ? 0 : 1;
+        const bLlama = /llama3\.2/i.test(b) ? 0 : 1;
+        if (aLlama !== bLlama) return aLlama - bLlama;
+        return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+    });
+}
+
+function pickPreferredOllamaModel(models) {
+    const sorted = sortOllamaModels(models);
+    return sorted.find(m => /llama3\.2/i.test(m)) || sorted[0] || '';
+}
+
 async function fetchOllamaModels(baseUrl) {
     try {
         const url = (baseUrl || LOCAL_AI_URL).replace(/\/$/, '');
         const res = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) return [];
         const data = await res.json();
-        return (data.models || []).map(m => m.name).filter(Boolean);
+        return sortOllamaModels((data.models || []).map(m => m.name).filter(Boolean));
     } catch (e) {
         console.warn('Ollama not reachable', e);
         return [];
@@ -3694,11 +4000,12 @@ async function send(overrideText = null, silent = false) {
     addMsg('user', displayTxt, false, silent);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
     
-    // Background research but don't hang if it's slow
+    const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+    const researchMs = needsDeepPulse ? 20000 : 10000;
     try {
         await Promise.race([
             searchPulseAndDocs(txt, c.msgs, ci),
-            new Promise(r => setTimeout(r, 6000))
+            new Promise(r => setTimeout(r, researchMs))
         ]);
     } catch (e) { console.warn('Research timed out'); }
 
@@ -3724,7 +4031,7 @@ async function send(overrideText = null, silent = false) {
             });
         }
 
-        const summaryText = $('issueSummary').value || 'NO SUMMARY PROVIDED';
+        const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
         // When logs are present: use the lean forensic prompt so the context window
         // is focused on log data. When no logs: use the full KB prompt for general Q&A.
@@ -3746,6 +4053,7 @@ ${logContext}`)
 [IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}
 [RELEASE NOTES]: ${RELEASE_NOTES_CONTENT}
 [PULSE SEARCH]: ${PULSE_SEARCH_RESULTS}
+[DOCS SEARCH]: ${DOCS_SEARCH_RESULTS}
 [DEEP RESEARCH]: ${RESEARCHED_ARTICLE_CONTENT}
 
 ${corePrompt}
@@ -4104,7 +4412,7 @@ const handleFiles = async (files) => {
     const uploads = Array.from(files || []);
     if (uploads.length === 0) return;
 
-    toast(`Reading ${uploads.length} file(s)...`, 'i', 2500);
+    toast('Uploading logs...', 'i', 0);
     const added = [];
     const skipped = [];
 
@@ -4135,7 +4443,8 @@ const handleFiles = async (files) => {
     renderLogs();
     saveState();
 
-    if (added.length > 0) toast(`Ready to analyse ${added.length} log file(s)`, 's', 4500);
+    if (added.length > 0) toast('Logs uploaded', 's', 2500);
+    else hideToast();
     if (skipped.length > 0) toast(`Skipped ${skipped.length} file(s): ${skipped.slice(0, 2).join('; ')}`, 'w', 7000);
 };
 
@@ -4388,8 +4697,17 @@ $('btnMore').onclick = (e) => {
     d.style.display = d.style.display === 'none' ? 'flex' : 'none';
 };
 
+if ($('moreDropdown')) {
+    $('moreDropdown').onclick = (e) => e.stopPropagation();
+}
+
 window.onclick = () => {
     $('moreDropdown').style.display = 'none';
+};
+
+$('btnSettings').onclick = () => {
+    $('moreDropdown').style.display = 'none';
+    openSettingsModal();
 };
 
 $('btnExport').onclick = () => {
@@ -4649,7 +4967,7 @@ async function refreshSettingsModal() {
             if (statusEl) { statusEl.textContent = '⚠ Ollama not reachable at ' + (urlInp ? urlInp.value : LOCAL_AI_URL); statusEl.style.color = 'var(--warn)'; }
         } else {
             modelSel.innerHTML = models.map(m => `<option value="${m}" ${m === LOCAL_AI_MODEL ? 'selected' : ''}>${m.replace(/:latest$/i, '')}</option>`).join('');
-            if (!LOCAL_AI_MODEL && models.length > 0) LOCAL_AI_MODEL = models[0];
+            if (!LOCAL_AI_MODEL && models.length > 0) LOCAL_AI_MODEL = pickPreferredOllamaModel(models);
             if (statusEl) { statusEl.textContent = `✓ ${models.length} model(s) available`; statusEl.style.color = 'var(--green)'; }
         }
     }
@@ -4660,7 +4978,6 @@ async function openSettingsModal() {
     await refreshSettingsModal();
 }
 
-if ($('btnSettings')) $('btnSettings').onclick = openSettingsModal;
 $('mSettingsClose').onclick = () => $('mSettings').style.display = 'none';
 
 $('localAiUrl').oninput = () => {
@@ -4684,6 +5001,20 @@ $('btnSaveLocalAI').onclick = async () => {
     $('mSettings').style.display = 'none';
     toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}`, 's');
 };
+
+if ($('btnDownloadLocalAISetup')) {
+    $('btnDownloadLocalAISetup').onclick = () => {
+        const url = chrome.runtime.getURL('setup_local_ai.bat');
+        if (chrome.downloads?.download) {
+            chrome.downloads.download({ url, filename: 'SOTI-setup_local_ai.bat', saveAs: false }, () => {
+                toast('Installer downloaded — run SOTI-setup_local_ai.bat from Downloads', 's', 8000);
+            });
+        } else {
+            window.open(url, '_blank');
+            toast('Save and run setup_local_ai.bat from the extension folder', 'w', 8000);
+        }
+    };
+}
 
 // Boot: detect Ollama and warn if no model selected
 (async () => {
