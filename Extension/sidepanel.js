@@ -1260,21 +1260,24 @@ function updateLocalAIBadge() {
     const pill = $('pulseHealth');
     const statusTxt = $('statusTxt');
     const dot = $('dot');
+    const chatIn = $('chatIn');
+    
     if (!pill) return;
     pill.style.display = 'flex';
     
     if (LOCAL_AI_MODEL) {
-        // Clean model name: strip ':latest' tag since it's noise
         let cleanName = LOCAL_AI_MODEL.replace(/:latest$/i, '');
         dot.style.background = '#22c55e';
         dot.classList.add('on');
-        statusTxt.textContent = cleanName;
+        statusTxt.style.display = 'none';
         pill.title = `Connected — ${LOCAL_AI_MODEL}`;
+        if (chatIn) chatIn.placeholder = `Ask AI anything... (${cleanName})`;
     } else {
         dot.style.background = 'var(--warn)';
         dot.classList.remove('on');
-        statusTxt.textContent = 'No model';
+        statusTxt.style.display = 'none';
         pill.title = 'No Ollama model selected';
+        if (chatIn) chatIn.placeholder = `Ask AI anything...`;
     }
 }
 
