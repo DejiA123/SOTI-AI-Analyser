@@ -904,7 +904,7 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
                     
                     // Split the HTML using a regex that captures the version headers (typically H4 elements)
-                    const h4Regex = /(<h4[^>]*>\s*(?:v|Version)?\s*20\d\d\.\d+(?:\.\d+)?\s*<\/h4>)/gi;
+                    const h4Regex = /(<h4[^>]*>\s*(?:v|Version)?\s*20\d\d\.\d+(?:\.\d+)*(?:\.x)?\s*<\/h4>)/gi;
                     const parts = html.split(h4Regex);
                     
                     const blocks = [];
@@ -920,11 +920,58 @@ async function searchPulseAndDocs(query, msgs, ci) {
                             const blockDoc = new DOMParser().parseFromString(blockHtml, 'text/html');
                             blockDoc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
                             
-                            const blockText = blockDoc.body.innerText.replace(/\s+/g, ' ').trim();
-                            if (blockText.length > 50) {
+                            // Segment the block into Highlights and Resolved Issues if "Resolved Issues" exists
+                            let highlightsText = "";
+                            let resolvedText = "";
+                            let foundResolved = false;
+                            
+                            const children = Array.from(blockDoc.body.children);
+                            if (children.length > 0) {
+                                for (const child of children) {
+                                    let isHeading = false;
+                                    if (child.tagName.match(/^H[1-4]$/i) && child.textContent.trim().toLowerCase() === 'resolved issues') {
+                                        isHeading = true;
+                                    } else {
+                                        const h = child.querySelector('h1, h2, h3, h4');
+                                        if (h && h.textContent.trim().toLowerCase() === 'resolved issues') {
+                                            isHeading = true;
+                                        }
+                                    }
+                                    
+                                    if (isHeading) {
+                                        foundResolved = true;
+                                    }
+                                    
+                                    // Normalize non-breaking hyphens (\u2011) to standard hyphens (-) for perfect matching
+                                    const childText = child.innerText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').trim();
+                                    if (childText) {
+                                        if (foundResolved) {
+                                            resolvedText += childText + "\n";
+                                        } else {
+                                            highlightsText += childText + "\n";
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Fallback for flat text block
+                                highlightsText = blockDoc.body.innerText;
+                            }
+                            
+                            highlightsText = highlightsText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').trim();
+                            resolvedText = resolvedText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').trim();
+                            
+                            if (highlightsText.length > 50) {
                                 blocks.push({
                                     version: ver,
-                                    text: blockText
+                                    type: 'Highlights',
+                                    text: highlightsText
+                                });
+                            }
+                            if (resolvedText.length > 50) {
+                                blocks.push({
+                                    version: ver,
+                                    type: 'Resolved Issues',
+                                    text: resolvedText
                                 });
                             }
                         }
@@ -934,8 +981,20 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for']);
                     const queryWords = query.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
                     
-                    const queryVersions = query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || [];
+                    // Extract query versions and include conversation history context
+                    const queryVersions = [...new Set([
+                        ...(query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []),
+                        ...(history.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || [])
+                    ])];
                     const queryYears = query.match(/\b(20\d\d)\b/g) || [];
+                    
+                    // Inject case-configured version if present
+                    if (ci && (ci.soti_version || ci.agent_version)) {
+                        const sotiVerMatch = (ci.soti_version || '').match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+                        if (sotiVerMatch) queryVersions.push(sotiVerMatch[1]);
+                        const agentVerMatch = (ci.agent_version || '').match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+                        if (agentVerMatch) queryVersions.push(agentVerMatch[1]);
+                    }
                     
                     const scoredBlocks = blocks.map(b => {
                         let score = 0;
@@ -966,6 +1025,19 @@ async function searchPulseAndDocs(query, msgs, ci) {
                             }
                         }
                         
+                        // Intent-based type boost
+                        const hasFixKeywords = /\b(fix|fixed|bug|mcmr|resolve|resolved|issue|error|exception|crash|prevent|correct|correctly)\b/i.test(qLower) || 
+                                               /\b(fix|fixed|bug|mcmr|resolve|resolved|issue|error|exception|crash|prevent|correct|correctly)\b/i.test(history);
+                        if (hasFixKeywords && b.type === 'Resolved Issues') {
+                            score += 150;
+                        }
+                        
+                        const hasHighlightKeywords = /\b(feature|highlight|improvement|note|new|whatsnew|what's\s+new)\b/i.test(qLower) ||
+                                                     /\b(feature|highlight|improvement|note|new|whatsnew|what's\s+new)\b/i.test(history);
+                        if (hasHighlightKeywords && b.type === 'Highlights') {
+                            score += 150;
+                        }
+                        
                         return { block: b, score: score };
                     });
                     
@@ -975,9 +1047,17 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         return b.block.version.localeCompare(a.block.version, undefined, { numeric: true });
                     });
                     
-                    // Build context up to ~15k characters
+                    // Build context under dynamic character budget (up to 80k if no log attachments)
                     let clean = "";
                     let charBudget = 15000;
+                    
+                    const activeCase = typeof cases !== 'undefined' ? cases.find(x => x.id === activeCaseId) : null;
+                    const hasLogs = (activeCase && activeCase.logs && activeCase.logs.length > 0) || history.includes('[diagnostic data') || history.includes('=== file:');
+                    
+                    if (!hasLogs || asksVersion) {
+                        charBudget = 80000;
+                    }
+                    
                     let includedCount = 0;
                     const highestScore = scoredBlocks[0]?.score || 0;
                     
@@ -987,14 +1067,14 @@ async function searchPulseAndDocs(query, msgs, ci) {
                             continue;
                         }
                         
-                        const formatBlock = `\n### VERSION ${sb.block.version} RELEASE NOTES:\n${sb.block.text}\n`;
+                        const formatBlock = `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()}:\n${sb.block.text}\n`;
                         if (clean.length + formatBlock.length <= charBudget) {
                             clean += formatBlock;
                             includedCount++;
                         } else {
-                            if (sb.score >= 100 && clean.length < 5000) {
+                            if (sb.score >= 100 && clean.length < (charBudget * 0.4)) {
                                 const remaining = charBudget - clean.length;
-                                clean += `\n### VERSION ${sb.block.version} RELEASE NOTES (TRUNCATED):\n${sb.block.text.slice(0, remaining - 100)}\n`;
+                                clean += `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()} (TRUNCATED):\n${sb.block.text.slice(0, remaining - 100)}\n`;
                                 includedCount++;
                             }
                             break;
@@ -1003,7 +1083,7 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     
                     // Fallback to broad block slice if split did not capture anything
                     if (clean.length < 100) {
-                        clean = doc.body.innerText.replace(/\s+/g, ' ').slice(0, 10000);
+                        clean = doc.body.innerText.replace(/\u2011/g, '-').replace(/\s+/g, ' ').slice(0, 10000);
                     }
                     
                     if (clean.length > 200) {
