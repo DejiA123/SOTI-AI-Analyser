@@ -1271,7 +1271,7 @@ function updateLocalAIBadge() {
         dot.classList.add('on');
         statusTxt.style.display = 'none';
         pill.title = `Connected — ${cleanName}`;
-        if (chatIn) chatIn.placeholder = `Ask AI anything... (${cleanName})`;
+        if (chatIn) chatIn.placeholder = `Ask AI anything...`;
     } else {
         dot.style.background = 'var(--warn)';
         dot.classList.remove('on');
