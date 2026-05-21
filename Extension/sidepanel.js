@@ -412,15 +412,1991 @@ function toast(msg, t = '', dur = 3000) {
     if (dur > 0) setTimeout(() => el.className = 'toast', dur);
 }
 
-function getSmartLogSnippet(content, limit = 300000) {
+function extractLogTimestamp(line) {
+    const patterns = [
+        /\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:Z|[+-]\d{2}:?\d{2})?\b/,
+        /\b\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:\s*(?:AM|PM))?\b/i,
+        /\b\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?\b/,
+        /\b\d{1,2}:\d{2}:\d{2}:\d{1,7}\b/,
+        /\b\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:\s*(?:AM|PM))?\b/i
+    ];
+    for (const p of patterns) {
+        const m = line.match(p);
+        if (m) return normalizeLogTimestamp(m[0]);
+    }
+    return "";
+}
+
+function normalizeLogTimestamp(ts) {
+    if (!ts) return "";
+    let text = String(ts).trim();
+    const ampm = (text.match(/\s+(AM|PM)$/i) || [])[1] || "";
+    if (ampm) text = text.replace(/\s+(AM|PM)$/i, "");
+    text = text.replace(',', '.');
+
+    // MSI logs use HH:MM:SS:mmm. Normalize to HH:MM:SS.mmm so sorting and display
+    // preserve millisecond precision consistently with ISO/.NET timestamps.
+    text = text.replace(/\b(\d{1,2}:\d{2}:\d{2}):(\d{1,7})\b/, (_, hms, frac) => {
+        return `${hms}.${frac.padEnd(3, "0").slice(0, 7)}`;
+    });
+
+    return ampm ? `${text} ${ampm.toUpperCase()}` : text;
+}
+
+function extractInstallerBaseDate(content) {
+    const m = (content || "").match(/Verbose logging started:\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}:\d{2}:\d{2})/i);
+    if (!m) return { date: "", startTime: "" };
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const year = m[3];
+    const month = a > 12 ? b : a;
+    const day = a > 12 ? a : b;
+    const pad = n => String(n).padStart(2, "0");
+    return {
+        date: `${year}-${pad(month)}-${pad(day)}`,
+        startTime: normalizeLogTimestamp(m[4])
+    };
+}
+
+function combineInstallerDateTime(baseDate, timestamp) {
+    if (!timestamp) return "";
+    if (/^\d{4}-\d{2}-\d{2}/.test(timestamp)) return timestamp.replace("T", " ");
+    const time = formatInstallerTime(timestamp);
+    return baseDate && time && time !== "No timestamp" ? `${baseDate} ${time}` : (timestamp || "");
+}
+
+function normalizeLogSignature(text) {
+    return (text || "")
+        .replace(/\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "")
+        .replace(/\b\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:\s*(?:AM|PM))?\b/gi, "")
+        .replace(/\b\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?\b/g, "")
+        .replace(/\b\d{1,2}:\d{2}:\d{2}:\d{1,7}\b/g, "")
+        .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "{guid}")
+        .replace(/0x[0-9a-fA-F]+/g, "{hex}")
+        .replace(/\b\d+\b/g, "{n}")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 260);
+}
+
+const EXCEPTION_CLASS_PATTERN = String.raw`((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?:Exception|Error)|[A-Za-z_]\w*(?:Exception|Error)|AggregateException|SqlException|SQLException|TimeoutException|SocketException|WebException|IOException|UnauthorizedAccessException|InvalidOperationException|NullReferenceException|OutOfMemoryException|StackOverflowException|AuthenticationException|SecurityException|TypeError|ReferenceError|RangeError|SyntaxError|ValueError|KeyError|IndexError|RuntimeError|OSError)`;
+
+const LOG_SIGNAL_RULES = [
+    { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|transaction|rollback|schema|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|constraint|duplicate key)\b/i },
+    { category: 'Certificate/TLS', weight: 38, regex: /\b(certificate|cert\b|SSL|TLS|handshake failed|X509|trust|chain|CRL|OCSP|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors|AuthenticationException|Schannel|PKIX|certificate verify failed|unable to get local issuer|self-signed|hostname mismatch)\b/i },
+    { category: 'HTTP/Network', weight: 30, regex: /\b(HTTP\/|HTTP [45]\d\d|StatusCode|BadRequest|Unauthorized|Forbidden|NotFound|Conflict|TooManyRequests|InternalServerError|BadGateway|ServiceUnavailable|GatewayTimeout|WebException|SocketException|ConnectFailure|ConnectionReset|connection dropped|connection lost|lost connection|DNS|resolve|resolution|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|host not found|No such host|network unreachable|proxy|firewall|port \d+|connection refused|connection reset|timed out connecting|name or service not known)\b/i },
+    { category: 'Service Lifecycle', weight: 24, regex: /\b(service start|service stop|starting service|stopping service|service failed|failed to start|failed to stop|restarting|OnStart|OnStop|ServiceBase|hosted service|application pool|recycl|terminated unexpectedly|process exited|crashed|crash dump|service control manager|SCM|watchdog|heartbeat lost)\b/i },
+    { category: 'Memory/Thread', weight: 34, regex: /\b(OutOfMemory|StackOverflow|ThreadAbort|thread pool|GC heap|memory pressure|heap size|working set|AccessViolation|deadlock detected|hang detected|blocked thread|thread starvation|CPU spike|high CPU|resource exhausted|insufficient memory)\b/i },
+    { category: 'Auth/Permission', weight: 36, regex: /\b(Access denied|Unauthorized|forbidden|permission|credentials|credential|login|logon|authentication failed|authorization failed|token expired|invalid token|bearer|OAuth|SAML|OIDC|LDAP bind|Kerberos|NTLM|impersonat|account locked|principal|claims|MFA|passwordless|FIDO|invalid grant|invalid audience|signature validation failed)\b/i },
+    { category: 'Enrollment/Agent', weight: 28, regex: /\b(DeviceEnrollmentException|enrollment failed|enrolment failed|AFW provisioning failed|Android Enterprise|QR code invalid|EMM token expired|Device already enrolled|check-in failed|check in failed|heartbeat missed|profile deployment failed|policy deployment failed|agent crash|agent error|agent failed|device check-in failed|device sync failed|package install failed|OEMConfig|managed Google Play|KME|Zero Touch)\b/i },
+    { category: 'Storage/IO', weight: 30, regex: /\b(IOException|DirectoryNotFound|FileNotFound|PathTooLong|disk full|no space|access to the path|sharing violation|write failed|read failed|file locked|permission denied|cannot create file|cannot delete file|corrupt(ed)? file|I\/O error)\b/i },
+    { category: 'Installer/MSI', weight: 38, regex: /\b(MSI|Windows Installer|CustomAction|Return value 3|Return 1603|error code 1603|Fatal error|Deploy[A-Za-z]*Database|DbUp|DeploymentEngine|PerformUpgrade|Installation failed|rollback|SetupSOTI|Wix|Burn|InstallValidate|InstallFinalize|Action ended|Action start|MSIEXEC)\b/i },
+    { category: 'Config/Validation', weight: 26, regex: /\b(validation (?:failed|error|warning)|invalid value|required setting|required property|missing setting|malformed|parse error|cannot parse|deseriali[sz]e|schema validation|FQDN.*(?:incorrect|invalid|failed)|hostname.*(?:incorrect|invalid|failed)|base URL.*(?:incorrect|invalid|failed)|URL is invalid|not configured|misconfigured|incorrect configuration|unsupported configuration|configuration (?:failed|invalid|missing|incorrect))\b/i },
+    { category: 'Version/Compatibility', weight: 24, regex: /\b(version mismatch|incompatible|not supported|unsupported|requires version|minimum version|downgrade|upgrade required|migration failed|schema version|plugin incompatible|API version|protocol version|build mismatch)\b/i },
+    { category: 'License/Activation', weight: 22, regex: /\b(license|licence|activation|entitlement|subscription|trial expired|not activated|activation failed|license expired|licensed devices exceeded)\b/i },
+    { category: 'Queue/Messaging', weight: 24, regex: /\b(queue (?:overflow|full|blocked|backlog|failed|failure|error)|message bus.*(?:failed|error|timeout|unavailable)|Kafka.*(?:failed|error|timeout|unavailable)|RabbitMQ.*(?:failed|error|timeout|unavailable)|MSMQ.*(?:failed|error|timeout|unavailable)|Service Bus.*(?:failed|error|timeout|unavailable)|poison message|dead letter|DLQ|broker unavailable|event pipeline.*(?:failed|error|backlog)|ingestion failed|collector heartbeat lost|telemetry ingestion failed)\b/i },
+    { category: 'Serialization/Data', weight: 20, regex: /\b(JSON|XML|YAML|serialization|deserialization|deserialize|serialize|parser|parse failed|unexpected token|invalid payload|payload parse|schema mismatch|data contract|protobuf|cannot convert|format exception)\b/i },
+    { category: 'Time/Clock', weight: 18, regex: /\b(clock skew|time skew|NTP|certificate not yet valid|expired|timestamp expired|nonce expired|token lifetime|not before|not after)\b/i },
+    { category: 'External Integration', weight: 18, regex: /\b(SMTP|SNMP|WMI|APNS|FCM|Google Play|Entra|Azure AD|Active Directory|LDAP|SFTP|proxy|webhook|MobiControl API|XSight API|Connect API|Identity Provider|IdP)\b.*\b(failed|failure|error|timeout|timed out|refused|denied|unreachable|expired|invalid|unauthorized|forbidden)\b/i }
+];
+
+const HIGH_SIGNAL_KEYWORDS = [
+    { label: 'fatal/critical', score: 36, regex: /\b(FATAL|CRITICAL|PANIC|SEVERE|EMERGENCY|ALERT)\b/i },
+    { label: 'exception', score: 32, regex: new RegExp(`\\b${EXCEPTION_CLASS_PATTERN}\\b|\\bUnhandled exception\\b|\\bInner Exception\\b|\\bCaused by:\\b`, 'i') },
+    { label: 'explicit failure', score: 22, regex: /\b(failed|failure|fails|fatal error|cannot|can't|unable|denied|refused|rejected|blocked|aborted|crashed|faulted|corrupt|invalid|unsupported|not supported|timed out|timeout|deadlock|rollback|unreachable|unavailable|mismatch|malformed|missing|required|expired|revoked|not found)\b/i },
+    { label: 'error severity', score: 18, regex: /(?:^|[\s\[({<,"'=])(?:ERR|ERROR)(?:[\s\])}:>,]|$)|\blevel\s*[:=]\s*["']?error\b|\bseverity\s*[:=]\s*["']?error\b/i },
+    { label: 'warning severity', score: 8, regex: /(?:^|[\s\[({<,"'=])(?:WARN|WARNING)(?:[\s\])}:>,]|$)|\blevel\s*[:=]\s*["']?warn/i },
+    { label: 'return/error code', score: 18, regex: /\b(?:error|return|exit|result|status)\s*(?:code|value)?\s*[:=]?\s*(?:0x[0-9a-f]+|[1-9]\d{2,5})\b/i },
+    { label: 'HRESULT/Win32', score: 20, regex: /\b(HRESULT|Win32Exception|0x8[0-9a-f]{7}|0xC[0-9a-f]{7})\b/i }
+];
+
+function extractSeverityToken(line) {
+    const text = line || "";
+    const m = text.match(/(?:^|[\s\[({<,"'=])(?:level|severity)?\s*[:=]?\s*["']?(FATAL|CRITICAL|PANIC|SEVERE|ERROR|ERR|WARN|WARNING|INFO|DEBUG|TRACE)(?:["'\s\])}:>,]|$)/i);
+    if (!m) return "";
+    const raw = m[1].toUpperCase();
+    if (raw === "ERR") return "ERROR";
+    if (raw === "WARNING") return "WARN";
+    return raw;
+}
+
+function isNegatedSignalLine(line) {
+    const text = line || "";
+    return /\b(no|without)\s+(errors?|warnings?|failures?|exceptions?)\b/i.test(text)
+        || /\b(errors?|warnings?|failures?)\s*[:=]\s*0\b/i.test(text)
+        || /\berror\s*(?:code|level)?\s*[:=]?\s*0\b/i.test(text)
+        || /\b(completed|succeeded|successful|successfully)\b/i.test(text) && /\b(no errors?|without errors?|error\s*code\s*0)\b/i.test(text);
+}
+
+function getKeywordHits(line) {
+    if (isNegatedSignalLine(line) && !new RegExp(EXCEPTION_CLASS_PATTERN, 'i').test(line || "")) return [];
+    return HIGH_SIGNAL_KEYWORDS
+        .filter(rule => rule.regex.test(line || ""))
+        .map(rule => ({ label: rule.label, score: rule.score }));
+}
+
+function isStackTraceLine(line) {
+    return /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Suppressed:|Inner Exception| ---> |--->|Traceback \(most recent call last\):|File ".+?", line \d+|at .+?\(.+?:\d+(?::\d+)?\)|\.\.\. \d+ more)/i.test(line || "");
+}
+
+function classifyLogLine(line) {
+    const categories = [];
+    const add = c => { if (!categories.includes(c)) categories.push(c); };
+
+    const exceptionClasses = extractExceptionClasses(line);
+    const hasException = exceptionClasses.length > 0 || /\b(Unhandled exception|Inner Exception|Caused by:|Traceback \(most recent call last\))\b/i.test(line || "");
+    const keywordHits = getKeywordHits(line);
+    const hasErrorWord = keywordHits.some(hit => hit.label === 'explicit failure' || hit.label === 'fatal/critical' || hit.label === 'return/error code' || hit.label === 'HRESULT/Win32');
+    const severityToken = extractSeverityToken(line);
+    const hasLogSeverity = /^(FATAL|CRITICAL|PANIC|SEVERE|ERROR|WARN)$/i.test(severityToken) || keywordHits.some(hit => /severity/.test(hit.label));
+    const hasStackFrame = isStackTraceLine(line);
+    const isSotiCode = /\bMCMR-\d+\b/i.test(line);
+
+    LOG_SIGNAL_RULES.forEach(rule => { if (rule.regex.test(line || "")) add(rule.category); });
+    if (hasException) add('Exception');
+    if (hasLogSeverity || hasErrorWord) add('Error/Warning');
+    if (isSotiCode) add('SOTI Fix Reference');
+
+    return {
+        categories,
+        hasException,
+        hasErrorWord,
+        hasLogSeverity,
+        hasStackFrame,
+        severityToken,
+        exceptionClasses,
+        keywordHits,
+        isForensic: categories.length > 0 || hasStackFrame || isSotiCode || keywordHits.length > 0
+    };
+}
+
+function scoreRootCauseCandidate(event) {
+    let score = 0;
+    if (event.hasException) score += 45;
+    (event.categories || []).forEach(category => {
+        const rule = LOG_SIGNAL_RULES.find(x => x.category === category);
+        if (rule) score += rule.weight;
+    });
+    (event.keywordHits || getKeywordHits(event.text)).forEach(hit => { score += hit.score; });
+    if (/\b(FATAL|CRITICAL|PANIC|SEVERE)\b/i.test(event.text)) score += 35;
+    if (/\b(ERROR|ERR)\b/i.test(event.text)) score += 18;
+    if (/\b(WARN|WARNING)\b/i.test(event.text)) score += 6;
+    if (/\b(timeout|deadlock|login failed|cannot open database|certificate|access denied|connection refused|connection reset|unsupported|not supported|invalid object|schema|return value 3|1603)\b/i.test(event.text)) score += 18;
+    if (isNegatedSignalLine(event.text) && !event.hasException) score -= 50;
+    score += Math.max(0, 20 - Math.floor(event.lineNum / 5000)); // earlier failures are slightly more suspicious
+    return score;
+}
+
+function parseLogTimestampForSort(ts) {
+    if (!ts) return Number.POSITIVE_INFINITY;
+    let normalized = normalizeLogTimestamp(ts)
+        .replace(',', '.')
+        .replace(/^(\d{2})\/(\d{2})\/(\d{4})/, '$3-$2-$1');
+    if (/^\d{1,2}:\d{2}:\d{2}/.test(normalized)) {
+        normalized = `1970-01-01 ${normalized}`;
+    }
+    const parsed = Date.parse(normalized);
+    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+}
+
+function extractExceptionClasses(text) {
+    const found = [];
+    const re = new RegExp(`\\b${EXCEPTION_CLASS_PATTERN}\\b`, 'gi');
+    let m;
+    while ((m = re.exec(text || "")) !== null) {
+        if (!found.includes(m[1])) found.push(m[1]);
+    }
+    return found;
+}
+
+function extractStackFrames(blockText) {
+    return (blockText || "")
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => /^at\s+/i.test(line)
+            || /^File ".+?", line \d+/i.test(line)
+            || /^Caused by:/i.test(line)
+            || /^Suppressed:/i.test(line)
+            || /^Traceback \(most recent call last\):/i.test(line));
+}
+
+function diagnoseSqlIssue(text) {
+    const sqlLike = /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|deadlock|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|connection pool|pooled connection|max pool size|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|stored procedure|invalid object name|invalid column name|could not find stored procedure|duplicate key|constraint|primary key|foreign key)\b/i.test(text || "");
+    if (!sqlLike) return null;
+
+    const pick = regex => {
+        const m = (text || "").match(regex);
+        return m ? m[1].trim() : "";
+    };
+
+    let type = "SQL/database failure";
+    if (/\bALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|recovery mode to SIMPLE\b/i.test(text)) type = "Unsupported ALTER DATABASE/recovery model operation";
+    else if (/\bdeadlock|deadlocked|victim\b/i.test(text)) type = "SQL deadlock";
+    else if (/\btimeout expired|execution timeout|timed out\b/i.test(text)) type = "SQL timeout";
+    else if (/\blogin failed|authentication failed\b/i.test(text)) type = "SQL login/authentication failure";
+    else if (/\bcannot open database|database .* requested by the login\b/i.test(text)) type = "Cannot open database";
+    else if (/\bconnection pool|pooled connection|pool exhausted|max pool size\b/i.test(text)) type = "SQL connection pool exhaustion";
+    else if (/\binvalid object name|invalid column name|could not find stored procedure|stored procedure|collation|schema\b/i.test(text)) type = "SQL schema/procedure/collation issue";
+    else if (/\bduplicate key|primary key|foreign key|constraint|conflicted with the\b/i.test(text)) type = "SQL constraint/data integrity issue";
+    else if (/\bnetwork-related|instance-specific|server was not found|could not open a connection\b/i.test(text)) type = "SQL connectivity issue";
+
+    return {
+        type,
+        number: pick(/\b(?:Error\s*Number|Number)\s*[:=]\s*(-?\d+)/i),
+        severity: pick(/\b(?:Class|Severity)\s*[:=]\s*(\d+)/i),
+        state: pick(/\bState\s*[:=]\s*(\d+)/i),
+        server: pick(/\bServer\s*[:=]\s*([^,\]\r\n]+)/i),
+        database: pick(/\b(?:Database|Initial Catalog)\s*[:=]\s*([^,\]\r\n;]+)/i),
+        procedure: pick(/\b(?:Procedure|Stored Procedure)\s*[:=]\s*([^,\]\r\n]+)/i),
+        line: pick(/\bLine(?:\s+Number)?\s*[:=]\s*(\d+)/i)
+    };
+}
+
+function detectLogSeverity(text) {
+    const sev = extractSeverityToken(text);
+    if (/^(FATAL|CRITICAL|PANIC|SEVERE)$/.test(sev)) return "Critical";
+    if (sev === "ERROR" || /\bException\b/i.test(text || "")) return "Error";
+    if (sev === "WARN") return "Warning";
+    return "Info";
+}
+
+function detectComponent(fileName, text, categories = []) {
+    const file = (fileName || "").toLowerCase();
+    const source = `${fileName || ""} ${text || ""}`.toLowerCase();
+    if (categories.includes('SQL/Database') || /\b(sql server|sqlexception|system\.data\.sqlclient|microsoft\.data\.sqlclient|dbinstall)\b/i.test(text || "")) return "SQL Database";
+    if (/\b(agent|ddr|device)\b/i.test(file)) return "Device/Agent";
+    if (/\b(dse|ds|deployment)\b/i.test(file)) return "Deployment Server";
+    if (/\b(ms|management)\b/i.test(file)) return "Management Service";
+    if (/\b(identity|sso|auth)\b/i.test(file)) return "SOTI Identity";
+    if (/\b(xsight|collector|telemetry)\b/i.test(file)) return "SOTI XSight";
+    if (/\b(connect|connector|gateway)\b/i.test(file)) return "SOTI Connect";
+    if (/\b(identity|saml|oidc|oauth|ldap|token|federation|sso)\b/i.test(source)) return "SOTI Identity";
+    if (/\b(xsight|collector|elastic|telemetry|analytics)\b/i.test(source)) return "SOTI XSight";
+    if (/\b(connect service|mqtt|iot|printer|gateway|connector)\b/i.test(source)) return "SOTI Connect";
+    if (/\b(dse|ds extension|deployment server|deploymentservice|deployment service|ds\.log|dserver)\b/i.test(source)) return "Deployment Server";
+    if (/\b(agent|device agent|ddr|device debug|check-in|check in|heartbeat|enrollment|enrolment)\b/i.test(source)) return "Device/Agent";
+    if (/\b(ms\.log|management service|managementservice|mobicontrol\.management|soti management)\b/i.test(source)) return "Management Service";
+    if (/\b(web console|console|api)\b/i.test(source)) return "Management Service";
+    return "Unknown Component";
+}
+
+function classifyFailureKind(text, categories = [], sql = null) {
+    if (sql) return sql.type;
+    if (categories.includes('SQL/Database')) {
+        const inferred = diagnoseSqlIssue(text);
+        return inferred ? inferred.type : "SQL/database failure";
+    }
+    if (categories.includes('Certificate/TLS')) {
+        if (/\b(expired|not yet valid)\b/i.test(text || "")) return "Certificate expired/not valid";
+        if (/\b(name mismatch|RemoteCertificateNameMismatch)\b/i.test(text || "")) return "Certificate name mismatch";
+        if (/\b(untrusted|chain|RemoteCertificateChainErrors|trust)\b/i.test(text || "")) return "Certificate trust chain failure";
+        return "Certificate/TLS failure";
+    }
+    if (categories.includes('Auth/Permission')) return "Authentication/permission failure";
+    if (categories.includes('HTTP/Network')) {
+        if (/\b(ECONNREFUSED|connection refused|ConnectFailure)\b/i.test(text || "")) return "Connection refused";
+        if (/\b(ConnectionReset|connection reset)\b/i.test(text || "")) return "Connection reset";
+        if (/\b(DNS|resolve|ENOTFOUND|host not found|No such host)\b/i.test(text || "")) return "DNS/name resolution failure";
+        if (/\b(HTTP 5\d\d|InternalServerError|BadGateway|ServiceUnavailable|GatewayTimeout)\b/i.test(text || "")) return "HTTP 5xx/server-side failure";
+        if (/\b(HTTP 4\d\d|Unauthorized|Forbidden|NotFound|BadRequest)\b/i.test(text || "")) return "HTTP 4xx/client/auth failure";
+        return "HTTP/network failure";
+    }
+    if (categories.includes('Memory/Thread')) return "Memory/thread/runtime failure";
+    if (categories.includes('Service Lifecycle')) return "Service lifecycle failure";
+    if (categories.includes('Storage/IO')) return "Storage/file-system failure";
+    if (categories.includes('Enrollment/Agent')) return "Enrollment/agent failure";
+    if (categories.includes('Config/Validation')) return "Configuration/validation failure";
+    if (categories.includes('Version/Compatibility')) return "Version/compatibility failure";
+    if (categories.includes('License/Activation')) return "License/activation failure";
+    if (categories.includes('Queue/Messaging')) return "Queue/messaging pipeline failure";
+    if (categories.includes('Serialization/Data')) return "Serialization/data parsing failure";
+    if (categories.includes('Time/Clock')) return "Time/clock/certificate-validity failure";
+    if (categories.includes('External Integration')) return "External integration failure";
+    if (categories.includes('Exception')) return "Application exception";
+    if (categories.includes('Error/Warning')) return "Error/warning event";
+    return "Forensic event";
+}
+
+function componentPriority(component) {
+    const priorities = {
+        "SQL Database": 42,
+        "SOTI Identity": 36,
+        "Management Service": 30,
+        "SOTI XSight": 24,
+        "SOTI Connect": 24,
+        "Deployment Server": 18,
+        "Device/Agent": 10,
+        "Unknown Component": 0
+    };
+    return priorities[component] || 0;
+}
+
+function scoreCausalCandidate(item) {
+    let score = item.score || 0;
+    score += componentPriority(item.component);
+    if (item.severity === "Critical") score += 30;
+    if (item.severity === "Error") score += 18;
+    if (item.sql) score += 34;
+    if (item.innermostException) score += 18;
+    if (/\b(root cause|fatal|first chance|unhandled|startup failed|failed to start|cannot continue)\b/i.test(item.text || "")) score += 22;
+    if (/\b(retry|retrying|downstream|because of previous|secondary|suppressed|handled)\b/i.test(item.text || "")) score -= 18;
+    if (/\b(device check-in failed|handshake failed|profile deployment failed|request failed|HTTP 5\d\d)\b/i.test(item.text || "")) score -= 4;
+    return score;
+}
+
+function formatIncidentLocation(item) {
+    return `${item.file}:Line ${item.line || item.startLine}${item.endLine && item.endLine !== item.line ? `-${item.endLine}` : ""}${item.timestamp ? ` @ ${item.timestamp}` : ""}`;
+}
+
+function getComponentTier(component) {
+    const tiers = {
+        "SQL Database": 0,
+        "SOTI Identity": 0,
+        "Management Service": 1,
+        "SOTI XSight": 1,
+        "SOTI Connect": 1,
+        "Deployment Server": 2,
+        "Device/Agent": 3,
+        "Unknown Component": 4
+    };
+    return tiers[component] ?? 4;
+}
+
+function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return "unknown time later";
+    const sec = Math.round(ms / 1000);
+    if (sec < 60) return `${sec}s later`;
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m later`;
+    return `${Math.round(min / 60)}h later`;
+}
+
+function getCausalEdge(upstream, downstream) {
+    if (!upstream || !downstream || upstream === downstream) return null;
+    if (upstream.file === downstream.file && upstream.line === downstream.line) return null;
+
+    const delta = downstream.sortTime - upstream.sortTime;
+    if (Number.isFinite(delta) && delta < -1000) return null;
+
+    let score = 0;
+    const reasons = [];
+
+    if (Number.isFinite(delta)) {
+        if (delta <= 5000) score += 35;
+        else if (delta <= 30000) score += 32;
+        else if (delta <= 120000) score += 28;
+        else if (delta <= 600000) score += 20;
+        else if (delta <= 3600000) score += 8;
+        else score -= 16;
+    } else {
+        score += 6;
+    }
+
+    const up = upstream.component;
+    const down = downstream.component;
+    const upTier = getComponentTier(up);
+    const downTier = getComponentTier(down);
+
+    if (upTier < downTier) {
+        score += 24 + ((downTier - upTier) * 5);
+        reasons.push(`${up} is upstream of ${down} in SOTI architecture`);
+    } else if (upTier === downTier && up !== down) {
+        score += 6;
+        reasons.push(`${up} and ${down} are peer components in the same failure tier`);
+    } else if (upTier > downTier) {
+        score -= 28;
+    }
+
+    if (up === "SQL Database" && ["Management Service", "Deployment Server", "Device/Agent"].includes(down)) {
+        score += 44;
+        reasons.push("SQL health gates Management Service, DS sync, and device workflows");
+    }
+    if (up === "Management Service" && ["Deployment Server", "Device/Agent"].includes(down)) {
+        score += 38;
+        reasons.push("Deployment Server and device workflows depend on Management Service");
+    }
+    if (up === "Deployment Server" && down === "Device/Agent") {
+        score += 42;
+        reasons.push("device check-in/enrollment depends on Deployment Server");
+    }
+    if (up === "SOTI Identity" && ["Management Service", "Deployment Server", "Device/Agent", "SOTI XSight", "SOTI Connect"].includes(down)) {
+        score += 32;
+        reasons.push("Identity/auth failures cascade into dependent SOTI services");
+    }
+
+    const downstreamText = downstream.text || "";
+    const upstreamText = upstream.text || "";
+    if (upstream.sql && /\b(request failed|api failed|handshake failed|connection dropped|check-in failed|enrollment failed|timeout|service unavailable|HTTP 5\d\d)\b/i.test(downstreamText)) {
+        score += 28;
+        reasons.push(`${upstream.sql.type} explains later service/API/device failure`);
+    }
+    if (upstream.categories?.includes('Certificate/TLS') && /\b(handshake|trust|certificate|connection|check-in|enrollment)\b/i.test(downstreamText)) {
+        score += 22;
+        reasons.push("certificate/TLS issue plausibly breaks downstream trust/handshake");
+    }
+    if (upstream.categories?.includes('Auth/Permission') && /\b(unauthorized|forbidden|login|token|auth|access denied|SSO|API)\b/i.test(downstreamText)) {
+        score += 22;
+        reasons.push("auth/permission failure plausibly blocks the downstream operation");
+    }
+    if (/\b(caused by|because|due to|inner exception|timeout expired|deadlock|login failed)\b/i.test(upstreamText)) {
+        score += 12;
+        reasons.push("upstream text contains explicit causal wording");
+    }
+    if (/\b(failed|failure|dropped|unavailable|timeout|unable|cannot)\b/i.test(downstreamText)) {
+        score += 8;
+    }
+
+    if (score < 28) return null;
+    return {
+        from: upstream,
+        to: downstream,
+        score,
+        deltaMs: Number.isFinite(delta) ? delta : null,
+        reason: reasons.slice(0, 3).join('; ') || "chronologically related forensic events"
+    };
+}
+
+function getPropagationPath(root, all) {
+    const path = [root];
+    const edges = [];
+    const used = new Set([`${root.file}:${root.line}:${root.component}`]);
+    let current = root;
+
+    for (let step = 0; step < 6; step++) {
+        const candidates = all
+            .filter(item => !used.has(`${item.file}:${item.line}:${item.component}`))
+            .map(item => getCausalEdge(current, item))
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score || (a.deltaMs ?? Infinity) - (b.deltaMs ?? Infinity));
+
+        if (candidates.length === 0) break;
+        const best = candidates[0];
+        if (best.score < 35) break;
+        edges.push(best);
+        path.push(best.to);
+        used.add(`${best.to.file}:${best.to.line}:${best.to.component}`);
+        current = best.to;
+    }
+
+    return { path, edges, score: edges.reduce((sum, edge) => sum + edge.score, 0) };
+}
+
+function chooseArchitectRoot(all) {
+    const candidates = all.map(item => {
+        const propagation = getPropagationPath(item, all);
+        const incomingScore = all
+            .map(other => getCausalEdge(other, item))
+            .filter(Boolean)
+            .reduce((max, edge) => Math.max(max, edge.score), 0);
+        const symptomPenalty = item.component === "Device/Agent" ? 35 : item.component === "Deployment Server" ? 18 : 0;
+        const total = item.causalScore + (propagation.score * 0.55) - (incomingScore * 0.65) - symptomPenalty;
+        return { item, propagation, incomingScore, total };
+    });
+
+    candidates.sort((a, b) => {
+        const diff = b.total - a.total;
+        if (Math.abs(diff) > 12) return diff;
+        if (a.item.sortTime !== b.item.sortTime) return a.item.sortTime - b.item.sortTime;
+        return getComponentTier(a.item.component) - getComponentTier(b.item.component);
+    });
+
+    return candidates[0] || null;
+}
+
+function buildDominoAnalysis(events, blocks) {
+    const normalizedEvents = events.map(e => {
+        const sql = e.categories.includes('SQL/Database') ? diagnoseSqlIssue(e.text) : null;
+        const component = detectComponent(e.file, e.text, e.categories);
+        const severity = detectLogSeverity(e.text);
+        const failureKind = classifyFailureKind(e.text, e.categories, sql);
+        const item = {
+            source: "event",
+            file: e.file,
+            line: e.lineNum,
+            endLine: e.lineNum,
+            timestamp: e.timestamp,
+            sortTime: e.sortTime,
+            text: e.text,
+            categories: e.categories,
+            component,
+            severity,
+            failureKind,
+            sql,
+            score: e.score
+        };
+        item.causalScore = scoreCausalCandidate(item);
+        return item;
+    });
+
+    const normalizedBlocks = blocks.map(b => {
+        const component = detectComponent(b.file, b.excerpt || b.message, b.categories);
+        const severity = detectLogSeverity(b.excerpt || b.message);
+        const failureKind = classifyFailureKind(b.excerpt || b.message, b.categories, b.sql);
+        const item = {
+            source: "exception block",
+            file: b.file,
+            line: b.startLine,
+            startLine: b.startLine,
+            endLine: b.endLine,
+            timestamp: b.timestamp,
+            sortTime: b.sortTime,
+            text: b.message,
+            categories: b.categories,
+            component,
+            severity,
+            failureKind,
+            sql: b.sql,
+            innermostException: b.innermostException,
+            outerException: b.outerException,
+            throwingFrame: b.throwingFrame,
+            originatingFrame: b.originatingFrame,
+            score: b.score
+        };
+        item.causalScore = scoreCausalCandidate(item);
+        return item;
+    });
+
+    const all = [...normalizedEvents, ...normalizedBlocks]
+        .filter(item => item.severity !== "Info" || item.sql || item.innermostException)
+        .sort((a, b) => {
+            if (a.sortTime !== b.sortTime) return a.sortTime - b.sortTime;
+            if (a.file !== b.file) return a.file.localeCompare(b.file);
+            return (a.line || 0) - (b.line || 0);
+        });
+
+    if (all.length === 0) return { report: "", root: null };
+
+    const architectChoice = chooseArchitectRoot(all);
+    const root = architectChoice ? architectChoice.item : all[0];
+    const rootIndex = all.findIndex(item => item === root);
+    const propagation = architectChoice ? architectChoice.propagation : getPropagationPath(root, all);
+    const downstream = propagation.path.slice(1);
+    const preRoot = all.slice(0, Math.max(0, rootIndex)).slice(-5);
+
+    let report = `\n--- CAUSAL DOMINO ANALYSIS (deterministic chronology + component model) ---\n`;
+    report += `Architecture model: SQL/Identity -> Management Service -> Deployment Server -> Device/Agent. Events are scored by timestamp proximity, component dependency, exception depth, SQL/cert/auth severity, and whether a later event is likely a symptom.\n`;
+    if (architectChoice) {
+        report += `Architect root score: ${Math.round(architectChoice.total)} (causal ${root.causalScore}, propagation ${propagation.score}, incoming-cause penalty ${architectChoice.incomingScore}).\n`;
+    }
+    if (preRoot.length > 0) {
+        report += `Events immediately before selected root candidate:\n`;
+        preRoot.forEach(item => {
+            report += `- ${formatIncidentLocation(item)} | ${item.component} | ${item.severity} | ${item.failureKind} | ${truncateLogLine(item.text, 260)}\n`;
+        });
+    }
+
+    report += `Selected primary causal candidate:\n`;
+    report += `- ${formatIncidentLocation(root)} | ${root.component} | ${root.severity} | ${root.failureKind} | causal score ${root.causalScore}\n`;
+    if (root.innermostException) report += `  Innermost exception: ${root.innermostException}\n`;
+    if (root.sql) {
+        const details = [];
+        if (root.sql.number) details.push(`Number ${root.sql.number}`);
+        if (root.sql.severity) details.push(`Severity ${root.sql.severity}`);
+        if (root.sql.state) details.push(`State ${root.sql.state}`);
+        if (root.sql.server) details.push(`Server ${root.sql.server}`);
+        if (root.sql.database) details.push(`Database ${root.sql.database}`);
+        if (root.sql.procedure) details.push(`Procedure ${root.sql.procedure}`);
+        report += `  SQL classification: ${root.sql.type}${details.length ? ` (${details.join('; ')})` : ""}\n`;
+    }
+    if (root.originatingFrame) report += `  Originating frame: ${root.originatingFrame}\n`;
+    if (root.throwingFrame) report += `  Throwing frame: ${root.throwingFrame}\n`;
+
+    report += `Domino chain after root candidate:\n`;
+    if (downstream.length === 0) {
+        report += `- No downstream forensic events were detected after this candidate in the supplied logs.\n`;
+    } else {
+        propagation.edges.forEach((edge, idx) => {
+            const item = edge.to;
+            const role = idx === propagation.edges.length - 1 ? "Possible user-visible symptom" : "Downstream effect";
+            report += `${idx + 1}. ${role}: ${formatIncidentLocation(item)} | ${item.component} | ${item.severity} | ${item.failureKind} | ${formatDuration(edge.deltaMs)} | edge score ${edge.score}\n`;
+            report += `   Why linked: ${edge.reason}\n`;
+            report += `   Evidence: ${truncateLogLine(item.text, 260)}\n`;
+        });
+    }
+
+    report += `\nArchitect-level master timeline around the chain:\n`;
+    const chainKeys = new Set(propagation.path.map(item => `${item.file}:${item.line}:${item.component}`));
+    const timelineSlice = all
+        .filter(item => {
+            if (chainKeys.has(`${item.file}:${item.line}:${item.component}`)) return true;
+            if (!Number.isFinite(root.sortTime) || !Number.isFinite(item.sortTime)) return false;
+            return Math.abs(item.sortTime - root.sortTime) <= 600000;
+        })
+        .slice(0, 40);
+    timelineSlice.forEach(item => {
+        const role = item === root ? "ROOT" : chainKeys.has(`${item.file}:${item.line}:${item.component}`) ? "DOMINO" : "CONTEXT";
+        report += `- [${role}] ${formatIncidentLocation(item)} | ${item.component} | ${item.failureKind} | ${truncateLogLine(item.text, 220)}\n`;
+    });
+
+    report += `Instruction: the final AI answer must use this domino section to separate the primary cause from downstream noise. If rejecting the selected candidate, cite the earlier/stronger replacement and explain the causal logic.\n`;
+    report += `--- END CAUSAL DOMINO ANALYSIS ---\n`;
+    return { report, root };
+}
+
+function inferProductFromLogName(name, content = "") {
+    const combined = `${name || ""} ${content.slice(0, 5000)}`;
+    const setup = combined.match(/SetupSOTI([A-Za-z]+)-(\d+(?:\.\d+){2,4})/i);
+    if (setup) {
+        const product = setup[1].replace(/([a-z])([A-Z])/g, '$1 $2');
+        return `SOTI ${product} ${setup[2]}`;
+    }
+    const xsight = combined.match(/\bXSight\b.*?\b(\d+(?:\.\d+){2,4})\b/i);
+    if (xsight) return `SOTI XSight ${xsight[1]}`;
+    const mc = combined.match(/\bMobiControl\b.*?\b(\d+(?:\.\d+){2,4})\b/i);
+    if (mc) return `SOTI MobiControl ${mc[1]}`;
+    const identity = combined.match(/\bIdentity\b.*?\b(\d+(?:\.\d+){2,4})\b/i);
+    if (identity) return `SOTI Identity ${identity[1]}`;
+    return "";
+}
+
+function extractSqlTarget(text) {
+    const candidates = [];
+    const addCandidate = value => {
+        const cleaned = (value || "").trim().replace(/^['"]|['"].*$/g, "");
+        if (cleaned && !candidates.includes(cleaned)) candidates.push(cleaned);
+    };
+
+    const explicitPatterns = [
+        /\bSQL_[A-Z0-9_]*SERVERNAME\b[^'\r\n]*'([^'\r\n]+\.database\.windows\.net(?:,\d+)?)'/gi,
+        /\b(?:Connecting to|SQL target|SqlServer|DatabaseServer)[^'\r\n]*?\s+([A-Za-z0-9.-]+\.database\.windows\.net(?:,\d+)?)/gi,
+        /\b(?:Data Source|Server|SQL Server)\s*=\s*([^;\]\r\n]+\.database\.windows\.net(?:,\d+)?)/gi,
+        /\b(?:tcp:)?([A-Za-z0-9.-]+\.database\.windows\.net(?:,\d+)?)\b/gi
+    ];
+
+    for (const p of explicitPatterns) {
+        let m;
+        while ((m = p.exec(text || "")) !== null) addCandidate(m[1]);
+    }
+
+    if (candidates.length > 0) {
+        return candidates
+            .sort((a, b) => {
+                const aScore = (/,\d+$/.test(a) ? 2 : 0) + (a.length / 1000);
+                const bScore = (/,\d+$/.test(b) ? 2 : 0) + (b.length / 1000);
+                return bScore - aScore;
+            })[0];
+    }
+
+    const patterns = [
+        /\b(?:Data Source|Server|SQL Server)\s*=\s*([^;\]\r\n]+)/i,
+        /\b(?:SQL target|SqlServer|DatabaseServer)\s*[:=]\s*([^;\]\r\n]+)/i
+    ];
+    for (const p of patterns) {
+        const m = (text || "").match(p);
+        if (m) return m[1].trim();
+    }
+    return "";
+}
+
+function extractMachineName(text) {
+    const patterns = [
+        /\b(?:ComputerName|MachineName|Server Name|Hostname|Host)\s*[:=]\s*([A-Za-z0-9_.-]+)/i,
+        /\bServer\s+`?([A-Z0-9_.-]{4,})`?/i
+    ];
+    for (const p of patterns) {
+        const m = (text || "").match(p);
+        if (m) return m[1].trim();
+    }
+    return "";
+}
+
+function getInstallerEvent(line, logName, lineNum) {
+    const text = line || "";
+    const timestamp = extractLogTimestamp(text);
+    const base = {
+        file: logName,
+        lineNum,
+        timestamp,
+        sortTime: parseLogTimestampForSort(timestamp),
+        text: text.trim(),
+        classification: "Installer event",
+        phase: "",
+        score: 0
+    };
+
+    if (/returned actual error code 1603 but will be translated to success due to continue marking/i.test(text)) {
+        return {
+            ...base,
+            classification: "Continue-marked custom action result / non-fatal",
+            phase: "Installer validation continuation",
+            score: 5
+        };
+    }
+    if (/XSFatalErrorDlg|CopyInstallationLog/i.test(text)) {
+        return {
+            ...base,
+            classification: "Post-failure UI/log-copy action / symptom",
+            phase: "Post-failure UI cleanup",
+            score: 5
+        };
+    }
+    if (/Cannot open database\s+"?([^"]+)"?.*requested by the login|Login failed for user/i.test(text)) {
+        return {
+            ...base,
+            classification: "First actionable SQL authentication/database-access failure",
+            phase: "Validation / previous configuration discovery",
+            score: 95
+        };
+    }
+    if (/serviceInstanceDnses|service instance dns|existing service instances/i.test(text) && /\b(failed|error|exception|cannot|unable)\b/i.test(text)) {
+        return {
+            ...base,
+            classification: "Repeated SQL/configuration discovery failure",
+            phase: "Validation / previous configuration discovery",
+            score: 80
+        };
+    }
+    if (/ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Setting Recovery mode to SIMPLE/i.test(text)) {
+        return {
+            ...base,
+            classification: "Fatal SQL migration incompatibility",
+            phase: "Database deployment / migration",
+            score: 220
+        };
+    }
+    if (/DeploymentEngine.*SQL exception|DbUp|PerformUpgrade|Upgrade failed due to unexpected exception/i.test(text)) {
+        return {
+            ...base,
+            classification: "Fatal database upgrade/deployment failure",
+            phase: "DbUp migration execution",
+            score: 190
+        };
+    }
+    if (/CustomAction|Deploy[A-Za-z]*Database/i.test(text) && /\b(exception|failed|error|1603|return value 3)\b/i.test(text)) {
+        return {
+            ...base,
+            classification: "Fatal installer custom action failure",
+            phase: "MSI custom action",
+            score: 180
+        };
+    }
+    if (/Return 1603|returning 1603|error code 1603|Fatal error|Return value 3|Installation failed|rollback/i.test(text)) {
+        return {
+            ...base,
+            classification: "Installer abort / rollback result",
+            phase: "MSI rollback",
+            score: 130
+        };
+    }
+    if (/FQDN.*incorrect|validation.*(?:failed|warning)|could not validate/i.test(text)) {
+        return {
+            ...base,
+            classification: "Validation warning / likely non-fatal",
+            phase: "Validation",
+            score: 35
+        };
+    }
+    if (/\b(MSI|Windows Installer|SetupSOTI|DeploymentEngine|CustomAction|Deploy[A-Za-z]*Database)\b/i.test(text)) {
+        return {
+            ...base,
+            classification: "Installer context",
+            phase: "Installer",
+            score: 10
+        };
+    }
+    return null;
+}
+
+function formatInstallerTime(ts) {
+    if (!ts) return "No timestamp";
+    const normalized = normalizeLogTimestamp(ts);
+    const time = normalized.match(/\b(\d{1,2}:\d{2}:\d{2}(?:\.\d{1,7})?)(?:\s*(?:AM|PM))?\b/i);
+    return time ? time[1] : normalized;
+}
+
+function installerEventToMarkdown(e) {
+    const text = e.text || "";
+    if (/Cannot open database|Login failed/i.test(text)) {
+        const msg = text.match(/(?:SqlException:\s*)?(Cannot open database.+?Login failed[^.]*\.?)/i);
+        return `First error: \`${msg ? msg[1] : truncateLogLine(text, 220)}\``;
+    }
+    if (/serviceInstanceDnses|service instance dns|existing service instances/i.test(text)) {
+        return `Repeated SQL/configuration read failure while reading \`serviceInstanceDnses\` or existing service state.`;
+    }
+    if (/DeploymentEngine.*SQL exception|script .*ALTER DATABASE|InitialMigration/i.test(text)) {
+        return `\`${truncateLogLine(text, 260)}\``;
+    }
+    if (/Upgrade failed due to unexpected exception|PerformUpgrade|DbUp/i.test(text)) {
+        return `\`${truncateLogLine(text, 260)}\``;
+    }
+    if (/CustomAction|Deploy[A-Za-z]*Database/i.test(text)) {
+        return `Custom action \`${(text.match(/Deploy[A-Za-z]*Database/i) || ["database deployment"])[0]}\` throws/returns failure - installation aborts.`;
+    }
+    if (/FQDN.*incorrect|validation.*(?:failed|warning)|could not validate/i.test(text)) {
+        return `Validation warning: \`${truncateLogLine(text, 220)}\``;
+    }
+    if (/Return 1603|error code 1603|Return value 3|rollback/i.test(text)) {
+        return `Installer rollback/fatal result: \`${truncateLogLine(text, 220)}\``;
+    }
+    return `\`${truncateLogLine(text, 260)}\``;
+}
+
+function findInstallerLine(lines, regex, startIndex = 0) {
+    for (let i = Math.max(0, startIndex); i < lines.length; i++) {
+        if (regex.test(lines[i] || "")) return i;
+    }
+    return -1;
+}
+
+function extractNearbyInstallerTimestamp(lines, idx, windowSize = 5) {
+    if (!lines || idx < 0) return "";
+    const own = extractLogTimestamp(lines[idx] || "");
+    if (own) return own;
+
+    for (let offset = 1; offset <= windowSize; offset++) {
+        const prev = idx - offset;
+        if (prev >= 0) {
+            const ts = extractLogTimestamp(lines[prev] || "");
+            if (ts) return ts;
+        }
+    }
+    for (let offset = 1; offset <= Math.min(2, windowSize); offset++) {
+        const next = idx + offset;
+        if (next < lines.length) {
+            const ts = extractLogTimestamp(lines[next] || "");
+            if (ts) return ts;
+        }
+    }
+    return "";
+}
+
+function getInstallerEventBlock(lines, idx, maxLines = 6) {
+    if (idx < 0 || idx >= lines.length) return "";
+    const block = [lines[idx]];
+    for (let j = idx + 1; j < Math.min(lines.length, idx + maxLines); j++) {
+        const line = lines[j] || "";
+        if (/^MSI \([^)]+\).*\[\d{1,2}:\d{2}:\d{2}/.test(line) && block.length > 1) break;
+        if (maxLines <= 8 && /^\s+at\s+/.test(line) && block.length >= 2) break;
+        block.push(line);
+        if (/Login failed for user|Setting Recovery mode to SIMPLE|Return value 3|returning 1603/i.test(line)) break;
+    }
+    return block.join("\n").trim();
+}
+
+function getInstallerLoginSummary(text) {
+    const db = ((text || "").match(/Cannot open database\s+"([^"]+)"/i) || [])[1] || "requested database";
+    const user = ((text || "").match(/Login failed for user\s+'([^']+)'/i) || [])[1] || "SQL user";
+    return { db, user };
+}
+
+function installerOneLine(text, max = 220) {
+    return truncateLogLine((text || "").replace(/\s+/g, " ").trim(), max);
+}
+
+function installerEvidenceWindow(lines, idx, before = 2, after = 6) {
+    if (!lines || idx < 0) return "";
+    const start = Math.max(0, idx - before);
+    const end = Math.min(lines.length - 1, idx + after);
+    const out = [];
+    for (let i = start; i <= end; i++) {
+        out.push(`Line ${i + 1}${extractLogTimestamp(lines[i] || "") ? ` @ ${extractLogTimestamp(lines[i] || "")}` : ""}: ${(lines[i] || "").trim()}`);
+    }
+    return out.join("\n");
+}
+
+function extractSqlErrorMetadata(text) {
+    const source = text || "";
+    const pick = regex => {
+        const m = source.match(regex);
+        return m ? m[1].trim() : "";
+    };
+    const details = [];
+    const number = pick(/\b(?:Error\s+Number|Number)\s*[:=]\s*(-?\d+)/i);
+    const state = pick(/\bState\s*[:=]\s*(\d+)/i);
+    const cls = pick(/\bClass\s*[:=]\s*(\d+)/i);
+    const client = pick(/\bClientConnectionId\s*[:=]\s*([0-9a-f-]+)/i);
+    const script = pick(/\b(?:script|script:)\s*'([^']+)'/i);
+    const blockLine = pick(/\bBlock line\s+(\d+)/i);
+    if (number) details.push(`SQL Error Number ${number}`);
+    if (state) details.push(`State ${state}`);
+    if (cls) details.push(`Class ${cls}`);
+    if (blockLine) details.push(`Script block line ${blockLine}`);
+    if (script) details.push(`Script ${script}`);
+    if (client) details.push(`ClientConnectionId ${client}`);
+    return details;
+}
+
+function extractStackOriginSummary(text) {
+    const frames = (text || "").split('\n').map(x => x.trim()).filter(x => /^at\s+/i.test(x));
+    if (frames.length === 0) return "";
+    const throwing = frames[0];
+    const originating = frames[frames.length - 1];
+    return `Throwing frame: ${throwing}\nOriginating frame: ${originating}`;
+}
+
+function buildAuthoritativeInstallerReport(logs) {
+    if (!logs || logs.length === 0) return "";
+
+    const contexts = [];
+    logs.forEach(log => {
+        const name = log.name || "Unknown log";
+        const content = log.content || "";
+        const likelyInstaller = /\b(SetupSOTI|MSI|Windows Installer|CustomAction|Return 1603|Return value 3|Deploy[A-Za-z]*Database|DbUp|DeploymentEngine|PerformUpgrade|Verbose logging started)\b/i.test(`${name}\n${content}`);
+        if (!likelyInstaller) return;
+
+        const lines = content.split('\n');
+        const base = extractInstallerBaseDate(content);
+        const product = inferProductFromLogName(name, content) || "SOTI installer";
+        const sqlTarget = extractSqlTarget(content);
+        const machine = extractMachineName(content);
+        const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || content);
+        const returnCode = /\b(?:MainEngineThread is returning|Back from server\. Return value:|Return(?:ed)?(?:\s+code)?|error code)\s*[:=]?\s*(1603|\d{3,5})\b/i.test(content)
+            ? ((content.match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i) || content.match(/\bBack from server\. Return value:\s*(1603|\d{3,5})\b/i) || content.match(/\b(?:Return(?:ed)?(?:\s+code)?|error code)\s*[:=]?\s*(1603|\d{3,5})\b/i) || [])[1] || "")
+            : "";
+
+        const loginIdx = findInstallerLine(lines, /Cannot open database\s+"[^"]+".*requested by the login|Login failed for user/i);
+        const dnsIdx = findInstallerLine(lines, /serviceInstanceDnses.*SqlException|serviceInstanceDnses.*Cannot open database/i);
+        const fqdnIdx = findInstallerLine(lines, /Location Service FQDN .* is incorrect|GetFqdnValidator Validation Msg/i);
+        const scriptExceptionIdx = findInstallerLine(lines, /SQL exception has occurred in script:.*InitialMigration/i);
+        const scriptStartIdx = findInstallerLine(lines, /Executing Database Server script .*InitialMigration/i);
+        const scriptIdx = scriptExceptionIdx >= 0 ? scriptExceptionIdx : scriptStartIdx;
+        const alterIdx = findInstallerLine(lines, /This ALTER DATABASE statement is not supported|Setting Recovery mode to SIMPLE/i, scriptIdx >= 0 ? scriptIdx : 0);
+        const upgradeIdx = findInstallerLine(lines, /Upgrade failed due to an unexpected exception|Upgrade failed due to unexpected exception|DbUp\.Engine\.UpgradeEngine\.PerformUpgrade/i, alterIdx >= 0 ? alterIdx : 0);
+        const customActionIdx = findInstallerLine(lines, /An error occurred during Location Service database deployment|DeployLocationServiceDatabase\(Session session\)|CustomAction DeployLocationServiceDatabase.*(?:failed|error|1603)/i, alterIdx >= 0 ? alterIdx : 0);
+        const abortIdx = findInstallerLine(lines, /MainEngineThread is returning 1603|Back from server\. Return value: 1603|Action ended .*ExecuteAction\. Return value 3/i, customActionIdx >= 0 ? customActionIdx : 0);
+
+        const hasAuthoritativeRoot = alterIdx >= 0 && /ALTER DATABASE|RECOVERY SIMPLE/i.test(getInstallerEventBlock(lines, alterIdx, 5));
+        if (!hasAuthoritativeRoot && loginIdx < 0 && customActionIdx < 0 && abortIdx < 0) return;
+
+        contexts.push({
+            name,
+            lines,
+            base,
+            product,
+            sqlTarget,
+            machine,
+            azureSql,
+            returnCode,
+            loginIdx,
+            dnsIdx,
+            fqdnIdx,
+            scriptIdx,
+            alterIdx,
+            upgradeIdx,
+            customActionIdx,
+            abortIdx,
+            hasAuthoritativeRoot
+        });
+    });
+
+    if (contexts.length === 0) return "";
+    const ctx = contexts.sort((a, b) => (b.hasAuthoritativeRoot ? 1 : 0) - (a.hasAuthoritativeRoot ? 1 : 0))[0];
+    const lineAt = idx => idx >= 0 ? ctx.lines[idx] || "" : "";
+    const tsAt = idx => formatInstallerTime(extractNearbyInstallerTimestamp(ctx.lines, idx));
+    const fullTsAt = idx => combineInstallerDateTime(ctx.base.date, extractNearbyInstallerTimestamp(ctx.lines, idx));
+    const start = ctx.base.date && ctx.base.startTime ? `${ctx.base.date} ${ctx.base.startTime}` : fullTsAt(0);
+    const endIdx = ctx.abortIdx >= 0 ? ctx.abortIdx : ctx.lines.length - 1;
+    const end = fullTsAt(endIdx) || combineInstallerDateTime(ctx.base.date, extractLogTimestamp(lineAt(endIdx)));
+
+    const loginBlock = getInstallerEventBlock(ctx.lines, ctx.loginIdx, 5);
+    const dnsBlock = getInstallerEventBlock(ctx.lines, ctx.dnsIdx, 5);
+    const fqdnBlock = getInstallerEventBlock(ctx.lines, ctx.fqdnIdx, 3);
+    const scriptBlock = getInstallerEventBlock(ctx.lines, ctx.scriptIdx, 8);
+    const alterBlock = getInstallerEventBlock(ctx.lines, ctx.alterIdx, 8);
+    const upgradeBlock = getInstallerEventBlock(ctx.lines, ctx.upgradeIdx, 18);
+    const customActionBlock = getInstallerEventBlock(ctx.lines, ctx.customActionIdx, 18);
+    const abortBlock = getInstallerEventBlock(ctx.lines, ctx.abortIdx, 2);
+    const login = getInstallerLoginSummary(loginBlock || dnsBlock);
+    const fatalSqlDetails = extractSqlErrorMetadata(`${scriptBlock}\n${alterBlock}\n${upgradeBlock}\n${customActionBlock}`);
+    const stackSummary = extractStackOriginSummary(`${upgradeBlock}\n${customActionBlock}`);
+
+    const rows = [];
+    const addRow = (idx, event) => {
+        if (idx >= 0 && event && !rows.some(row => row.idx === idx && row.event === event)) {
+            rows.push({ idx, event });
+        }
+    };
+
+    addRow(ctx.loginIdx, `First SQL access error: \`${installerOneLine(loginBlock, 260)}\``);
+    addRow(ctx.dnsIdx, `Repeated SQL/configuration read failure while reading \`serviceInstanceDnses\`: \`${installerOneLine(dnsBlock, 240)}\``);
+    addRow(ctx.fqdnIdx, `Validation warning: \`${installerOneLine(fqdnBlock, 220)}\``);
+    addRow(ctx.scriptIdx >= 0 ? ctx.scriptIdx : ctx.alterIdx, `Database migration script fails: \`${installerOneLine(scriptBlock || alterBlock, 280)}\``);
+    addRow(ctx.alterIdx, `Unsupported SQL operation: \`${installerOneLine(alterBlock, 260)}\``);
+    addRow(ctx.upgradeIdx, `DbUp upgrade failure: \`${installerOneLine(upgradeBlock, 260)}\``);
+    addRow(ctx.customActionIdx, `Custom action \`DeployLocationServiceDatabase\` throws the same \`SqlException\` and cannot complete.`);
+    addRow(ctx.abortIdx, `MSI abort/rollback result: \`${installerOneLine(abortBlock, 220)}\``);
+
+    rows.sort((a, b) => a.idx - b.idx);
+
+    let md = `## Forensic Analysis: ${ctx.product} Installation Failure\n`;
+    md += `Log Source: \`${ctx.name}\`\n`;
+    if (start) md += `Install Start: ${start}\n`;
+    if (end) md += `Install End: ${end}${ctx.returnCode ? ` (Return ${ctx.returnCode}${ctx.returnCode === "1603" ? " - Fatal Error" : ""})` : ""}\n`;
+    const env = [];
+    if (ctx.machine) env.push(`Server \`${ctx.machine}\``);
+    if (ctx.sqlTarget) env.push(`SQL target \`${ctx.sqlTarget}\`${ctx.azureSql ? " (Azure SQL Database)" : ""}`);
+    if (env.length > 0) md += `Environment: ${env.join(', ')}\n`;
+
+    md += `\n### 1. Chronological Triage - First Failure Point\n`;
+    md += `| Timestamp (HH:MM:SS.mmm) | Log Line | Event |\n`;
+    md += `|---|---|---|\n`;
+    rows.forEach(row => {
+        md += `| ${tsAt(row.idx)} | Line ${row.idx + 1} | ${row.event} |\n`;
+    });
+
+    if (ctx.loginIdx >= 0) {
+        md += `The first actionable failure is the SQL login/database access failure at ${tsAt(ctx.loginIdx)} (Line ${ctx.loginIdx + 1}), but it does not stop the installer because later deployment actions continue.\n`;
+    }
+    if (ctx.alterIdx >= 0) {
+        md += `The first deployment failure that causes abortion is the unsupported ALTER DATABASE migration error at ${tsAt(ctx.alterIdx)} (Line ${ctx.alterIdx + 1}).\n`;
+    } else if (ctx.customActionIdx >= 0) {
+        md += `The first deployment failure that causes abortion is the database deployment custom action at ${tsAt(ctx.customActionIdx)} (Line ${ctx.customActionIdx + 1}).\n`;
+    }
+
+    md += `\n### 2. Evidence Detail - Raw Log Anchors\n`;
+    const evidenceRows = [
+        ["SQL access/prerequisite failure", ctx.loginIdx, installerEvidenceWindow(ctx.lines, ctx.loginIdx, 1, 4)],
+        ["Repeated Location Service state read failure", ctx.dnsIdx, installerEvidenceWindow(ctx.lines, ctx.dnsIdx, 1, 4)],
+        ["Migration script execution/failure", ctx.scriptIdx >= 0 ? ctx.scriptIdx : ctx.alterIdx, installerEvidenceWindow(ctx.lines, ctx.scriptIdx >= 0 ? ctx.scriptIdx : ctx.alterIdx, 2, 8)],
+        ["DbUp upgrade failure", ctx.upgradeIdx, installerEvidenceWindow(ctx.lines, ctx.upgradeIdx, 2, 12)],
+        ["Custom action failure", ctx.customActionIdx, installerEvidenceWindow(ctx.lines, ctx.customActionIdx, 2, 12)],
+        ["MSI rollback/return code", ctx.abortIdx, installerEvidenceWindow(ctx.lines, ctx.abortIdx, 2, 3)]
+    ].filter(row => row[1] >= 0 && row[2]);
+    evidenceRows.forEach(([title, idx, block]) => {
+        md += `\n#### ${title} - Line ${idx + 1}, ${tsAt(idx)}\n`;
+        md += "```text\n" + block + "\n```\n";
+    });
+    if (fatalSqlDetails.length > 0) {
+        md += `SQL metadata: ${fatalSqlDetails.join('; ')}.\n`;
+    }
+    if (stackSummary) {
+        md += "Stack origin summary:\n```text\n" + stackSummary + "\n```\n";
+    }
+
+    md += `\n### 3. Propagation Path - The Domino Effect\n`;
+    const steps = [];
+    if (ctx.loginIdx >= 0) steps.push(`${tsAt(ctx.loginIdx)} Line ${ctx.loginIdx + 1}: SQL authentication/database access failure (${login.user} cannot open ${login.db})`);
+    if (ctx.dnsIdx >= 0) steps.push(`${tsAt(ctx.dnsIdx)} Line ${ctx.dnsIdx + 1}: Installer validation/configuration discovery cannot read existing Location Service database state (non-fatal; setup continues)`);
+    if (ctx.fqdnIdx >= 0) steps.push(`${tsAt(ctx.fqdnIdx)} Line ${ctx.fqdnIdx + 1}: Location Service FQDN validation warning is recorded, but subsequent MSI actions continue`);
+    if (ctx.scriptIdx >= 0) steps.push(`${tsAt(ctx.scriptIdx)} Line ${ctx.scriptIdx + 1}: DeployLocationServiceDatabase starts the Location Service database migration script`);
+    if (ctx.alterIdx >= 0) steps.push(`${tsAt(ctx.alterIdx)} Line ${ctx.alterIdx + 1}: Migration script attempts unsupported ALTER DATABASE / SET RECOVERY SIMPLE logic`);
+    if (ctx.azureSql && ctx.alterIdx >= 0) steps.push(`${tsAt(ctx.alterIdx)} Line ${ctx.alterIdx + 1}: Target is Azure SQL Database; Azure SQL does not allow changing the recovery model with ALTER DATABASE`);
+    if (ctx.upgradeIdx >= 0) steps.push(`${tsAt(ctx.upgradeIdx)} Line ${ctx.upgradeIdx + 1}: SqlException propagates through DbUp.Engine.UpgradeEngine.PerformUpgrade()`);
+    if (ctx.customActionIdx >= 0) steps.push(`${tsAt(ctx.customActionIdx)} Line ${ctx.customActionIdx + 1}: DeployLocationServiceDatabase custom action fails`);
+    if (ctx.abortIdx >= 0) steps.push(`${tsAt(ctx.abortIdx)} Line ${ctx.abortIdx + 1}: MSI rolls back${ctx.returnCode ? ` (Return ${ctx.returnCode})` : ""}`);
+    steps.forEach((step, idx) => {
+        md += `[${idx + 1}] ${step}\n`;
+        if (idx < steps.length - 1) md += `    ->\n`;
+    });
+    md += `- No cross-service MS -> DS -> Agent domino is proven by this installer log. This is a single-product XSight installation failure inside the Location Service database deployment workflow.\n`;
+    md += `- \`XSFatalErrorDlg\` and \`CopyInstallationLog\` happen after the server install returns 1603, so they are post-failure UI/log-copy symptoms, not root causes.\n`;
+
+    md += `\n### 4. Root Cause - Symptom vs. Source\n`;
+    md += `| Finding | Classification |\n`;
+    md += `|---|---|\n`;
+    if (ctx.loginIdx >= 0) md += `| \`Cannot open database "${login.db}" / Login failed for user '${login.user}'\` | Symptom/prerequisite issue - the target database is missing or the login lacks access, but setup continues past validation. |\n`;
+    if (ctx.fqdnIdx >= 0) md += `| \`Location Service FQDN ... is incorrect\` | Non-fatal validation warning in this log because later database deployment actions still execute. |\n`;
+    if (ctx.alterIdx >= 0) md += `| \`ALTER DATABASE statement is not supported\` / \`Setting Recovery mode to SIMPLE\` | ROOT CAUSE - the migration script attempts an unsupported SQL operation${ctx.azureSql ? " against Azure SQL Database" : ""}. |\n`;
+    if (ctx.abortIdx >= 0) md += `| \`Return ${ctx.returnCode || "1603"}\` / \`Return value 3\` / rollback | Final symptom of the failed database deployment custom action. |\n`;
+    md += `| \`XSFatalErrorDlg\` / \`CopyInstallationLog\` | Post-failure UI and log collection actions; they occur after the abort and must not be ranked as root cause. |\n`;
+
+    if (ctx.alterIdx >= 0 && ctx.azureSql) {
+        md += `\nConclusion: The SQL target is Azure SQL Database (shown by the \`.database.windows.net\` SQL endpoint${ctx.sqlTarget ? ` \`${ctx.sqlTarget}\`` : ""}). The XSight Location Service database migration script attempts an \`ALTER DATABASE\` recovery-model operation (\`SET RECOVERY SIMPLE\`). Azure SQL Database does not support changing database recovery mode, so SQL Server raises error 5008, DbUp fails the migration, \`DeployLocationServiceDatabase\` fails, and the installer rolls back${ctx.returnCode ? ` with return ${ctx.returnCode}` : ""}.\n`;
+        md += `Recommendation:\n`;
+        md += `- Use a supported SQL Server instance for this Location Service database deployment, such as on-premises SQL Server or SQL Server on a VM, or obtain a patched XSight installer/migration script that removes or conditionalizes the unsupported \`ALTER DATABASE ... SET RECOVERY SIMPLE\` statement.\n`;
+        md += `- Also resolve the earlier database access issue: ensure \`${login.user}\` can open \`${login.db}\` and has the required deployment permissions (for example db_owner where appropriate) if the database is pre-created or reused.\n`;
+    } else {
+        md += `\nConclusion: The aborting point is the database deployment custom action. Validate the exact SQL/database operation from the cited lines before applying remediation.\n`;
+    }
+
+    return md;
+}
+
+function buildInstallerMarkdownBlueprint(context) {
+    const {
+        product,
+        sources,
+        firstTimestamp,
+        lastTimestamp,
+        returnCode,
+        machine,
+        sqlTarget,
+        azureSql,
+        sorted,
+        firstActionable,
+        fatalRoot,
+        loginEvent,
+        validationWarning,
+        alterEvent,
+        abort
+    } = context;
+
+    const sourceText = (sources && sources.length > 0) ? sources.map(s => `\`${s}\``).join(', ') : '`Attached installer log`';
+    let md = `\n\n--- INSTALLER FORENSIC FORMAT HINTS (validate against raw logs before using) ---\n`;
+    md += `## Forensic Analysis: ${product || "SOTI Installer"} Installation Failure\n`;
+    md += `Log Source: ${sourceText}\n`;
+    if (firstTimestamp) md += `Install Start: ${firstTimestamp}\n`;
+    if (lastTimestamp) md += `Install End: ${lastTimestamp}${returnCode ? ` (Return ${returnCode}${returnCode === "1603" ? " - Fatal Error" : ""})` : ""}\n`;
+    const env = [];
+    if (machine) env.push(`Server \`${machine}\``);
+    if (sqlTarget) env.push(`SQL target \`${sqlTarget}\`${azureSql ? " (Azure SQL Database)" : ""}`);
+    if (env.length > 0) md += `Environment: ${env.join(', ')}\n`;
+
+    md += `\n### 1. Chronological Triage - First Failure Point\n`;
+    md += `| Timestamp (HH:MM:SS.mmm) | Log Line | Event |\n`;
+    md += `|---|---|---|\n`;
+    const tableEvents = sorted
+        .filter(e => /SQL|database|ALTER DATABASE|Upgrade failed|CustomAction|FQDN|1603|rollback|serviceInstance/i.test(`${e.classification} ${e.text}`))
+        .slice(0, 12);
+    tableEvents.forEach(e => {
+        md += `| ${formatInstallerTime(e.timestamp)} | Line ${e.lineNum} | ${installerEventToMarkdown(e)} |\n`;
+    });
+    if (firstActionable) {
+        md += `The first actionable failure is ${firstActionable.classification.toLowerCase()} at ${formatInstallerTime(firstActionable.timestamp)} (Line ${firstActionable.lineNum})`;
+        if (loginEvent && fatalRoot && loginEvent !== fatalRoot) md += `, but it does not appear to stop the installer because later deployment actions continue.`;
+        md += `\n`;
+    }
+    if (fatalRoot) {
+        md += `The first deployment failure that causes abortion is ${fatalRoot.classification.toLowerCase()} at ${formatInstallerTime(fatalRoot.timestamp)} (Line ${fatalRoot.lineNum}).\n`;
+    }
+
+    md += `\n### 2. Propagation Path - The Domino Effect\n`;
+    const steps = [];
+    if (loginEvent) steps.push(`SQL authentication/database access failure (${truncateLogLine(loginEvent.text, 180)})`);
+    if (loginEvent) steps.push(`Installer validation/configuration discovery cannot reliably read existing service or database state (non-fatal if setup continues)`);
+    if (validationWarning) steps.push(`Validation warning observed (${truncateLogLine(validationWarning.text, 160)})`);
+    if (alterEvent) steps.push(`Database deployment custom action runs migration script containing unsupported ALTER DATABASE / SET RECOVERY SIMPLE logic`);
+    if (alterEvent && azureSql) steps.push(`Azure SQL Database target detected; Azure SQL does not support changing recovery model with ALTER DATABASE`);
+    if (fatalRoot) steps.push(`SqlException/custom action failure propagates through DbUp/DeploymentEngine/installer execution`);
+    if (abort) steps.push(`Installation rolls back${returnCode ? ` (Return ${returnCode})` : ""}`);
+    if (steps.length === 0 && fatalRoot) steps.push(`Installer reaches fatal failure: ${truncateLogLine(fatalRoot.text, 180)}`);
+    steps.forEach((step, idx) => {
+        md += `[${idx + 1}] ${step}\n`;
+        if (idx < steps.length - 1) md += `    ↓\n`;
+    });
+    md += `- If this is a single-product installer log, do not invent an MS -> DS -> Agent chain. Keep the domino path inside the installer/database deployment workflow unless cross-service logs prove otherwise.\n`;
+
+    md += `\n### 3. Root Cause - Symptom vs. Source\n`;
+    md += `| Finding | Classification |\n`;
+    md += `|---|---|\n`;
+    if (loginEvent) md += `| \`Cannot open database / Login failed\` | Symptom/prerequisite issue - important because credentials or database existence are wrong, but not necessarily the aborting root cause if setup continues. |\n`;
+    if (validationWarning) md += `| \`Validation/FQDN warning\` | Inconsequential or non-fatal validation warning unless followed by a blocking custom action failure. |\n`;
+    if (alterEvent) md += `| \`ALTER DATABASE statement is not supported\` | ROOT CAUSE - migration attempts an unsupported database operation${azureSql ? " against Azure SQL Database" : ""}. |\n`;
+    if (abort) md += `| \`Return ${returnCode || "1603"} / rollback\` | Final symptom - installer rollback caused by earlier fatal custom action/database deployment failure. |\n`;
+
+    if (alterEvent && azureSql) {
+        md += `Conclusion: The target SQL Server is Azure SQL Database (indicated by the \`.database.windows.net\` FQDN). The installer/database migration attempts an \`ALTER DATABASE\` / recovery-model change such as \`SET RECOVERY SIMPLE\`, which Azure SQL Database does not support. This throws \`SqlException\`, the database deployment custom action fails, and the installation cannot proceed${returnCode ? ` (Return ${returnCode})` : ""}.\n`;
+        md += `Recommendation:\n`;
+        md += `- Use a supported SQL Server instance for this installer/database deployment, or obtain a patched installer/migration script that removes or conditionalizes the unsupported \`ALTER DATABASE\` statement.\n`;
+        md += `- Resolve the earlier database access issue as well: ensure the SQL user has the required permissions (for example db_owner where appropriate) and the target database exists when the installer expects it.\n`;
+    } else if (fatalRoot) {
+        md += `Conclusion candidate: The aborting failure may be ${fatalRoot.classification} at Line ${fatalRoot.lineNum}. Validate this against the surrounding installer/custom-action lines before answering.\n`;
+    }
+
+    md += `--- END INSTALLER FORENSIC FORMAT HINTS ---\n`;
+    return md;
+}
+
+function buildInstallerFailureAnalysis(logs) {
+    if (!logs || logs.length === 0) return "";
+
+    const events = [];
+    const sources = [];
+    let combined = "";
+    let product = "";
+    let sqlTarget = "";
+    let machine = "";
+    let firstTimestamp = "";
+    let lastTimestamp = "";
+    let returnCode = "";
+
+    logs.forEach(log => {
+        const name = log.name || "Unknown log";
+        const content = log.content || "";
+        combined += `\n${name}\n${content}`;
+        const likelyInstaller = /\b(SetupSOTI|MSI|Windows Installer|CustomAction|Return 1603|Return value 3|Deploy[A-Za-z]*Database|DbUp|DeploymentEngine|PerformUpgrade)\b/i.test(`${name}\n${content}`);
+        if (!likelyInstaller) return;
+
+        sources.push(name);
+        if (!product) product = inferProductFromLogName(name, content);
+        if (!sqlTarget) sqlTarget = extractSqlTarget(content);
+        if (!machine) machine = extractMachineName(content);
+
+        const lines = content.split('\n');
+        lines.forEach((line, idx) => {
+            const ts = extractLogTimestamp(line);
+            if (ts) {
+                if (!firstTimestamp) firstTimestamp = ts;
+                lastTimestamp = ts;
+            }
+            const rc = line.match(/\b(?:Return(?:ed)?(?:\s+code)?|error code)\s*[:=]?\s*(1603|\d{3,5})\b/i);
+            if (rc) returnCode = rc[1];
+            const event = getInstallerEvent(line, name, idx + 1);
+            if (event) events.push(event);
+        });
+    });
+
+    if (sources.length === 0 && !/\b(Return 1603|CustomAction|Deploy[A-Za-z]*Database|DbUp|ALTER DATABASE statement is not supported)\b/i.test(combined)) {
+        return "";
+    }
+
+    if (!product) product = inferProductFromLogName(sources[0] || "", combined) || "SOTI installer";
+    if (!sqlTarget) sqlTarget = extractSqlTarget(combined);
+    if (!machine) machine = extractMachineName(combined);
+    if (!returnCode && /\b1603\b/.test(combined)) returnCode = "1603";
+
+    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || combined);
+    const sorted = events
+        .filter(e => e.score >= 30)
+        .sort((a, b) => a.sortTime - b.sortTime || a.lineNum - b.lineNum);
+    const firstActionable = sorted.find(e => /SQL authentication|database-access|Validation warning|Fatal/i.test(e.classification)) || sorted[0];
+    const fatalRoot = [...sorted].sort((a, b) => {
+        const aFatal = /Fatal SQL migration|Fatal database upgrade|Fatal installer custom action/i.test(a.classification) ? 1000 : 0;
+        const bFatal = /Fatal SQL migration|Fatal database upgrade|Fatal installer custom action/i.test(b.classification) ? 1000 : 0;
+        return (bFatal + b.score) - (aFatal + a.score) || a.sortTime - b.sortTime;
+    })[0];
+    const abort = sorted.find(e => /abort|rollback|1603/i.test(e.classification));
+    const alterEvent = sorted.find(e => /ALTER DATABASE|RECOVERY SIMPLE|migration incompatibility/i.test(e.text + " " + e.classification));
+    const loginEvent = sorted.find(e => /Cannot open database|Login failed/i.test(e.text));
+    const validationWarning = sorted.find(e => /FQDN|validation warning/i.test(e.text + " " + e.classification));
+    const installerBlueprint = buildInstallerMarkdownBlueprint({
+        product,
+        sources,
+        firstTimestamp,
+        lastTimestamp,
+        returnCode,
+        machine,
+        sqlTarget,
+        azureSql,
+        sorted,
+        firstActionable,
+        fatalRoot,
+        loginEvent,
+        validationWarning,
+        alterEvent,
+        abort
+    });
+
+    let report = `\n\n=== INSTALLER FAILURE INTELLIGENCE (setup/MSI-specific root-cause model) ===\n`;
+    report += `Forensic title candidate: ${product}${returnCode ? ` installation failure (Return ${returnCode})` : " installation analysis"}\n`;
+    report += `Log source(s): ${sources.join(', ') || logs.map(l => l.name).join(', ')}\n`;
+    if (firstTimestamp) report += `Install/log start: ${firstTimestamp}\n`;
+    if (lastTimestamp) report += `Install/log end: ${lastTimestamp}${returnCode ? ` (Return ${returnCode}${returnCode === "1603" ? " - Fatal Error" : ""})` : ""}\n`;
+    const env = [];
+    if (machine) env.push(`Server ${machine}`);
+    if (sqlTarget) env.push(`SQL target ${sqlTarget}${azureSql ? " (Azure SQL Database detected)" : ""}`);
+    if (env.length > 0) report += `Environment: ${env.join('; ')}\n`;
+
+    if (sorted.length > 0) {
+        report += `\n--- INSTALLER CHRONOLOGICAL TRIAGE ---\n`;
+        report += `Timestamp | Location | Classification | Event\n`;
+        sorted.slice(0, 30).forEach(e => {
+            report += `${e.timestamp || "No timestamp"} | ${e.file}:Line ${e.lineNum} | ${e.classification} | ${truncateLogLine(e.text, 260)}\n`;
+        });
+    }
+
+    if (firstActionable) {
+        report += `\nFirst actionable failure: ${formatIncidentLocation({ file: firstActionable.file, line: firstActionable.lineNum, timestamp: firstActionable.timestamp })} - ${firstActionable.classification} - ${truncateLogLine(firstActionable.text, 300)}\n`;
+    }
+    if (fatalRoot) {
+        report += `First deployment/aborting failure: ${formatIncidentLocation({ file: fatalRoot.file, line: fatalRoot.lineNum, timestamp: fatalRoot.timestamp })} - ${fatalRoot.classification} - ${truncateLogLine(fatalRoot.text, 300)}\n`;
+    }
+
+    report += `\n--- INSTALLER PROPAGATION PATH ---\n`;
+    if (loginEvent) report += `[1] SQL authentication/database-access failure: ${loginEvent.file}:Line ${loginEvent.lineNum} - ${truncateLogLine(loginEvent.text, 220)}\n`;
+    if (loginEvent) report += `[2] Installer validation/config discovery cannot reliably read existing database/service state; this may be non-fatal if setup continues.\n`;
+    if (validationWarning) report += `[3] Validation warning observed: ${validationWarning.file}:Line ${validationWarning.lineNum} - ${truncateLogLine(validationWarning.text, 220)}\n`;
+    if (alterEvent) report += `[4] Database deployment/migration reaches unsupported SQL statement: ${alterEvent.file}:Line ${alterEvent.lineNum} - ${truncateLogLine(alterEvent.text, 220)}\n`;
+    if (alterEvent && azureSql) report += `[5] Azure SQL Database target detected; recovery-model ALTER DATABASE operations such as SET RECOVERY SIMPLE are not supported.\n`;
+    if (fatalRoot && fatalRoot !== alterEvent) report += `[6] Fatal deployment/custom-action failure: ${fatalRoot.file}:Line ${fatalRoot.lineNum} - ${truncateLogLine(fatalRoot.text, 220)}\n`;
+    if (abort) report += `[7] MSI abort/rollback result: ${abort.file}:Line ${abort.lineNum} - ${truncateLogLine(abort.text, 220)}\n`;
+    if (!loginEvent && !alterEvent && fatalRoot) report += `[1] Fatal installer failure: ${fatalRoot.file}:Line ${fatalRoot.lineNum} - ${truncateLogLine(fatalRoot.text, 260)}\n`;
+
+    report += `\n--- ROOT CAUSE VS SYMPTOM CLASSIFICATION ---\n`;
+    if (loginEvent) report += `- Cannot open database / login failed: Symptom or prerequisite failure. Important, but not necessarily aborting if installer continues past validation.\n`;
+    if (validationWarning) report += `- Validation/FQDN warning: Usually non-fatal unless followed by a blocking custom action failure.\n`;
+    if (alterEvent) report += `- ALTER DATABASE statement unsupported: ROOT CAUSE candidate for installer abort, especially with Azure SQL Database targets.\n`;
+    if (abort) report += `- Return ${returnCode || "1603"} / rollback: Final symptom of the failed custom action, not the underlying cause.\n`;
+
+    if (alterEvent && azureSql) {
+        report += `\nParser root-cause candidate: Azure SQL incompatibility. The installer/database migration appears to attempt an ALTER DATABASE/recovery-model operation that Azure SQL Database does not support, causing the database deployment custom action to fail and the installation to roll back${returnCode ? ` with return ${returnCode}` : ""}. Confirm this against the raw cited lines before making the final verdict.\n`;
+        report += `Possible actions if confirmed: use a supported SQL Server instance for this database deployment, or obtain a patched installer/migration script that skips or conditionalizes the unsupported ALTER DATABASE/SET RECOVERY SIMPLE statement. Also resolve any earlier login/db_owner issue if the log shows Cannot open database for the target DB.\n`;
+    } else if (fatalRoot) {
+        report += `\nParser root-cause candidate: primary abort point is ${fatalRoot.classification} at ${fatalRoot.file}:Line ${fatalRoot.lineNum}. Validate this against the surrounding custom-action and SQL migration lines before final answer.\n`;
+    }
+
+    report += installerBlueprint;
+    report += `Instruction: if this section exists, use the installer-specific format only when the attached logs are setup/MSI logs, and validate every conclusion against raw log evidence before answering.\n`;
+    report += `=== END INSTALLER FAILURE INTELLIGENCE ===`;
+    return report;
+}
+
+function isExceptionContinuationLine(line) {
+    return isStackTraceLine(line)
+        || /^\s*(---\s*End|Inner Exception|--->|HResult=|Source=|StackTrace:|Error Number:|Number:|Class:|State:|Procedure:|Server:|ClientConnectionId:|Data Source=|Initial Catalog=|TargetSite=|HelpLink=|SQLState=|ErrorCode=|NativeError=|Message=|Detail=|Reason=)/i.test(line)
+        || /^\s+/.test(line)
+        || /^\s*$/.test(line);
+}
+
+function extractExceptionBlocksFromLog(log) {
+    const name = log.name || "Unknown log";
+    const lines = (log.content || "").split('\n');
+    const blocks = [];
+    const consumed = new Set();
+
+    for (let i = 0; i < lines.length; i++) {
+        if (consumed.has(i)) continue;
+        const line = lines[i];
+        const intel = classifyLogLine(line);
+        const startsBlock = intel.hasException
+            || intel.categories.includes('SQL/Database')
+            || intel.categories.includes('Installer/MSI')
+            || intel.keywordHits.some(hit => hit.score >= 30)
+            || /\b(Caused by:|Inner Exception|--->|Traceback \(most recent call last\))\b/i.test(line);
+        if (!startsBlock) continue;
+
+        const start = i;
+        const blockLines = [line];
+        consumed.add(i);
+
+        for (let j = i + 1; j < Math.min(lines.length, start + 160); j++) {
+            const next = lines[j];
+            const nextIntel = classifyLogLine(next);
+            const looksLikeNewEvent = extractLogTimestamp(next) && nextIntel.isForensic && !nextIntel.hasStackFrame && !/^\s/.test(next);
+            if (looksLikeNewEvent && blockLines.length > 1) break;
+            if (nextIntel.hasStackFrame || nextIntel.hasException || nextIntel.categories.includes('SQL/Database') || isExceptionContinuationLine(next)) {
+                blockLines.push(next);
+                consumed.add(j);
+                continue;
+            }
+            if (blockLines.length < 4) {
+                blockLines.push(next);
+                consumed.add(j);
+                continue;
+            }
+            break;
+        }
+
+        const blockText = blockLines.join('\n');
+        const classes = extractExceptionClasses(blockText);
+        const frames = extractStackFrames(blockText);
+        const sql = diagnoseSqlIssue(blockText);
+        const categories = new Set(intel.categories);
+        if (sql) categories.add('SQL/Database');
+        if (classes.length > 0) categories.add('Exception');
+
+        blocks.push({
+            file: name,
+            startLine: start + 1,
+            endLine: start + blockLines.length,
+            timestamp: extractLogTimestamp(line),
+            sortTime: parseLogTimestampForSort(extractLogTimestamp(line)),
+            categories: Array.from(categories),
+            exceptionChain: classes,
+            outerException: classes[0] || "",
+            innermostException: classes[classes.length - 1] || "",
+            message: line.trim(),
+            throwingFrame: frames[0] || "",
+            originatingFrame: frames[frames.length - 1] || "",
+            sql,
+            score: scoreRootCauseCandidate({
+                lineNum: start + 1,
+                text: blockText,
+                categories: Array.from(categories),
+                hasException: classes.length > 0,
+                keywordHits: getKeywordHits(blockText)
+            }) + (sql ? 30 : 0) + (classes.length > 1 ? 18 : 0),
+            excerpt: blockLines.slice(0, 18).join('\n')
+        });
+    }
+
+    return blocks;
+}
+
+function truncateLogLine(line, max = 320) {
+    if (!line) return "";
+    return line.length > max ? `${line.slice(0, max)}...` : line;
+}
+
+function createSignalSummary() {
+    return {
+        keywordMap: new Map(),
+        exceptionMap: new Map(),
+        severityCounts: {},
+        highSignalLines: []
+    };
+}
+
+function bumpSignalMap(map, key, sample) {
+    if (!key) return;
+    const existing = map.get(key) || {
+        count: 0,
+        firstLine: sample.lineNum,
+        lastLine: sample.lineNum,
+        firstTimestamp: sample.timestamp,
+        lastTimestamp: sample.timestamp,
+        file: sample.file,
+        sample: sample.text
+    };
+    existing.count++;
+    existing.lastLine = sample.lineNum;
+    existing.lastTimestamp = sample.timestamp || existing.lastTimestamp;
+    if (!existing.firstTimestamp && sample.timestamp) existing.firstTimestamp = sample.timestamp;
+    map.set(key, existing);
+}
+
+function updateSignalSummary(summary, intel, line, lineNum, fileName = "") {
+    if (!summary || !intel || !intel.isForensic) return;
+    const sample = {
+        file: fileName,
+        lineNum,
+        timestamp: extractLogTimestamp(line),
+        text: truncateLogLine((line || "").trim(), 260)
+    };
+
+    if (intel.severityToken) {
+        summary.severityCounts[intel.severityToken] = (summary.severityCounts[intel.severityToken] || 0) + 1;
+    }
+    (intel.keywordHits || []).forEach(hit => bumpSignalMap(summary.keywordMap, hit.label, sample));
+    (intel.exceptionClasses || []).forEach(cls => bumpSignalMap(summary.exceptionMap, cls, sample));
+
+    const score = scoreRootCauseCandidate({
+        lineNum,
+        text: line || "",
+        categories: intel.categories,
+        hasException: intel.hasException,
+        keywordHits: intel.keywordHits
+    });
+    if (score >= 70 && !intel.hasStackFrame) {
+        summary.highSignalLines.push({ ...sample, score, categories: intel.categories });
+    }
+}
+
+function renderSignalSummary(summary, title = "EXCEPTION / ERROR KEYWORD SWEEP") {
+    if (!summary) return "";
+    const keywordRows = Array.from(summary.keywordMap.entries())
+        .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+        .slice(0, 30);
+    const exceptionRows = Array.from(summary.exceptionMap.entries())
+        .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+        .slice(0, 30);
+    const severityRows = Object.entries(summary.severityCounts)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const highSignalRows = summary.highSignalLines
+        .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
+        .slice(0, 20);
+
+    if (keywordRows.length === 0 && exceptionRows.length === 0 && severityRows.length === 0 && highSignalRows.length === 0) {
+        return `\n--- ${title} ---\nNo exception classes, severity tokens, or high-risk error keywords were detected.\n--- END ${title} ---\n`;
+    }
+
+    let report = `\n--- ${title} ---\n`;
+    if (severityRows.length > 0) {
+        report += `Severity tokens: ${severityRows.map(([sev, count]) => `${sev}:${count}`).join(', ')}\n`;
+    }
+    if (exceptionRows.length > 0) {
+        report += `Exception classes:\n`;
+        exceptionRows.forEach(([cls, row]) => {
+            report += `- ${cls}: ${row.count}x | ${row.file ? `${row.file}:` : ""}Lines ${row.firstLine}-${row.lastLine}${row.firstTimestamp ? ` | First ${row.firstTimestamp}` : ""} | ${row.sample}\n`;
+        });
+    }
+    if (keywordRows.length > 0) {
+        report += `High-signal keywords:\n`;
+        keywordRows.forEach(([keyword, row]) => {
+            report += `- ${keyword}: ${row.count}x | ${row.file ? `${row.file}:` : ""}Lines ${row.firstLine}-${row.lastLine}${row.firstTimestamp ? ` | First ${row.firstTimestamp}` : ""} | ${row.sample}\n`;
+        });
+    }
+    if (highSignalRows.length > 0) {
+        report += `Top high-signal lines:\n`;
+        highSignalRows.forEach((row, idx) => {
+            report += `${idx + 1}. ${row.file ? `${row.file}:` : ""}Line ${row.lineNum}${row.timestamp ? ` @ ${row.timestamp}` : ""} [score ${row.score}; ${row.categories.join(', ') || 'Unclassified'}] ${row.text}\n`;
+        });
+    }
+    report += `--- END ${title} ---\n`;
+    return report;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isSupportedLogFileName(name) {
+    return /\.(log|txt|xml|json|har|csv|out|err|trace|config)$/i.test(name || "");
+}
+
+function decodeLogBytes(input) {
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input || []);
+    if (bytes.length >= 2) {
+        if (bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder("utf-16le").decode(bytes.slice(2));
+        if (bytes[0] === 0xFE && bytes[1] === 0xFF) return new TextDecoder("utf-16be").decode(bytes.slice(2));
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+        return new TextDecoder("utf-8").decode(bytes.slice(3));
+    }
+
+    const sample = bytes.slice(0, Math.min(bytes.length, 4000));
+    let evenNulls = 0;
+    let oddNulls = 0;
+    for (let i = 0; i < sample.length; i++) {
+        if (sample[i] === 0) {
+            if (i % 2 === 0) evenNulls++;
+            else oddNulls++;
+        }
+    }
+    if (oddNulls > 20 && oddNulls > evenNulls * 3) return new TextDecoder("utf-16le").decode(bytes);
+    if (evenNulls > 20 && evenNulls > oddNulls * 3) return new TextDecoder("utf-16be").decode(bytes);
+
+    try {
+        return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch (e) {
+        return new TextDecoder("windows-1252").decode(bytes);
+    }
+}
+
+function getLogPanelIntel(log) {
+    if (!log) return null;
+    const cacheKey = `${log.name || ""}:${(log.content || "").length}`;
+    if (log.panelIntel && log.panelIntel.cacheKey === cacheKey) return log.panelIntel;
+
+    const content = log.content || "";
+    const lines = content ? content.split('\n') : [];
+    const categories = {};
+    const rootCandidates = [];
+    const installerEvents = [];
+    const signalSummary = createSignalSummary();
+    let firstTimestamp = "";
+    let lastTimestamp = "";
+    let eventCount = 0;
+
+    lines.forEach((line, idx) => {
+        const timestamp = extractLogTimestamp(line);
+        if (timestamp) {
+            if (!firstTimestamp) firstTimestamp = timestamp;
+            lastTimestamp = timestamp;
+        }
+
+        const intel = classifyLogLine(line);
+        updateSignalSummary(signalSummary, intel, line, idx + 1, log.name || "");
+        if (intel.isForensic && !intel.hasStackFrame) {
+            eventCount++;
+            intel.categories.forEach(cat => { categories[cat] = (categories[cat] || 0) + 1; });
+            rootCandidates.push({
+                lineNum: idx + 1,
+                timestamp,
+                text: line.trim(),
+                categories: intel.categories,
+                keywordHits: intel.keywordHits,
+                score: scoreRootCauseCandidate({
+                    lineNum: idx + 1,
+                    text: line,
+                    categories: intel.categories,
+                    hasException: intel.hasException,
+                    keywordHits: intel.keywordHits
+                })
+            });
+        }
+
+        const installerEvent = getInstallerEvent(line, log.name || "Attached log", idx + 1);
+        if (installerEvent && installerEvent.score >= 30) installerEvents.push(installerEvent);
+    });
+
+    rootCandidates.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
+    installerEvents.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
+
+    const topCategory = Object.entries(categories).sort((a, b) => b[1] - a[1])[0];
+    const sqlTarget = extractSqlTarget(content);
+    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || content);
+    const alterEvent = installerEvents.find(e => /ALTER DATABASE|RECOVERY SIMPLE|migration incompatibility/i.test(`${e.classification} ${e.text}`));
+    const loginEvent = installerEvents.find(e => /Cannot open database|Login failed/i.test(e.text));
+    const fatalInstallerEvent = installerEvents.find(e => /Fatal|abort|rollback|1603/i.test(e.classification));
+    const topException = Array.from(signalSummary.exceptionMap.entries()).sort((a, b) => b[1].count - a[1].count)[0];
+
+    let verdict = "Ready for forensic AI analysis";
+    let confidence = eventCount > 0 ? "Evidence detected" : "No errors detected";
+    let focusLine = rootCandidates[0] ? `Line ${rootCandidates[0].lineNum}` : "";
+
+    if (alterEvent && azureSql) {
+        verdict = "Likely root cause: Azure SQL unsupported ALTER DATABASE / recovery-model operation";
+        confidence = "High confidence installer pattern";
+        focusLine = `Line ${alterEvent.lineNum}`;
+    } else if (fatalInstallerEvent) {
+        verdict = `Installer abort candidate: ${fatalInstallerEvent.classification}`;
+        confidence = "Installer failure detected";
+        focusLine = `Line ${fatalInstallerEvent.lineNum}`;
+    } else if (loginEvent) {
+        verdict = "SQL login/database-access issue detected";
+        confidence = "Prerequisite failure detected";
+        focusLine = `Line ${loginEvent.lineNum}`;
+    } else if (rootCandidates[0]) {
+        verdict = `${classifyFailureKind(rootCandidates[0].text, rootCandidates[0].categories)} candidate`;
+        confidence = topCategory ? `${topCategory[0]} x${topCategory[1]}` : "Forensic events detected";
+    }
+
+    log.panelIntel = {
+        cacheKey,
+        lineCount: lines.length,
+        size: content.length,
+        eventCount,
+        firstTimestamp,
+        lastTimestamp,
+        topCategory: topCategory ? `${topCategory[0]} x${topCategory[1]}` : "",
+        topException: topException ? `${topException[0]} x${topException[1].count}` : "",
+        product: inferProductFromLogName(log.name || "", content),
+        sqlTarget,
+        azureSql,
+        verdict,
+        confidence,
+        focusLine
+    };
+    return log.panelIntel;
+}
+
+function buildWholeLogSegmentMap(lines, segmentCount = 16) {
+    const totalLines = lines.length;
+    if (totalLines === 0) return "";
+    const actualSegmentCount = Math.max(1, Math.min(segmentCount, totalLines));
+
+    const segments = Array.from({ length: actualSegmentCount }, (_, idx) => ({
+        index: idx + 1,
+        startLine: Math.floor((idx * totalLines) / actualSegmentCount) + 1,
+        endLine: Math.max(Math.floor(((idx + 1) * totalLines) / actualSegmentCount), Math.floor((idx * totalLines) / actualSegmentCount) + 1),
+        forensicCount: 0,
+        categories: {},
+        firstEvent: "",
+        lastEvent: ""
+    }));
+
+    lines.forEach((line, idx) => {
+        const intel = classifyLogLine(line);
+        if (!intel.isForensic || intel.hasStackFrame) return;
+
+        const segIdx = Math.min(actualSegmentCount - 1, Math.floor((idx / Math.max(1, totalLines)) * actualSegmentCount));
+        const seg = segments[segIdx];
+        seg.forensicCount++;
+        intel.categories.forEach(cat => {
+            seg.categories[cat] = (seg.categories[cat] || 0) + 1;
+        });
+        const label = `Line ${idx + 1}${extractLogTimestamp(line) ? ` @ ${extractLogTimestamp(line)}` : ""}: ${truncateLogLine(line.trim(), 240)}`;
+        if (!seg.firstEvent) seg.firstEvent = label;
+        seg.lastEvent = label;
+    });
+
+    let report = `\n--- WHOLE-LOG COVERAGE MAP (head/middle/tail segment scan) ---\n`;
+    segments.forEach(seg => {
+        const cats = Object.entries(seg.categories)
+            .sort((a, b) => b[1] - a[1])
+            .map(([cat, count]) => `${cat}:${count}`)
+            .join(', ');
+        report += `Segment ${seg.index}/${actualSegmentCount} | Lines ${seg.startLine}-${seg.endLine} | forensic events: ${seg.forensicCount}${cats ? ` | ${cats}` : ""}\n`;
+        if (seg.firstEvent) report += `  First: ${seg.firstEvent}\n`;
+        if (seg.lastEvent && seg.lastEvent !== seg.firstEvent) report += `  Last: ${seg.lastEvent}\n`;
+    });
+    report += `--- END WHOLE-LOG COVERAGE MAP ---\n`;
+    return report;
+}
+
+function getLineWindow(lines, centerLine, radius = 35) {
+    const start = Math.max(1, centerLine - radius);
+    const end = Math.min(lines.length, centerLine + radius);
+    const text = lines.slice(start - 1, end).join('\n');
+    return { start, end, text };
+}
+
+function buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks) {
+    const totalLines = lines.length;
+    const headSize = 30000;
+    const tailSize = 100000;
+
+    if (content.length <= (headSize + tailSize)) {
+        return `\n\n[FULL LOG CONTENT]\n${content}`;
+    }
+
+    let coverage = `\n\n[RAW LOG COVERAGE NOTE]\nThe full file is too large to place verbatim in the model context. The extension already scanned every line above; the raw context below intentionally includes HEAD, MIDDLE, TAIL, and incident-centered windows so the AI can verify evidence across the entire file.\n`;
+    coverage += `\n[LOG HEAD - first ${headSize} chars]\n${content.slice(0, headSize)}\n`;
+
+    const middleCenters = [0.25, 0.50, 0.75]
+        .map(p => Math.max(1, Math.min(totalLines, Math.floor(totalLines * p))))
+        .filter((line, idx, arr) => arr.indexOf(line) === idx);
+
+    coverage += `\n[LOG MIDDLE SAMPLES - evenly spaced raw windows]\n`;
+    middleCenters.forEach((center, idx) => {
+        const win = getLineWindow(lines, center, 45);
+        coverage += `\n--- MIDDLE SAMPLE ${idx + 1}: Lines ${win.start}-${win.end} ---\n${win.text}\n`;
+    });
+
+    const focusLines = [];
+    rankedRootCandidates.slice(0, 8).forEach(c => focusLines.push(c.lineNum));
+    parsedBlocks.slice(0, 8).forEach(b => focusLines.push(b.startLine));
+    const uniqueFocusLines = focusLines
+        .filter(Boolean)
+        .sort((a, b) => a - b)
+        .filter((line, idx, arr) => idx === 0 || Math.abs(line - arr[idx - 1]) > 80)
+        .slice(0, 10);
+
+    if (uniqueFocusLines.length > 0) {
+        coverage += `\n[INCIDENT-CENTERED RAW WINDOWS - strongest forensic locations]\n`;
+        uniqueFocusLines.forEach((line, idx) => {
+            const win = getLineWindow(lines, line, 45);
+            coverage += `\n--- INCIDENT WINDOW ${idx + 1}: Lines ${win.start}-${win.end} (center Line ${line}) ---\n${win.text}\n`;
+        });
+    }
+
+    coverage += `\n[LOG TAIL - last ${tailSize} chars]\n${content.slice(-tailSize)}`;
+    return coverage;
+}
+
+function buildCrossLogIncidentIndex(logs) {
+    if (!logs || logs.length === 0) return "";
+
+    const allEvents = [];
+    const exceptionBlocks = [];
+    const signatureMap = new Map();
+    const categoryCounts = {};
+    const signalSummary = createSignalSummary();
+    const installerReport = buildInstallerFailureAnalysis(logs);
+    let totalLines = 0;
+    let totalChars = 0;
+
+    logs.forEach(log => {
+        const name = log.name || "Unknown log";
+        const content = log.content || "";
+        const lines = content.split('\n');
+        totalLines += lines.length;
+        totalChars += content.length;
+        exceptionBlocks.push(...extractExceptionBlocksFromLog(log));
+
+        lines.forEach((line, idx) => {
+            const intel = classifyLogLine(line);
+            updateSignalSummary(signalSummary, intel, line, idx + 1, name);
+            if (!intel.isForensic || intel.hasStackFrame) return;
+
+            const lineNum = idx + 1;
+            const timestamp = extractLogTimestamp(line);
+            const event = {
+                file: name,
+                lineNum,
+                timestamp,
+                sortTime: parseLogTimestampForSort(timestamp),
+                text: line.trim(),
+                categories: intel.categories,
+                hasException: intel.hasException,
+                severityToken: intel.severityToken,
+                exceptionClasses: intel.exceptionClasses,
+                keywordHits: intel.keywordHits,
+                score: scoreRootCauseCandidate({
+                    lineNum,
+                    text: line,
+                    categories: intel.categories,
+                    hasException: intel.hasException,
+                    keywordHits: intel.keywordHits
+                })
+            };
+
+            allEvents.push(event);
+            intel.categories.forEach(cat => {
+                categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+            });
+
+            const sig = `${name}::${normalizeLogSignature(line)}`;
+            if (sig.length > name.length + 10) {
+                const existing = signatureMap.get(sig) || {
+                    file: name,
+                    count: 0,
+                    firstLine: lineNum,
+                    lastLine: lineNum,
+                    firstTimestamp: timestamp,
+                    lastTimestamp: timestamp,
+                    categories: new Set(),
+                    sample: line.trim()
+                };
+                existing.count++;
+                existing.lastLine = lineNum;
+                existing.lastTimestamp = timestamp || existing.lastTimestamp;
+                intel.categories.forEach(cat => existing.categories.add(cat));
+                signatureMap.set(sig, existing);
+            }
+        });
+    });
+
+    const byTime = [...allEvents].sort((a, b) => {
+        if (a.sortTime !== b.sortTime) return a.sortTime - b.sortTime;
+        if (a.file !== b.file) return a.file.localeCompare(b.file);
+        return a.lineNum - b.lineNum;
+    });
+    const byScore = [...allEvents].sort((a, b) => b.score - a.score || a.sortTime - b.sortTime || a.lineNum - b.lineNum);
+    const earliest = byTime.slice(0, 35);
+    const topRootCandidates = byScore.slice(0, 15);
+    const sqlEvents = allEvents.filter(e => e.categories.includes('SQL/Database'))
+        .sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)
+        .slice(0, 20);
+    const rankedExceptionBlocks = [...exceptionBlocks]
+        .sort((a, b) => b.score - a.score || a.sortTime - b.sortTime || a.startLine - b.startLine)
+        .slice(0, 25);
+    const sqlExceptionBlocks = exceptionBlocks
+        .filter(b => b.sql)
+        .sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)
+        .slice(0, 25);
+    const topBlock = rankedExceptionBlocks[0] || null;
+    const topEvent = topRootCandidates[0] || null;
+    const domino = buildDominoAnalysis(allEvents, exceptionBlocks);
+    const deterministicRoot = domino.root ? {
+            source: `causal ${domino.root.source}`,
+            file: domino.root.file,
+            line: domino.root.endLine && domino.root.endLine !== domino.root.line ? `${domino.root.line}-${domino.root.endLine}` : String(domino.root.line),
+            timestamp: domino.root.timestamp,
+            score: domino.root.causalScore,
+            categories: domino.root.categories,
+            text: domino.root.text,
+            innermost: domino.root.innermostException || "",
+            sql: domino.root.sql,
+            component: domino.root.component,
+            failureKind: domino.root.failureKind
+        }
+        : topBlock && (!topEvent || topBlock.score >= topEvent.score)
+        ? {
+            source: "parsed exception block",
+            file: topBlock.file,
+            line: `${topBlock.startLine}-${topBlock.endLine}`,
+            timestamp: topBlock.timestamp,
+            score: topBlock.score,
+            categories: topBlock.categories,
+            text: topBlock.message,
+            innermost: topBlock.innermostException,
+            sql: topBlock.sql,
+            component: detectComponent(topBlock.file, topBlock.excerpt || topBlock.message, topBlock.categories),
+            failureKind: classifyFailureKind(topBlock.excerpt || topBlock.message, topBlock.categories, topBlock.sql)
+        }
+        : topEvent ? {
+            source: "forensic event",
+            file: topEvent.file,
+            line: String(topEvent.lineNum),
+            timestamp: topEvent.timestamp,
+            score: topEvent.score,
+            categories: topEvent.categories,
+            text: topEvent.text,
+            innermost: "",
+            sql: null,
+            component: detectComponent(topEvent.file, topEvent.text, topEvent.categories),
+            failureKind: classifyFailureKind(topEvent.text, topEvent.categories, null)
+        } : null;
+    const distinctFailures = Array.from(signatureMap.values())
+        .map(x => ({ ...x, categories: Array.from(x.categories) }))
+        .sort((a, b) => b.count - a.count || a.file.localeCompare(b.file) || a.firstLine - b.firstLine)
+        .slice(0, 35);
+
+    let report = `\n\n=== CROSS-LOG INCIDENT INDEX (ALL ATTACHED LOGS) ===\n`;
+    report += `Whole-dataset scan complete: ${logs.length} file(s), ${totalLines} total lines, ${totalChars} total characters inspected before AI analysis.\n`;
+
+    if (allEvents.length === 0) {
+        report += `No forensic events were detected across the uploaded logs.\n`;
+        report += `=== END CROSS-LOG INCIDENT INDEX ===`;
+        return report;
+    }
+
+    report += `Detected ${allEvents.length} forensic event(s) across all logs.\n`;
+    report += `Parsed ${exceptionBlocks.length} exception/SQL block(s) with stack/inner-exception intelligence.\n`;
+
+    const cats = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1]);
+    if (cats.length > 0) {
+        report += `\n--- CROSS-LOG CATEGORY BREAKDOWN ---\n`;
+        cats.forEach(([cat, count]) => {
+            report += `${cat}: ${count}\n`;
+        });
+    }
+
+    report += renderSignalSummary(signalSummary, "CROSS-LOG EXCEPTION / ERROR KEYWORD SWEEP");
+
+    if (installerReport) {
+        report += installerReport;
+    }
+
+    if (domino.report) {
+        report += domino.report;
+    }
+
+    if (deterministicRoot) {
+        report += `\n--- DETERMINISTIC ROOT-CAUSE HYPOTHESIS (must validate, not blindly accept) ---\n`;
+        report += `Source: ${deterministicRoot.source}\n`;
+        report += `Location: ${deterministicRoot.file}:Line ${deterministicRoot.line}${deterministicRoot.timestamp ? ` @ ${deterministicRoot.timestamp}` : ""}\n`;
+        report += `Score: ${deterministicRoot.score}; Component: ${deterministicRoot.component || "Unknown Component"}; Failure kind: ${deterministicRoot.failureKind || "Forensic event"}; Categories: ${deterministicRoot.categories.join(', ') || 'Unclassified'}\n`;
+        if (deterministicRoot.innermost) report += `Innermost exception: ${deterministicRoot.innermost}\n`;
+        if (deterministicRoot.sql) report += `SQL diagnosis: ${deterministicRoot.sql.type}\n`;
+        report += `Evidence: ${deterministicRoot.text}\n`;
+        report += `Instruction: final answer must either confirm this as root cause with evidence or explicitly explain why an earlier/stronger event supersedes it.\n`;
+    }
+
+    report += `\n--- PRIMARY ROOT-CAUSE CANDIDATES ACROSS ALL LOGS ---\n`;
+    topRootCandidates.forEach((event, idx) => {
+        report += `${idx + 1}. ${event.file}:Line ${event.lineNum}${event.timestamp ? ` @ ${event.timestamp}` : ""} [score ${event.score}; ${event.categories.join(', ') || 'Unclassified'}] ${event.text}\n`;
+    });
+
+    if (rankedExceptionBlocks.length > 0) {
+        report += `\n--- EXCEPTION CHAIN INTELLIGENCE (parsed blocks, ranked) ---\n`;
+        rankedExceptionBlocks.forEach((block, idx) => {
+            report += `${idx + 1}. ${block.file}:Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [score ${block.score}; ${block.categories.join(', ') || 'Unclassified'}]\n`;
+            report += `   Outer: ${block.outerException || "Not detected"} | Innermost: ${block.innermostException || "Not detected"}\n`;
+            report += `   Message: ${block.message}\n`;
+            if (block.throwingFrame) report += `   Throwing frame: ${block.throwingFrame}\n`;
+            if (block.originatingFrame) report += `   Originating frame: ${block.originatingFrame}\n`;
+            if (block.sql) {
+                report += `   SQL diagnosis: ${block.sql.type}`;
+                const details = [];
+                if (block.sql.number) details.push(`Number ${block.sql.number}`);
+                if (block.sql.severity) details.push(`Severity ${block.sql.severity}`);
+                if (block.sql.state) details.push(`State ${block.sql.state}`);
+                if (block.sql.server) details.push(`Server ${block.sql.server}`);
+                if (block.sql.database) details.push(`Database ${block.sql.database}`);
+                if (block.sql.procedure) details.push(`Procedure ${block.sql.procedure}`);
+                if (block.sql.line) details.push(`SQL line ${block.sql.line}`);
+                if (details.length > 0) report += ` (${details.join('; ')})`;
+                report += `\n`;
+            }
+        });
+    }
+
+    if (sqlEvents.length > 0 || sqlExceptionBlocks.length > 0) {
+        report += `\n--- SQL/DATABASE EVENTS REQUIRING EXPLICIT DIAGNOSIS ---\n`;
+        sqlExceptionBlocks.forEach((block, idx) => {
+            report += `Block ${idx + 1}. ${block.file}:Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [${block.sql.type}; score ${block.score}] ${block.message}\n`;
+        });
+        sqlEvents.forEach((event, idx) => {
+            report += `Event ${idx + 1}. ${event.file}:Line ${event.lineNum}${event.timestamp ? ` @ ${event.timestamp}` : ""} [score ${event.score}] ${event.text}\n`;
+        });
+    } else {
+        report += `\n--- SQL/DATABASE EVENTS ---\nNo SQL/database exception signatures were detected across the uploaded logs.\n`;
+    }
+
+    report += `\n--- EARLIEST FORENSIC EVENTS (MASTER TIMELINE START) ---\n`;
+    earliest.forEach(event => {
+        report += `${event.timestamp || "No timestamp"} | ${event.file}:Line ${event.lineNum} | ${event.categories.join(', ') || 'Unclassified'} | ${event.text}\n`;
+    });
+
+    report += `\n--- MOST REPEATED DISTINCT FAILURES ACROSS LOGS ---\n`;
+    distinctFailures.forEach(sig => {
+        report += `- ${sig.count}x | ${sig.file}:Lines ${sig.firstLine}-${sig.lastLine}${sig.firstTimestamp ? ` | First ${sig.firstTimestamp}` : ""}${sig.lastTimestamp && sig.lastTimestamp !== sig.firstTimestamp ? ` | Last ${sig.lastTimestamp}` : ""} | ${sig.categories.join(', ') || 'Unclassified'} | ${sig.sample}\n`;
+    });
+
+    report += `\nAI instruction: use this cross-log index as the master incident map. The CAUSAL DOMINO ANALYSIS is the preferred propagation path because it is scored using SOTI architecture dependencies, timestamp proximity, exception depth, and downstream-symptom penalties. Validate the chosen root against the earliest timeline, SQL section, and parsed exception chains before stating root cause.\n`;
+    report += `=== END CROSS-LOG INCIDENT INDEX ===`;
+    return report;
+}
+
+function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") {
     if (!content) return "";
 
     const lines = content.split('\n');
     const totalLines = lines.length;
+    const parsedBlocks = extractExceptionBlocksFromLog({ name: fileName, content });
+    const installerReport = buildInstallerFailureAnalysis([{ name: fileName, content }]);
 
     const forensicEntries = [];
     const seenLineNums = new Set();
-    const errorTypeCounts = {}; // Track distinct error type frequencies
+    const errorTypeCounts = {};
+    const signatureMap = new Map();
+    const rootCandidates = [];
+    const signalSummary = createSignalSummary();
     let firstErrorLine = null;
     let lastErrorLine = null;
 
@@ -430,60 +2406,64 @@ function getSmartLogSnippet(content, limit = 300000) {
     for (let i = 0; i < totalLines; i++) {
         const line = lines[i];
         const trimmed = line.trim();
-
-        // === COMPREHENSIVE PATTERN DETECTION ENGINE ===
-        const hasException = /Exception/i.test(line);
-        const hasErrorWord = /\b(Error|FATAL|Critical|Fail|Failed|Failure|Timeout|Deadlock|Refused|Unreachable|Aborted|Crashed|Faulted|Corrupt)\b/i.test(line) || /timed\s*out/i.test(line);
-        const hasLogSeverity = /(?:\[|\b)(ERROR|FATAL|WARN|WARNING|CRITICAL)(?:\]|\b|:)/i.test(line);
-        const hasStackFrameIndicators = /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Inner Exception)/i.test(line);
-        const isSotiCode = /\bMCMR-\d+\b/i.test(line);
-
-        // SQL & Database Intelligence
-        const hasSqlIssue = /\b(SqlException|SqlError|Deadlock|deadlocked|Login failed|Cannot open database|Connection pool|connection string|SQL Server|transaction|rollback|schema|collation|stored procedure|sp_|xp_)\b/i.test(line);
-
-        // Certificate & TLS Intelligence
-        const hasCertIssue = /\b(certificate|cert |SSL|TLS|handshake failed|X509|trust|chain|CRL|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors)\b/i.test(line);
-
-        // HTTP & Network Intelligence
-        const hasHttpIssue = /\b(HTTP\/|HTTP [45]\d\d|StatusCode|BadRequest|Unauthorized|Forbidden|NotFound|InternalServerError|BadGateway|ServiceUnavailable|GatewayTimeout|WebException|SocketException|ConnectFailure|ConnectionReset|DNS|resolve|ECONNREFUSED|ENOTFOUND)\b/i.test(line);
-
-        // Service Lifecycle Intelligence
-        const hasServiceEvent = /\b(service start|service stop|starting service|stopping service|service failed|restarting|OnStart|OnStop|ServiceBase|hosted service|application pool|recycl)\b/i.test(line);
-
-        // Memory & Thread Intelligence
-        const hasMemoryIssue = /\b(OutOfMemory|StackOverflow|ThreadAbort|thread pool|GC heap|memory pressure|heap size|working set|AccessViolation)\b/i.test(line);
-
-        // Authentication & Permissions Intelligence
-        const hasAuthIssue = /\b(Access denied|Unauthorized|forbidden|permission|credentials|login|logon|authentication failed|token expired|bearer|OAuth|LDAP bind|Kerberos|NTLM|impersonat)\b/i.test(line);
-
-        // Composite: is this line forensically interesting?
-        const isForensic = hasException || hasErrorWord || hasLogSeverity || hasStackFrameIndicators || isSotiCode || hasSqlIssue || hasCertIssue || hasHttpIssue || hasServiceEvent || hasMemoryIssue || hasAuthIssue;
+        const intel = classifyLogLine(line);
+        const isForensic = intel.isForensic;
+        updateSignalSummary(signalSummary, intel, line, i + 1, fileName);
 
         // Track error type for summary
-        if (isForensic && !hasStackFrameIndicators) {
-            const categories = [];
-            if (hasSqlIssue) categories.push('SQL/Database');
-            if (hasCertIssue) categories.push('Certificate/TLS');
-            if (hasHttpIssue) categories.push('HTTP/Network');
-            if (hasServiceEvent) categories.push('Service Lifecycle');
-            if (hasMemoryIssue) categories.push('Memory/Thread');
-            if (hasAuthIssue) categories.push('Auth/Permission');
-            if (hasException) categories.push('Exception');
-            if (categories.length === 0 && (hasErrorWord || hasLogSeverity)) categories.push('Error/Warning');
-            categories.forEach(cat => { errorTypeCounts[cat] = (errorTypeCounts[cat] || 0) + 1; });
+        if (isForensic && !intel.hasStackFrame) {
+            intel.categories.forEach(cat => { errorTypeCounts[cat] = (errorTypeCounts[cat] || 0) + 1; });
             if (firstErrorLine === null) firstErrorLine = i + 1;
             lastErrorLine = i + 1;
+
+            const sig = normalizeLogSignature(line);
+            if (sig.length > 8) {
+                const existing = signatureMap.get(sig) || {
+                    signature: sig,
+                    count: 0,
+                    firstLine: i + 1,
+                    lastLine: i + 1,
+                    firstTimestamp: extractLogTimestamp(line),
+                    lastTimestamp: extractLogTimestamp(line),
+                    categories: new Set(),
+                    sample: line.trim()
+                };
+                existing.count++;
+                existing.lastLine = i + 1;
+                existing.lastTimestamp = extractLogTimestamp(line) || existing.lastTimestamp;
+                intel.categories.forEach(c => existing.categories.add(c));
+                signatureMap.set(sig, existing);
+            }
+
+            rootCandidates.push({
+                lineNum: i + 1,
+                timestamp: extractLogTimestamp(line),
+                sortTime: parseLogTimestampForSort(extractLogTimestamp(line)),
+                text: line.trim(),
+                categories: intel.categories,
+                hasException: intel.hasException,
+                severityToken: intel.severityToken,
+                exceptionClasses: intel.exceptionClasses,
+                keywordHits: intel.keywordHits,
+                score: scoreRootCauseCandidate({
+                    lineNum: i + 1,
+                    text: line,
+                    categories: intel.categories,
+                    hasException: intel.hasException,
+                    keywordHits: intel.keywordHits
+                })
+            });
         }
 
         // === EXCEPTION CHAIN TRACKER ===
         if (inException) {
-            if (hasStackFrameIndicators || trimmed === "" || (exceptionLinesCount < 5) || hasException) {
+            if (intel.hasStackFrame || trimmed === "" || (exceptionLinesCount < 8) || intel.hasException) {
                 if (!seenLineNums.has(i + 1)) {
                     forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
                     seenLineNums.add(i + 1);
                 }
                 exceptionLinesCount++;
-                if (exceptionLinesCount > 80) {
+                if (exceptionLinesCount > 140) {
                     inException = false;
                 }
             } else {
@@ -491,7 +2471,7 @@ function getSmartLogSnippet(content, limit = 300000) {
             }
         }
 
-        if (!inException && (hasException || hasSqlIssue || hasCertIssue || hasMemoryIssue || hasStackFrameIndicators || (i < totalLines - 1 && /^\s*at\s+/i.test(lines[i + 1])))) {
+        if (!inException && (intel.hasException || intel.categories.includes('SQL/Database') || intel.categories.includes('Certificate/TLS') || intel.categories.includes('Memory/Thread') || intel.categories.includes('Installer/MSI') || intel.keywordHits.some(hit => hit.score >= 30) || intel.hasStackFrame || (i < totalLines - 1 && isStackTraceLine(lines[i + 1])))) {
             inException = true;
             exceptionLinesCount = 1;
             if (!seenLineNums.has(i + 1)) {
@@ -567,11 +2547,24 @@ function getSmartLogSnippet(content, limit = 300000) {
         });
     }
 
+    const topSignatures = Array.from(signatureMap.values())
+        .map(x => ({ ...x, categories: Array.from(x.categories) }))
+        .sort((a, b) => b.count - a.count || a.firstLine - b.firstLine)
+        .slice(0, 25);
+
+    const rankedRootCandidates = rootCandidates
+        .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
+        .slice(0, 12);
+    const fileDomino = buildDominoAnalysis(
+        rootCandidates.map(event => ({ ...event, file: fileName })),
+        parsedBlocks
+    );
+
     // === BUILD FORENSIC REPORT WITH INTELLIGENCE SUMMARY ===
     let forensicReport = "";
     if (compressedEntries.length > 0) {
-        forensicReport = `\n\n=== FORENSIC INCIDENT REPORT (COMPLETE & CHRONOLOGICAL) ===\n`;
-        forensicReport += `Scanned all ${totalLines} lines. Found ${forensicEntries.length} forensic entries (${compressedEntries.length} after compression).\n`;
+        forensicReport = `\n\n=== FORENSIC INCIDENT REPORT (WHOLE-FILE SCAN) ===\n`;
+        forensicReport += `Whole-log scan complete: inspected every line (${totalLines} lines, ${content.length} characters). Found ${forensicEntries.length} forensic entries (${compressedEntries.length} after adjacency compression).\n`;
         if (firstErrorLine && lastErrorLine) {
             forensicReport += `Error window: Line ${firstErrorLine} through Line ${lastErrorLine}.\n`;
         }
@@ -584,6 +2577,65 @@ function getSmartLogSnippet(content, limit = 300000) {
             });
             forensicReport += `--- END BREAKDOWN ---\n`;
         }
+
+        forensicReport += renderSignalSummary(signalSummary, "FILE EXCEPTION / ERROR KEYWORD SWEEP");
+
+        forensicReport += buildWholeLogSegmentMap(lines, 16);
+
+        if (installerReport) {
+            forensicReport += installerReport;
+        }
+
+        if (rankedRootCandidates.length > 0) {
+            forensicReport += `\n--- ROOT-CAUSE CANDIDATE RANKING (computed from the whole log) ---\n`;
+            rankedRootCandidates.forEach((event, idx) => {
+                forensicReport += `${idx + 1}. Line ${event.lineNum}${event.timestamp ? ` @ ${event.timestamp}` : ""} [score ${event.score}; ${event.categories.join(', ') || 'Unclassified'}] ${event.text}\n`;
+            });
+            forensicReport += `Guidance: the AI must validate the top candidate against chronology and downstream symptoms before declaring root cause.\n`;
+            forensicReport += `--- END ROOT-CAUSE CANDIDATES ---\n`;
+        }
+
+        if (fileDomino.report) {
+            forensicReport += `\n--- FILE-LEVEL CAUSAL / DOMINO MODEL ---\n`;
+            forensicReport += fileDomino.report.replace(/--- CAUSAL DOMINO ANALYSIS \(deterministic chronology \+ component model\) ---\n/, "");
+            forensicReport += `--- END FILE-LEVEL CAUSAL / DOMINO MODEL ---\n`;
+        }
+
+        if (parsedBlocks.length > 0) {
+            const rankedBlocks = [...parsedBlocks]
+                .sort((a, b) => b.score - a.score || a.startLine - b.startLine)
+                .slice(0, 20);
+            forensicReport += `\n--- PARSED EXCEPTION / SQL BLOCKS (innermost-cause intelligence) ---\n`;
+            rankedBlocks.forEach((block, idx) => {
+                forensicReport += `${idx + 1}. Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [score ${block.score}; ${block.categories.join(', ') || 'Unclassified'}]\n`;
+                forensicReport += `   Outer: ${block.outerException || "Not detected"} | Innermost: ${block.innermostException || "Not detected"}\n`;
+                forensicReport += `   Message: ${block.message}\n`;
+                if (block.throwingFrame) forensicReport += `   Throwing frame: ${block.throwingFrame}\n`;
+                if (block.originatingFrame) forensicReport += `   Originating frame: ${block.originatingFrame}\n`;
+                if (block.sql) {
+                    const details = [];
+                    if (block.sql.number) details.push(`Number ${block.sql.number}`);
+                    if (block.sql.severity) details.push(`Severity ${block.sql.severity}`);
+                    if (block.sql.state) details.push(`State ${block.sql.state}`);
+                    if (block.sql.server) details.push(`Server ${block.sql.server}`);
+                    if (block.sql.database) details.push(`Database ${block.sql.database}`);
+                    if (block.sql.procedure) details.push(`Procedure ${block.sql.procedure}`);
+                    if (block.sql.line) details.push(`SQL line ${block.sql.line}`);
+                    forensicReport += `   SQL diagnosis: ${block.sql.type}${details.length ? ` (${details.join('; ')})` : ""}\n`;
+                }
+            });
+            forensicReport += `--- END PARSED EXCEPTION / SQL BLOCKS ---\n`;
+        }
+
+        if (topSignatures.length > 0) {
+            forensicReport += `\n--- DISTINCT FAILURE SIGNATURES (deduplicated across the whole log) ---\n`;
+            topSignatures.forEach(sig => {
+                forensicReport += `- ${sig.count}x | Lines ${sig.firstLine}-${sig.lastLine}${sig.firstTimestamp ? ` | First ${sig.firstTimestamp}` : ""}${sig.lastTimestamp && sig.lastTimestamp !== sig.firstTimestamp ? ` | Last ${sig.lastTimestamp}` : ""} | ${sig.categories.join(', ') || 'Unclassified'} | ${sig.sample}\n`;
+            });
+            forensicReport += `--- END DISTINCT FAILURE SIGNATURES ---\n`;
+        }
+
+        forensicReport += `\n--- CHRONOLOGICAL FORENSIC TIMELINE (line-preserving extract from whole log) ---\n`;
         
         let lastLineNum = -10;
         compressedEntries.forEach(entry => {
@@ -593,24 +2645,29 @@ function getSmartLogSnippet(content, limit = 300000) {
             forensicReport += `${entry.text}\n`;
             lastLineNum = entry.lineNum;
         });
+        forensicReport += `--- END CHRONOLOGICAL FORENSIC TIMELINE ---`;
         forensicReport += `\n=== END FORENSIC INCIDENT REPORT ===`;
     } else {
-        forensicReport = `\n\n[FORENSIC SCAN COMPLETE: No exceptions, warnings, or error-level entries detected in this log file.]`;
+        forensicReport = `\n\n[FORENSIC WHOLE-FILE SCAN COMPLETE: inspected every line (${totalLines} lines, ${content.length} characters). No exceptions, warnings, or error-level entries detected in this log file.]`;
+        forensicReport += buildWholeLogSegmentMap(lines, 16);
     }
 
     const headSize = 30000;
     const tailSize = 100000;
+    if (forensicReport.length > limit) {
+        const keepHead = Math.floor(limit * 0.65);
+        const keepTail = Math.floor(limit * 0.30);
+        forensicReport = `${forensicReport.slice(0, keepHead)}\n\n[FORENSIC REPORT TRUNCATED FOR MODEL CONTEXT: root-cause ranking, parsed exception blocks, segment map, and distinct signatures above are whole-file summaries; middle timeline entries omitted only after deterministic whole-file analysis.]\n\n${forensicReport.slice(-keepTail)}`;
+    }
     
     // If the file is small enough, just return the whole thing plus the report
     if (content.length <= (headSize + tailSize)) {
         return `${forensicReport}\n\n[FULL LOG CONTENT]\n${content}`;
     }
 
-    const head = content.slice(0, headSize);
-    const tail = content.slice(-tailSize);
-
-    // Place the forensic report at the TOP so it is never truncated by local AI context limits!
-    return `${forensicReport}\n\n[LOG HEAD — config/startup — first ${headSize} chars]\n${head}\n\n[LOG TAIL — most recent activity — last ${tailSize} chars]\n${tail}`;
+    // Place the forensic report at the TOP so it is never truncated by local AI context limits.
+    // For large files, include raw head/middle/tail plus windows around the highest-risk incidents.
+    return `${forensicReport}${buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks)}`;
 }
 
 function hideToast() {
@@ -690,15 +2747,46 @@ function getLeanLogPrompt() {
     return `You are the world's best SOTI Log Forensics Engineer — a Level 3 Escalation specialist. Your SOLE mission is to find the EXACT root cause from the log data. You NEVER guess, generalize, or skip evidence.
 
 The log data has three sections:
-1. === FORENSIC INCIDENT REPORT === — a COMPLETE chronological extraction of EVERY exception, error, stack trace, inner exception chain, and warning from the ENTIRE log file. The ERROR CATEGORY BREAKDOWN at the top tells you what types of errors were found and how many. Repeating identical errors are compressed.
-2. [LOG HEAD] — startup config, environment, service initialization. Check for misconfiguration here.
-3. [LOG TAIL] — most recent raw activity. The user's symptom usually manifests here.
+1. === CROSS-LOG INCIDENT INDEX === — a whole-dataset scan across ALL attached logs. It includes the master timeline start, CROSS-LOG EXCEPTION / ERROR KEYWORD SWEEP, INSTALLER FAILURE INTELLIGENCE when setup/MSI logs are detected, CAUSAL DOMINO ANALYSIS, deterministic root-cause hypothesis, parsed exception-chain intelligence, cross-log root-cause candidates, repeated failures, category counts, and SQL/database events requiring explicit diagnosis.
+2. === FORENSIC INCIDENT REPORT === — a per-file whole-log scan that inspected every line and extracted every detected exception, error, stack trace, inner exception chain, warning, SQL/database issue, certificate/TLS issue, auth failure, service event, memory/thread issue, installer/MSI failure, and network/HTTP failure. The ERROR CATEGORY BREAKDOWN, FILE EXCEPTION / ERROR KEYWORD SWEEP, ROOT-CAUSE CANDIDATE RANKING, FILE-LEVEL CAUSAL / DOMINO MODEL, INSTALLER FAILURE INTELLIGENCE, WHOLE-LOG COVERAGE MAP, PARSED EXCEPTION / SQL BLOCKS, and DISTINCT FAILURE SIGNATURES are computed from the ENTIRE log file, not only the head/tail snippets.
+3. [LOG HEAD] — startup config, environment, service initialization. Check for misconfiguration here.
+4. [LOG MIDDLE SAMPLES] — raw middle sections sampled from 25%, 50%, and 75% through large files. Use this to verify failures that occur away from startup/tail.
+5. [INCIDENT-CENTERED RAW WINDOWS] — raw lines around the highest-risk forensic events and parsed exception blocks.
+6. [LOG TAIL] — most recent raw activity. The user's symptom usually manifests here.
 
-YOU MUST SCAN THE ENTIRE FORENSIC INCIDENT REPORT LINE BY LINE. DO NOT SKIP ANY ENTRY.
+YOU MUST START WITH THE CROSS-LOG INCIDENT INDEX. Use it to build one master timeline across all attached files before reading the per-file reports.
+If a [DETERMINISTIC INSTALLER ROOT-CAUSE REPORT] section is present, it was generated from exact line-numbered installer evidence and is the controlling evidence for setup/MSI failures. Use it as the primary installer answer, then cite/validate the raw log lines around the same events. Do not invent a different cause unless you can cite an earlier, stronger raw log line.
+If INSTALLER FAILURE INTELLIGENCE is present, treat it as parser-generated evidence to validate against the raw log lines. Do not copy it blindly, and do not replace an earlier causal event with later post-failure UI/log-copy actions such as fatal dialogs or CopyInstallationLog.
+YOU MUST READ THE EXCEPTION / ERROR KEYWORD SWEEP. It is the deterministic sweep for Exception classes, ERROR/WARN/FATAL/CRITICAL tokens, HRESULT/Win32 codes, return codes, explicit failure words, unsupported operations, denied/refused/missing/invalid keywords, and top high-signal lines. Any root-cause verdict that ignores this sweep is invalid.
+HALLUCINATION BLOCKLIST: Never claim missing dependencies, corrupted registry entries, implicit deadlocks, network disconnects, timeout code 4214, log-path-change causality, reboot actions, or HRESULT/Win32 root causes unless the attached raw log lines explicitly show those exact facts. If the deterministic installer report cites SQL lines, SQL wins over generic installer/Windows-error guesses.
+TIMESTAMP PRECISION: Preserve milliseconds whenever present. MSI timestamps like \`19:13:57:009\` must be normalized and shown as \`19:13:57.009\` in every timeline, propagation path, root-cause verdict, and evidence citation.
+STRICT FAILURE-SIGNAL LADDER: prioritize FATAL/CRITICAL/PANIC/SEVERE, then exception chains with innermost causes, then SQL/certificate/authentication/permission failures, then ERROR/non-zero return codes, then WARN. INFO lines are context only unless they directly identify the failing operation. Lines saying "0 errors", "no errors", or "completed successfully" are not failures.
+EVERY exception class listed in the sweep or PARSED EXCEPTION / SQL BLOCKS must be mentioned exactly once in the Exception Deep Dive or explicitly dismissed as downstream/noise with evidence.
+YOU MUST USE THE WHOLE-LOG COVERAGE MAP to confirm whether the failure is concentrated in head, middle, tail, or a specific segment. Do not say the middle of the log is clean unless the segment map supports it.
+YOU MUST SCAN THE ENTIRE FORENSIC INCIDENT REPORT LINE BY LINE. DO NOT SKIP ANY DISTINCT FAILURE SIGNATURE.
+The ROOT-CAUSE CANDIDATE RANKING is a forensic hint, not a verdict. Validate it by chronology, inner exception chains, and downstream symptoms before declaring root cause.
+The DETERMINISTIC ROOT-CAUSE HYPOTHESIS is the machine parser's strongest candidate. You MUST either confirm it with cited evidence or reject it with a stronger earlier causal event.
+The CAUSAL DOMINO ANALYSIS is mandatory evidence. It is the "Log Whisperer" layer: it lines up every event on one master timeline, scores causal edges using SOTI architecture dependencies, and separates the first domino from distracting downstream noise. Never call a later DS/Agent/Web failure the root cause if an earlier SQL/Identity/MS/certificate/auth failure explains it.
+If INSTALLER FAILURE INTELLIGENCE exists, use it as the primary structure unless a [DETERMINISTIC INSTALLER ROOT-CAUSE REPORT] is present; that deterministic report is higher priority. Installer logs require a different judgement: the earliest error may be non-fatal validation, while the real root cause is the first deployment/custom-action failure that causes rollback/1603.
+If INSTALLER FORENSIC FORMAT HINTS exist, use them only as formatting guidance after independently validating the root cause against the cross-log index and raw incident windows.
 
 YOU MUST OUTPUT THIS EXACT STRUCTURE:
 
 ## LOG ANALYSIS REPORT
+
+If this is a setup/MSI/install log, title the report:
+## Forensic Analysis: [SOTI Product Version] Installation Failure
+Then include:
+- Log Source
+- Install Start / Install End / Return Code
+- Environment, server, SQL target, Azure SQL detection if visible
+- Chronological Triage table with Timestamp, Log Line, Classification, Event
+- Timestamps with milliseconds when available, for example \`19:13:57.009\`
+- Propagation Path
+- Root Cause vs Symptom table
+- Conclusion
+- Recommendations
+Do NOT output the generic ENVIRONMENT SNAPSHOT / EXCEPTION DEEP DIVE format before the installer report. For installer logs, the installer forensic report is the main answer.
 
 ### 1. ENVIRONMENT SNAPSHOT
 Extract from [LOG HEAD]:
@@ -708,12 +2796,12 @@ Extract from [LOG HEAD]:
 - Any config warnings or deprecation notices at startup
 
 ### 2. CHRONOLOGICAL ERROR TIMELINE
-List EVERY error and exception from the FORENSIC INCIDENT REPORT in strict chronological order.
+List EVERY distinct error, warning, SQL issue, exception chain, service failure, certificate/TLS issue, auth issue, and network issue from the CROSS-LOG INCIDENT INDEX and FORENSIC INCIDENT REPORT in strict chronological order across ALL files.
 Format per entry:
-> **[Line XXXX]** [TIMESTAMP] — \`ExceptionClass\`: message summary
+> **[filename:Line XXXX]** [TIMESTAMP] — \`ExceptionClass\`: message summary
 > *Context: what operation was in progress*
 
-DO NOT SKIP or summarize entries. Each distinct error event MUST appear.
+DO NOT SKIP or summarize distinct failure signatures. If a repeated failure appears many times, cite the first line, last line, and occurrence count.
 Highlight: service restarts, connection drops, authentication failures, certificate errors.
 
 ### 3. EXCEPTION DEEP DIVE
@@ -722,6 +2810,7 @@ For EACH distinct exception type found:
 #### Exception: [Full.Namespace.ExceptionClass]
 - **Message**: exact error message
 - **Inner Exception Chain**: trace the FULL chain: Outer → Inner → Innermost. The INNERMOST exception is the true cause.
+- **Parser Verdict**: compare your conclusion against the parsed innermost exception from PARSED EXCEPTION / SQL BLOCKS.
 - **Stack Trace Origin**: read the stack trace BOTTOM-UP.
   - **Originating Frame** (bottom): the SOTI method that started the operation
   - **Throwing Frame** (top): where the exception was thrown
@@ -731,6 +2820,7 @@ For EACH distinct exception type found:
   - Error Number & Severity if present
   - Was it a login failure, schema issue, timeout, deadlock, or connection pool exhaustion?
   - Which database/server/query if visible?
+  - Whether this SQL event is causal or only a downstream symptom
 - **Certificate/TLS Analysis** (if cert-related):
   - Which certificate failed? Expired? Untrusted chain? Name mismatch?
   - Which component was performing the TLS handshake?
@@ -747,6 +2837,9 @@ Draw the EXACT causal chain from root cause to user-visible symptom:
   → [USER-VISIBLE SYMPTOM: what the user sees]
 \`\`\`
 Every link in the chain MUST cite a specific line number and timestamp from the FORENSIC INCIDENT REPORT.
+Every timestamp in the chain MUST include milliseconds when the source log contains them.
+You MUST reconcile this section against the CAUSAL DOMINO ANALYSIS and FILE-LEVEL CAUSAL / DOMINO MODEL. If your chain differs from the deterministic chain, explain exactly why using line-level evidence.
+For each arrow, explain WHY it is causal, not merely nearby in time. Example: SQL timeout blocks MS data access -> MS/API operation fails -> DS connection drops -> Agent enrollment/check-in fails.
 
 ### 5. ROOT CAUSE VERDICT
 State in ONE sentence:
@@ -771,7 +2864,38 @@ CRITICAL RULES:
 - Certificate errors and authentication failures are ALWAYS high-priority — they block entire subsystems.
 - Distinguish CAUSAL errors (the origin) from SYMPTOMATIC errors (downstream noise). Only the FIRST chronological error in a cascade is the root cause.
 - If the same error repeats 100+ times, it is likely a loop caused by a persistent upstream failure. Find that upstream failure.
+- If the log contains SQL exceptions, you MUST explicitly include a SQL diagnosis even if SQL is not the final root cause.
 - NEVER say "multiple issues were found" without ranking them. ALWAYS identify THE primary root cause.`;
+}
+
+function getDeterministicInstallerPrompt() {
+    return `You are a SOTI installer forensics specialist. A deterministic parser has already extracted the controlling setup/MSI root-cause evidence from the attached log.
+
+Your task:
+- Output the installer forensic report using ONLY the [DETERMINISTIC INSTALLER ROOT-CAUSE REPORT] and its raw evidence blocks.
+- Do NOT produce generic sections such as "CROSS-LOG INCIDENT INDEX", "keyword sweep", "stack traces" or "we'll perform a sweep".
+- Do NOT say the deterministic report is missing if the section exists in the prompt.
+- Do NOT invent Location Service initialization failures, ENOTFOUND, registry keys, .NET prerequisites, Get-ComputerInfo, missing dependencies, deadlocks, TLS/network failures, timeout code 4214, or HRESULT/Win32 root causes unless those exact facts are quoted in the deterministic report.
+- Preserve line numbers exactly.
+- Preserve milliseconds exactly. MSI timestamps like 19:13:57:009 must be displayed as 19:13:57.009.
+- The first actionable failure can be a non-fatal prerequisite/symptom, but the root cause must be the first deployment/custom-action failure that aborts the installer.
+
+Required output:
+## Forensic Analysis: [product/version] Installation Failure
+Log Source, Install Start, Install End/Return Code, Environment
+
+### 1. Chronological Triage - First Failure Point
+Table with Timestamp (HH:MM:SS.mmm), Log Line, Event.
+
+### 2. Propagation Path
+Step-by-step chain with timestamps and line numbers.
+
+### 3. Root Cause - Symptom vs. Source
+Table classifying symptoms versus the true source.
+
+Conclusion and Recommendation.
+
+If the deterministic report identifies Azure SQL plus ALTER DATABASE/SET RECOVERY SIMPLE, that is the root cause.`;
 }
 
 function getSysPrompt(mode = 'full') {
@@ -1475,7 +3599,7 @@ const OpenRouterAI = {
                     messages, 
                     stream: true,
                     options: {
-                        num_ctx: 32768
+                        num_ctx: 131072
                     }
                 })
             });
@@ -1584,18 +3708,37 @@ async function send(overrideText = null, silent = false) {
 
         // --- LOG CONTEXT ---
         const hasLogs = c.logs.length > 0;
+        const deterministicInstallerReport = hasLogs ? buildAuthoritativeInstallerReport(c.logs) : "";
+        const deterministicInstallerMode = !!deterministicInstallerReport;
         let logContext = hasLogs ? `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]` : "";
-        c.logs.forEach(l => {
-            logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, 300000)}\n=== END: ${l.name} ===`;
-        });
+        if (deterministicInstallerMode) {
+            logContext += `\n\n[DETERMINISTIC INSTALLER ROOT-CAUSE REPORT - EXACT LOG EVIDENCE]\n${deterministicInstallerReport}\n[END DETERMINISTIC INSTALLER ROOT-CAUSE REPORT]\n`;
+            logContext += `\n\n[FINAL CONTROLLING EVIDENCE - DO NOT OVERRIDE]\n${deterministicInstallerReport}\n[END FINAL CONTROLLING EVIDENCE]\n`;
+        } else {
+            if (hasLogs) {
+                logContext += buildCrossLogIncidentIndex(c.logs);
+            }
+            const perLogLimit = hasLogs ? Math.max(120000, Math.floor(420000 / Math.max(1, c.logs.length))) : 300000;
+            c.logs.forEach(l => {
+                logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, perLogLimit, l.name)}\n=== END: ${l.name} ===`;
+            });
+        }
 
         const summaryText = $('issueSummary').value || 'NO SUMMARY PROVIDED';
 
         // When logs are present: use the lean forensic prompt so the context window
         // is focused on log data. When no logs: use the full KB prompt for general Q&A.
-        const corePrompt = hasLogs ? getLeanLogPrompt() : getLeanQAPrompt();
+        const corePrompt = deterministicInstallerMode ? getDeterministicInstallerPrompt() : (hasLogs ? getLeanLogPrompt() : getLeanQAPrompt());
 
-        const sysPrompt = scrubPII(`[ISSUE SUMMARY]: ${summaryText}
+        const sysPrompt = deterministicInstallerMode
+            ? scrubPII(`[ISSUE SUMMARY]: ${summaryText}
+[TIME]: ${new Date().toLocaleString()}
+[CASE]: ${JSON.stringify(ci, null, 2)}
+
+${corePrompt}
+
+${logContext}`)
+            : scrubPII(`[ISSUE SUMMARY]: ${summaryText}
 [TIME]: ${new Date().toLocaleString()}
 [CASE]: ${JSON.stringify(ci, null, 2)}
 [MC VERSIONS]: ${VERSIONS.join(', ')}
@@ -1612,15 +3755,22 @@ ${imgContext}
 ${logContext}`);
 
         // Pure-Text Payload (Option A)
-        const userMsg = scrubPII(txt) + (imgContext ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
+        const userMsgText = deterministicInstallerMode
+            ? "Produce the installer forensic report from the deterministic root-cause evidence only. Do not add generic or uncited causes."
+            : txt;
+        const userMsg = scrubPII(userMsgText) + (imgContext && !deterministicInstallerMode ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
         c.msgs.push({ role: 'user', content: userMsg, hidden: silent });
         
         // Model is selected from Ollama settings
         const selectedModel = LOCAL_AI_MODEL || null;
 
+        const modelMessages = hasLogs
+            ? [{ role: 'system', content: sysPrompt }, c.msgs[c.msgs.length - 1]]
+            : [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)];
+
         const reader = await OpenRouterAI.completions.create({
             model: selectedModel,
-            messages: [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)],
+            messages: modelMessages,
             stream: true
         });
 
@@ -1801,11 +3951,24 @@ const renderLogs = () => {
     none.style.display = c.logs.length > 0 ? 'none' : 'block';
     const frag = document.createDocumentFragment();
     c.logs.forEach((f, i) => {
+        const intel = getLogPanelIntel(f);
+        const meta = [
+            intel ? `${intel.lineCount.toLocaleString()} lines` : "",
+            intel ? formatBytes(intel.size) : "",
+            intel && intel.eventCount ? `${intel.eventCount.toLocaleString()} events` : "no error signatures",
+            intel && intel.focusLine ? intel.focusLine : ""
+        ].filter(Boolean).join(" | ");
+        const detail = intel ? `${intel.confidence}${intel.topCategory ? ` | ${intel.topCategory}` : ""}${intel.azureSql ? " | Azure SQL" : ""}` : "";
+        const verdict = intel && intel.topException ? `${intel.verdict} (${intel.topException})` : (intel ? intel.verdict : "Ready for analysis");
         const item = document.createElement('div');
         item.className = 'log-item';
         item.innerHTML = `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
-            <span class="log-name" style="margin-left:8px">${f.name}</span> 
+            <div class="log-file">
+                <span class="log-name">${escapeHtml(f.name)}</span>
+                <span class="log-meta">${escapeHtml(meta)}</span>
+                <span class="log-verdict" title="${escapeHtml(detail)}">${escapeHtml(verdict)}</span>
+            </div>
             <button class="log-del" data-index="${i}">×</button>`;
         
         item.querySelector('.log-del').addEventListener('click', () => removeLog(i));
@@ -1828,25 +3991,168 @@ const removeLog = (i) => {
     saveState();
 };
 
-const handleFiles = (files) => {
+async function inflateZipDeflate(bytes) {
+    if (typeof DecompressionStream === "undefined") {
+        throw new Error("ZIP deflate is not supported by this browser");
+    }
+
+    const formats = ["deflate-raw", "deflate"];
+    let lastError = null;
+    for (const format of formats) {
+        try {
+            const stream = new DecompressionStream(format);
+            const writer = stream.writable.getWriter();
+            const readPromise = new Response(stream.readable).arrayBuffer();
+            await writer.write(bytes);
+            await writer.close();
+            return new Uint8Array(await readPromise);
+        } catch (e) {
+            lastError = e;
+        }
+    }
+    throw lastError || new Error("Unable to inflate ZIP entry");
+}
+
+function findZipEndOfCentralDirectory(bytes) {
+    const min = Math.max(0, bytes.length - 0xFFFF - 22);
+    for (let i = bytes.length - 22; i >= min; i--) {
+        if (bytes[i] === 0x50 && bytes[i + 1] === 0x4B && bytes[i + 2] === 0x05 && bytes[i + 3] === 0x06) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+async function extractZipLogEntries(file) {
+    if (typeof JSZip !== "undefined") {
+        const zip = await JSZip.loadAsync(file);
+        const entries = [];
+        const names = Object.keys(zip.files).sort();
+        for (const name of names) {
+            const entry = zip.files[name];
+            if (entry.dir || !isSupportedLogFileName(name)) continue;
+            const bytes = await entry.async("uint8array");
+            entries.push({
+                name: `${file.name}/${name}`,
+                content: decodeLogBytes(bytes),
+                sourceZip: file.name,
+                size: bytes.length
+            });
+        }
+        return entries;
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const eocd = findZipEndOfCentralDirectory(bytes);
+    if (eocd < 0) throw new Error("Invalid ZIP file");
+
+    const entryCount = view.getUint16(eocd + 10, true);
+    const centralDirOffset = view.getUint32(eocd + 16, true);
+    const entries = [];
+    const decoder = new TextDecoder("utf-8");
+    let ptr = centralDirOffset;
+
+    for (let i = 0; i < entryCount && ptr + 46 <= bytes.length; i++) {
+        if (view.getUint32(ptr, true) !== 0x02014B50) break;
+
+        const flags = view.getUint16(ptr + 8, true);
+        const method = view.getUint16(ptr + 10, true);
+        const compressedSize = view.getUint32(ptr + 20, true);
+        const uncompressedSize = view.getUint32(ptr + 24, true);
+        const nameLen = view.getUint16(ptr + 28, true);
+        const extraLen = view.getUint16(ptr + 30, true);
+        const commentLen = view.getUint16(ptr + 32, true);
+        const localOffset = view.getUint32(ptr + 42, true);
+        const nameBytes = bytes.slice(ptr + 46, ptr + 46 + nameLen);
+        const rawName = decoder.decode(nameBytes).replace(/\\/g, "/");
+        ptr += 46 + nameLen + extraLen + commentLen;
+
+        if (!rawName || rawName.endsWith("/") || !isSupportedLogFileName(rawName)) continue;
+        if (flags & 1) continue;
+        if (localOffset + 30 > bytes.length || view.getUint32(localOffset, true) !== 0x04034B50) continue;
+
+        const localNameLen = view.getUint16(localOffset + 26, true);
+        const localExtraLen = view.getUint16(localOffset + 28, true);
+        const dataStart = localOffset + 30 + localNameLen + localExtraLen;
+        const dataEnd = dataStart + compressedSize;
+        if (dataStart < 0 || dataEnd > bytes.length) continue;
+
+        let data = bytes.slice(dataStart, dataEnd);
+        if (method === 8) {
+            data = await inflateZipDeflate(data);
+        } else if (method !== 0) {
+            throw new Error(`Unsupported ZIP compression method ${method} in ${rawName}`);
+        }
+
+        entries.push({
+            name: `${file.name}/${rawName}`,
+            content: decodeLogBytes(data),
+            sourceZip: file.name,
+            size: uncompressedSize || data.length
+        });
+    }
+
+    return entries;
+}
+
+async function readLogUpload(file) {
+    if (/\.zip$/i.test(file.name)) {
+        return extractZipLogEntries(file);
+    }
+
+    const buffer = await file.arrayBuffer();
+    return [{
+        name: file.name,
+        content: decodeLogBytes(buffer),
+        size: file.size
+    }];
+}
+
+const handleFiles = async (files) => {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) return;
 
-    for (const f of files) {
-        const r = new FileReader();
-        r.onload = ev => { 
-            const rawContent = ev.target.result;
-            // Store the log content directly for high-fidelity local AI analysis.
-            c.logs.push({ name: f.name, content: rawContent }); 
-            toast(`${f.name} uploaded`, 's'); 
-            renderLogs();
-            saveState();
-        };
-        r.readAsText(f);
+    const uploads = Array.from(files || []);
+    if (uploads.length === 0) return;
+
+    toast(`Reading ${uploads.length} file(s)...`, 'i', 2500);
+    const added = [];
+    const skipped = [];
+
+    for (const f of uploads) {
+        try {
+            const entries = await readLogUpload(f);
+            if (!entries.length) {
+                skipped.push(`${f.name}: no supported log files found`);
+                continue;
+            }
+
+            entries.forEach(entry => {
+                const log = {
+                    name: entry.name,
+                    content: entry.content,
+                    sourceZip: entry.sourceZip || "",
+                    uploadedAt: Date.now()
+                };
+                getLogPanelIntel(log);
+                c.logs.push(log);
+                added.push(entry.name);
+            });
+        } catch (e) {
+            skipped.push(`${f.name}: ${e.message || e}`);
+        }
     }
+
+    renderLogs();
+    saveState();
+
+    if (added.length > 0) toast(`Ready to analyse ${added.length} log file(s)`, 's', 4500);
+    if (skipped.length > 0) toast(`Skipped ${skipped.length} file(s): ${skipped.slice(0, 2).join('; ')}`, 'w', 7000);
 };
 
 $('dz').onclick = () => $('fileIn').click();
+$('btnAttach').onclick = () => $('fileIn').click();
 ['panelL', 'panelR', 'dz', 'chatMsgs', 'chatIn', 'btnAttach', 'btnImgAttach'].forEach(id => {
     const el = $(id);
     if (!el) return;
@@ -1864,7 +4170,7 @@ $('dz').onclick = () => $('fileIn').click();
         counter--;
         if (counter === 0) el.classList.remove('drag-active'); 
     };
-    el.ondrop = e => {
+    el.ondrop = async e => {
         e.preventDefault();
         e.stopPropagation();
         counter = 0;
@@ -1877,11 +4183,11 @@ $('dz').onclick = () => $('fileIn').click();
                 else logs.push(f);
             }
             if (imgs.length > 0 && typeof handleImages === 'function') handleImages(imgs);
-            if (logs.length > 0) handleFiles(logs);
+            if (logs.length > 0) await handleFiles(logs);
         }
     };
 });
-$('fileIn').onchange = e => {
+$('fileIn').onchange = async e => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const imgs = [], logs = [];
@@ -1890,7 +4196,8 @@ $('fileIn').onchange = e => {
         else logs.push(f);
     }
     if (imgs.length > 0 && typeof handleImages === 'function') handleImages(imgs);
-    if (logs.length > 0) handleFiles(logs);
+    if (logs.length > 0) await handleFiles(logs);
+    e.target.value = '';
 };
 
 
@@ -2024,12 +4331,29 @@ $('imgFileIn').onchange = e => handleImages(e.target.files);
 
 $('btnAnalyse').onclick = async () => {
     const now = new Date().toLocaleString();
-    const forensicPrompt = `Please provide a forensic analysis of the attached logs.
+    const c = cases.find(x => x.id === activeCaseId);
+    const attachedLogs = (c && c.logs) ? c.logs.map(l => `${l.name} (${l.content.length} chars)`).join(', ') : 'No logs attached';
+    const forensicPrompt = `Run the deepest possible forensic root-cause analysis on the attached logs.
 (Current Analysis Request Time: ${now})
-Focus on:
-1. 🏛️ Chronological Triage: Identify the very first failure point in the timeline.
-2. 🔄 Propagation Path: Trace the "Domino Effect" across services (e.g., MS -> DS -> Agent).
-3. 🎯 Root Cause: Distinguish between symptoms and the actual source of failure.`;
+Attached logs: ${attachedLogs}
+
+Mandatory analysis behavior:
+1. Use the whole-file FORENSIC INCIDENT REPORT for every attached log. Do not rely only on the visible head/tail snippets.
+2. Start with the CROSS-LOG INCIDENT INDEX and CROSS-LOG EXCEPTION / ERROR KEYWORD SWEEP, then validate against each file's FORENSIC INCIDENT REPORT.
+3. If a DETERMINISTIC INSTALLER ROOT-CAUSE REPORT exists, use it as the primary setup/MSI answer and validate it against the raw log lines. If only INSTALLER FAILURE INTELLIGENCE exists, use it as parser evidence for setup/MSI logs.
+4. Treat the CAUSAL DOMINO ANALYSIS as the architect-level "Log Whisperer" layer: use it to identify the first domino, downstream dominoes, and final symptom.
+5. Identify every distinct exception, ERROR/WARN event, SQL exception, timeout, deadlock, authentication failure, certificate/TLS failure, service restart/failure, installer/MSI failure, and HTTP/network failure.
+6. Use the keyword sweep to catch every high-signal word: Exception, ERROR, WARN, FATAL, CRITICAL, failed, cannot, unable, denied, refused, invalid, unsupported, missing, timeout, deadlock, rollback, 1603, HRESULT/Win32, and non-zero return/error codes.
+7. Build one master chronological timeline across all attached logs using filename, line number, and timestamp.
+8. Preserve timestamp precision. MSI timestamps like 19:13:57:009 must be shown as 19:13:57.009 in timelines, root-cause verdicts, and propagation chains.
+9. Read exception chains inside-out and stack traces bottom-up. The innermost exception is the strongest root-cause candidate.
+10. If SQL exceptions exist, diagnose them explicitly: login/schema/deadlock/timeout/connection-pool/connectivity/unsupported ALTER DATABASE, database/server/query if visible, and whether they are causal or downstream.
+11. Use the CAUSAL DOMINO ANALYSIS and FILE-LEVEL CAUSAL / DOMINO MODEL to explain root cause -> downstream failures -> user-visible symptom.
+12. Apply the strict signal ladder: FATAL/CRITICAL/PANIC/SEVERE > innermost exception chains > SQL/certificate/auth/permission > ERROR/non-zero return codes > WARN. Treat INFO and "0 errors/no errors/completed successfully" as context, not failures.
+13. Give a concrete solution, not only a diagnosis. Tie every fix to the proven root cause.
+14. Rank root-cause candidates, separate causal errors from noisy symptoms, and give one primary root-cause verdict.
+15. If the logs do not contain enough evidence, say exactly which extra log file/time window is required. Do not guess.
+16. Do not invent missing dependencies, corrupted registry entries, implicit deadlocks, network disconnects, timeout code 4214, log-path-change causality, reboot steps, or HRESULT/Win32 root causes unless exact cited log lines prove them.`;
 
     // Update Progress Indicator
     const pWrap = $('progWrap');
@@ -2047,7 +4371,7 @@ Focus on:
     b.style.display = 'none';
     $('iconR').textContent = '▶';
     $('panelR').classList.add('collapsed');
-    
+
     await send(forensicPrompt, true);
 
     // Mark as completed

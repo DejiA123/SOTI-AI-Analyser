@@ -214,7 +214,7 @@
             <div class="pb" id="bodyR" style="display: none">
                 <div class="dz" id="dz">
                     <div class="dz-text">Click or drag files here</div>
-                    <div class="dz-sub">LOG · TXT · XML · JSON · ZIP</div>
+                    <div class="dz-sub">LOG · TXT · XML · JSON · HAR · ZIP</div>
                 </div>
 
                 <div class="log-guide" id="logGuide">
@@ -239,7 +239,7 @@
     </div>
 
     <!-- Hidden Inputs -->
-    <input type="file" id="fileIn" multiple accept=".txt,.log,.xml,.json,.zip" style="display:none">
+    <input type="file" id="fileIn" multiple accept=".txt,.log,.xml,.json,.har,.csv,.out,.err,.trace,.config,.zip" style="display:none">
     <input type="file" id="imgFileIn" multiple accept="image/*" style="display:none">
 
     <!-- Modal for New Case -->
@@ -355,7 +355,6 @@
         </div>
     </div>
 
-    <script src="lib/jszip.min.js"></script>
     <script src="lib/tesseract.v5.min.js"></script>
     <script src="sidepanel.js"></script>
     <!-- Generation Loading Modal -->
