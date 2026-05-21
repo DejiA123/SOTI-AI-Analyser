@@ -94,7 +94,7 @@ function Test-OllamaApiReachable {
     try {
         [System.Net.WebRequest]::DefaultWebProxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
     } catch {
-        try { [System.Net.WebRequest]::DefaultWebProxy = $null } catch { }
+        try { [System.Net.WebRequest]::DefaultWebProxy = $null } catch { continue }
     }
 
     $endpoints = @(
@@ -111,7 +111,9 @@ function Test-OllamaApiReachable {
                 Write-Info "API responded at $uri (HTTP $($r.StatusCode))"
                 return $true
             }
-        } catch { }
+        } catch {
+            continue
+        }
     }
 
     # Fallback: ollama CLI responds even when Invoke-WebRequest is blocked by proxy/AV
@@ -120,15 +122,17 @@ function Test-OllamaApiReachable {
         try {
             $out = & $ollamaExe list 2>&1
             if ($LASTEXITCODE -eq 0 -and $out) {
-                Write-Info "Ollama CLI responded (ollama list) — API is running."
+                Write-Info 'Ollama CLI responded via ollama list - API is running.'
                 return $true
             }
-        } catch { }
+        } catch {
+            # ignore CLI probe errors
+        }
     }
 
     $tcp = Test-NetConnection -ComputerName 127.0.0.1 -Port 11434 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     if ($tcp -and $tcp.TcpTestSucceeded) {
-        Write-Info "Port 11434 is open on 127.0.0.1 (TCP check passed)."
+        Write-Info 'Port 11434 is open on 127.0.0.1 - TCP check passed.'
         return $true
     }
 
@@ -147,7 +151,7 @@ function Wait-OllamaApi {
 function Install-Llama32Model {
     param([string]$OllamaExe)
     Write-Header "Step 3: Install llama3.2 model (~2GB)"
-    Write-Info "Running: ollama pull llama3.2 (downloads the model used by ollama run llama3.2)..."
+    Write-Info 'Running: ollama pull llama3.2 - downloads the model for the extension...'
     & $OllamaExe pull llama3.2
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Model download failed. Try manually: ollama pull llama3.2"
@@ -195,7 +199,7 @@ if (-not (Wait-OllamaApi)) {
     Write-Info "If http://127.0.0.1:11434 works in your browser, continue manually:"
     Write-Info "  1. In extension Settings set URL to: http://127.0.0.1:11434"
     Write-Info "  2. Run in PowerShell: ollama pull llama3.2"
-    Write-Info "Corporate proxy/AV often blocks PowerShell HTTP to localhost — 127.0.0.1 usually works."
+    Write-Info 'Corporate proxy/AV often blocks PowerShell HTTP to localhost - use 127.0.0.1 in extension Settings.'
     exit 1
 }
 Write-Success "Ollama API is running."
