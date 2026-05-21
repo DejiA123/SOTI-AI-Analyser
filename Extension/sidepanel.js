@@ -62,29 +62,61 @@ function getDefaultCase(name = 'Case 1') {
     };
 }
 
+let _suppressStorageReload = false;
+let _saveStateTimer = null;
+let _renderTabsTimer = null;
+
+function buildCaseCiFromForm() {
+    return {
+        caseNum: $('caseNum').value,
+        sotiVer: $('sotiVer').value,
+        platform: $('platform').value,
+        agentVer: $('agentVer').value,
+        scrubAccount: $('scrubAccount').value,
+        scrubCustomer: $('scrubCustomer').value,
+        meetingNotes: $('meetingNotes').value,
+        issueSummary: $('issueSummary').value,
+        product: $('product').value,
+        emailChain: $('emailChain').value,
+        jiraExpected: $('jiraExpected').value,
+        jiraImpact: $('jiraImpact').value,
+        jiraPriority: $('jiraPriority').value,
+        jiraRepro: $('jiraRepro').value
+    };
+}
+
+function syncActiveCaseCiFromForm() {
+    if (!activeCaseId) return false;
+    const idx = cases.findIndex(c => c.id === activeCaseId);
+    if (idx === -1) return false;
+    cases[idx].ci = buildCaseCiFromForm();
+    return true;
+}
+
+function scheduleSaveState(delayMs = 450) {
+    if (_saveStateTimer) clearTimeout(_saveStateTimer);
+    const caseIdAtSchedule = activeCaseId;
+    _saveStateTimer = setTimeout(() => {
+        _saveStateTimer = null;
+        if (!caseIdAtSchedule || activeCaseId !== caseIdAtSchedule) return;
+        saveState();
+    }, delayMs);
+}
+
+function scheduleRenderTabs(delayMs = 280) {
+    if (_renderTabsTimer) clearTimeout(_renderTabsTimer);
+    _renderTabsTimer = setTimeout(() => {
+        _renderTabsTimer = null;
+        renderTabs();
+    }, delayMs);
+}
+
 async function saveState() {
     if (!activeCaseId) return;
     try {
-        const idx = cases.findIndex(c => c.id === activeCaseId);
-        if (idx === -1) return;
+        if (!syncActiveCaseCiFromForm()) return;
 
-        cases[idx].ci = {
-            caseNum: $('caseNum').value,
-            sotiVer: $('sotiVer').value,
-            platform: $('platform').value,
-            agentVer: $('agentVer').value,
-            scrubAccount: $('scrubAccount').value,
-            scrubCustomer: $('scrubCustomer').value,
-            meetingNotes: $('meetingNotes').value,
-            issueSummary: $('issueSummary').value,
-            product: $('product').value,
-            emailChain: $('emailChain').value,
-            jiraExpected: $('jiraExpected').value,
-            jiraImpact: $('jiraImpact').value,
-            jiraPriority: $('jiraPriority').value,
-            jiraRepro: $('jiraRepro').value
-        };
-
+        _suppressStorageReload = true;
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             await chrome.storage.local.set({ cases, activeCaseId });
         } else {
@@ -97,6 +129,8 @@ async function saveState() {
         } else {
             toast('Failed to save session state', 'e');
         }
+    } finally {
+        setTimeout(() => { _suppressStorageReload = false; }, 80);
     }
 }
 
@@ -214,6 +248,15 @@ function createNewCase() {
 
 function switchCase(id) {
     if (activeCaseId === id && cases.find(x => x.id === id)) return;
+
+    if (_saveStateTimer) {
+        clearTimeout(_saveStateTimer);
+        _saveStateTimer = null;
+    }
+    if (_renderTabsTimer) {
+        clearTimeout(_renderTabsTimer);
+        _renderTabsTimer = null;
+    }
     
     const c = cases.find(x => x.id === id);
     if (!c) {
@@ -225,27 +268,7 @@ function switchCase(id) {
     }
 
     // Capture old case data from DOM into memory SYNCHRONOUSLY before switching
-    if (activeCaseId) {
-        const oldIdx = cases.findIndex(c => c.id === activeCaseId);
-        if (oldIdx !== -1) {
-            cases[oldIdx].ci = {
-                caseNum: $('caseNum').value,
-                sotiVer: $('sotiVer').value,
-                platform: $('platform').value,
-                agentVer: $('agentVer').value,
-                scrubAccount: $('scrubAccount').value,
-                scrubCustomer: $('scrubCustomer').value,
-                meetingNotes: $('meetingNotes').value,
-                issueSummary: $('issueSummary').value,
-                product: $('product').value,
-                emailChain: $('emailChain').value,
-                jiraExpected: $('jiraExpected').value,
-                jiraImpact: $('jiraImpact').value,
-                jiraPriority: $('jiraPriority').value,
-                jiraRepro: $('jiraRepro').value
-            };
-        }
-    }
+    if (activeCaseId) syncActiveCaseCiFromForm();
     activeCaseId = id;
     
     // Update UI Fields
@@ -3783,7 +3806,10 @@ function updateVersionDropdowns() {
 }
 
 $('product').onchange = () => {
+    syncActiveCaseCiFromForm();
     updateVersionDropdowns();
+    updateFieldValidation('product');
+    if (_saveStateTimer) clearTimeout(_saveStateTimer);
     saveState();
 };
 
@@ -4176,13 +4202,22 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
 ].forEach(id => {
     const el = $(id);
     if (el) {
-        const handler = () => {
-            saveState();
+        const onFieldInput = () => {
+            syncActiveCaseCiFromForm();
+            requestAnimationFrame(() => updateFieldValidation(id));
+            if (id === 'caseNum') scheduleRenderTabs();
+            scheduleSaveState();
+        };
+        const onFieldCommit = () => {
+            syncActiveCaseCiFromForm();
             updateFieldValidation(id);
             if (id === 'caseNum') renderTabs();
+            if (_saveStateTimer) clearTimeout(_saveStateTimer);
+            saveState();
         };
-        el.oninput = handler;
-        if (el.tagName === 'SELECT') el.onchange = handler;
+        el.oninput = onFieldInput;
+        el.onchange = onFieldCommit;
+        el.onblur = onFieldCommit;
     }
 });
 
@@ -5039,10 +5074,7 @@ $('chatMsgs').addEventListener('copy', (e) => {
 // Real-time sync between Sidepanel and Floating Window
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && (changes.cases || changes.activeCaseId)) {
-        // Only reload if the change came from elsewhere (e.g. another window)
-        // This is a bit tricky in sidepanels, but we can check if we are busy
-        if (!busy) {
-            loadState();
-        }
+        if (busy || _suppressStorageReload) return;
+        loadState();
     }
 });
