@@ -1270,7 +1270,7 @@ function updateLocalAIBadge() {
         dot.style.background = '#22c55e';
         dot.classList.add('on');
         statusTxt.style.display = 'none';
-        pill.title = `Connected — ${LOCAL_AI_MODEL}`;
+        pill.title = `Connected — ${cleanName}`;
         if (chatIn) chatIn.placeholder = `Ask AI anything... (${cleanName})`;
     } else {
         dot.style.background = 'var(--warn)';
@@ -2169,7 +2169,7 @@ async function refreshSettingsModal() {
             modelSel.innerHTML = '<option value="">No models found — is Ollama running?</option>';
             if (statusEl) { statusEl.textContent = '⚠ Ollama not reachable at ' + (urlInp ? urlInp.value : LOCAL_AI_URL); statusEl.style.color = 'var(--warn)'; }
         } else {
-            modelSel.innerHTML = models.map(m => `<option value="${m}" ${m === LOCAL_AI_MODEL ? 'selected' : ''}>${m}</option>`).join('');
+            modelSel.innerHTML = models.map(m => `<option value="${m}" ${m === LOCAL_AI_MODEL ? 'selected' : ''}>${m.replace(/:latest$/i, '')}</option>`).join('');
             if (!LOCAL_AI_MODEL && models.length > 0) LOCAL_AI_MODEL = models[0];
             if (statusEl) { statusEl.textContent = `✓ ${models.length} model(s) available`; statusEl.style.color = 'var(--green)'; }
         }
@@ -2203,7 +2203,7 @@ $('btnSaveLocalAI').onclick = async () => {
     await saveLocalAISettings();
     updateLocalAIBadge();
     $('mSettings').style.display = 'none';
-    toast(`✓ Model set: ${LOCAL_AI_MODEL || 'Ollama'}`, 's');
+    toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}`, 's');
 };
 
 // Boot: detect Ollama and warn if no model selected
