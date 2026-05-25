@@ -241,7 +241,6 @@ async function loadState() {
 }
 
 function createNewCase() {
-    const id = 'case-' + Date.now();
     // Find the highest number in existing case names to determine next name
     let nextNum = cases.length + 1;
     const names = cases.map(c => c.name);
@@ -252,7 +251,7 @@ function createNewCase() {
     const newCase = getDefaultCase(name);
     cases.push(newCase);
     renderTabs();
-    switchCase(id);
+    switchCase(newCase.id);
 }
 
 function switchCase(id) {
