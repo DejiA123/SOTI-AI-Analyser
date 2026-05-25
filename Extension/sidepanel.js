@@ -206,14 +206,15 @@ async function loadState() {
             if (cases.length === 0) {
                 const newCase = getDefaultCase('Case 1');
                 cases = [newCase];
-                activeCaseId = newCase.id;
+                activeCaseId = null; // Force re-render
                 renderTabs();
-                switchCase(activeCaseId);
+                switchCase(newCase.id);
                 return;
             }
 
             const safeTargetId = cases.find(c => c.id === targetId) ? targetId : cases[0].id;
             renderTabs();
+            activeCaseId = null; // Force re-render and avoid saving stale DOM state
             switchCase(safeTargetId);
             return;
         } 
@@ -221,11 +222,11 @@ async function loadState() {
         // If we reach here, we need a default case
         const newCase = getDefaultCase('Case 1');
         cases = [newCase];
-        activeCaseId = newCase.id;
+        activeCaseId = null; // Force re-render
         saveState();
 
         renderTabs();
-        switchCase(activeCaseId);
+        switchCase(newCase.id);
     } catch (e) { 
         console.warn('Load failed', e);
         // Absolute fallback if everything fails
