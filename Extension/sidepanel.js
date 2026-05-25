@@ -12,6 +12,14 @@ const PULSE_ORIGIN = 'https://pulse.soti.net';
 const DOCS_ORIGIN = 'https://docs.soti.net';
 let PULSE_RELEASE_NOTE_CATALOG = {};
 
+function isChromeExtension() {
+    return typeof chrome !== 'undefined' && !!(chrome.runtime && chrome.runtime.id);
+}
+
+function isStandalonePage() {
+    return !isChromeExtension();
+}
+
 function md(t) {
     if (!t) return "";
     return t
@@ -614,13 +622,40 @@ function classifyLogLine(line) {
     const add = c => { if (!categories.includes(c)) categories.push(c); };
 
     const exceptionClasses = extractExceptionClasses(line);
-    const hasException = exceptionClasses.length > 0 || /\b(Unhandled exception|Inner Exception|Caused by:|Traceback \(most recent call last\))\b/i.test(line || "");
+    const hasException = exceptionClasses.length > 0 || 
+                        /\b(Unhandled exception|Inner Exception|Caused by:|Traceback \(most recent call last\))\b/i.test(line || "");
+    
     const keywordHits = getKeywordHits(line);
-    const hasErrorWord = keywordHits.some(hit => hit.label === 'explicit failure' || hit.label === 'fatal/critical' || hit.label === 'return/error code' || hit.label === 'HRESULT/Win32');
+    const hasErrorWord = keywordHits.some(hit => hit.label === 'explicit failure' || 
+                         hit.label === 'fatal/critical' || 
+                         hit.label === 'return/error code' || 
+                         hit.label === 'HRESULT/Win32');
+                         
     const severityToken = extractSeverityToken(line);
-    const hasLogSeverity = /^(FATAL|CRITICAL|PANIC|SEVERE|ERROR|WARN)$/i.test(severityToken) || keywordHits.some(hit => /severity/.test(hit.label));
+    const hasLogSeverity = /^(FATAL|CRITICAL|PANIC|SEVERE|ERROR|WARN)$/i.test(severityToken) || 
+                         keywordHits.some(hit => /severity/.test(hit.label));
+                         
     const hasStackFrame = isStackTraceLine(line);
-    const isSotiCode = /\bMCMR-\d+\b/i.test(line);
+    const isSotiCode = /\b(MCMR-\d+|MobiControl)\b/i.test(line);
+
+    // Check for SOTI MC patterns before general categories
+    if (isSotiCode || 
+        /\b(SOTI MC|MC Management Service|MC Deployment Server|MCAU)\b/i.test(line)) {
+        add('SOTI MC');
+        
+        if (hasException || 
+            /\b(Error|Failed|Failure|Connection Issue|Web Console|Database Connection)\b/i.test(line)) {
+            add('SOTI MC/Infrastructure');
+        }
+        
+        if (/\b(Deployment|Package|Content|Task Execution)\b/i.test(line)) {
+            add('SOTI MC/Deployment');
+        }
+        
+        if (/\b(Baseline|Compliance|Audit|Remediation)\b/i.test(line)) {
+            add('SOTI MC/Baseline');
+        }
+    }
 
     LOG_SIGNAL_RULES.forEach(rule => { if (rule.regex.test(line || "")) add(rule.category); });
     if (hasException) add('Exception');
@@ -636,32 +671,82 @@ function classifyLogLine(line) {
         severityToken,
         exceptionClasses,
         keywordHits,
-        isForensic: categories.length > 0 || hasStackFrame || isSotiCode || keywordHits.length > 0
+        isForensic: categories.length > 0 || 
+                    hasStackFrame || 
+                    isSotiCode || 
+                    keywordHits.length > 0
     };
 }
 
 function scoreRootCauseCandidate(event) {
     let score = 0;
-    if (event.hasException) score += 45;
+    
+    // Base scores for different types of issues
+    if (event.hasException) score += 60;
+    
+    // SOTI MC-specific scoring
+    if (event.categories.includes('SOTI MC/Infrastructure')) {
+        score += 80;
+        if (/\b(MCMR-\d+|Device Debug Report generated|Database Connection Failure|Web Console Error|Service Health Check Failed)\b/i.test(event.text)) {
+            score += 60;
+        }
+    }
+    
+    if (event.categories.includes('SOTI MC/Deployment')) {
+        score += 50;
+        if (/\b(Unknown Deployment Error|Content Sync Error|Package Installation Failed|Task Scheduling Error)\b/i.test(event.text)) {
+            score += 40;
+        }
+    }
+    
+    if (event.categories.includes('SOTI MC/Baseline')) {
+        score += 45;
+        if (/\b(Baseline Evaluation Error|Compliance Check Error|Remediation Execution Failed)\b/i.test(event.text)) {
+            score += 35;
+        }
+    }
+    
+    // General signal rules scoring
     (event.categories || []).forEach(category => {
         const rule = LOG_SIGNAL_RULES.find(x => x.category === category);
         if (rule) score += rule.weight;
     });
-    (event.keywordHits || getKeywordHits(event.text)).forEach(hit => { score += hit.score; });
+    
+    // Keyword hit scoring
+    (event.keywordHits || getKeywordHits(event.text)).forEach(hit => { 
+        score += hit.score;
+        if (hit.label === 'explicit failure' && hit.score > 20) {
+            score += 15; // Extra boost for critical failures
+        }
+    });
+    
+    // Severity level scoring
     if (/\b(FATAL|CRITICAL|PANIC|SEVERE)\b/i.test(event.text)) score += 35;
     if (/\b(ERROR|ERR)\b/i.test(event.text)) score += 18;
     if (/\b(WARN|WARNING)\b/i.test(event.text)) score += 6;
-    if (/\b(timeout|deadlock|login failed|cannot open database|certificate|access denied|connection refused|connection reset|unsupported|not supported|invalid object|schema|return value 3|1603)\b/i.test(event.text)) score += 18;
-    if (/\bSqlException\b/i.test(event.text)) score += 90;
+    
+    // Specific error pattern scoring
+    if (/\b(timeout|deadlock|login failed|cannot open database|certificate|access denied|connection refused|connection reset|unsupported|not supported|invalid object|schema|return value 3)\b/i.test(event.text)) {
+        score += 18;
+    }
+    if (/\b(SqlException|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|SqlConnection|SqlCommand|SqlDataReader)\b/i.test(event.text)) {
+        score += 90;
+    }
     if (/\bALTER DATABASE statement is not supported\b/i.test(event.text)) score += 120;
     if (/\bSetting Recovery mode to SIMPLE\b/i.test(event.text)) score += 40;
     if (/\bUpgrade failed due to an unexpected exception\b/i.test(event.text)) score += 85;
     if (/\bLocation Service database deployment\b/i.test(event.text)) score += 75;
     if (/\b(Microsoft SQL Azure|SQL Azure|database\.windows\.net)\b/i.test(event.text)) score += 25;
+    
+    // Penalty for negated signals and installation noise
     if (isNegatedSignalLine(event.text) && !event.hasException) score -= 50;
     if (isMsiNoiseLine(event.text)) score -= 200;
-    score += Math.max(0, 20 - Math.floor(event.lineNum / 5000)); // earlier failures are slightly more suspicious
-    return score;
+    
+    // Priority for earlier failures
+    score += Math.max(0, 30 - Math.floor(event.lineNum / 3000));
+    
+    // Maximum score floor to ensure critical issues stand out
+    return Math.max(score, 30);
 }
 
 function parseLogTimestampForSort(ts) {
@@ -740,20 +825,64 @@ function detectLogSeverity(text) {
 function detectComponent(fileName, text, categories = []) {
     const file = (fileName || "").toLowerCase();
     const source = `${fileName || ""} ${text || ""}`.toLowerCase();
-    if (categories.includes('SQL/Database') || /\b(sql server|sqlexception|system\.data\.sqlclient|microsoft\.data\.sqlclient|dbinstall)\b/i.test(text || "")) return "SQL Database";
-    if (/\b(agent|ddr|device)\b/i.test(file)) return "Device/Agent";
-    if (/\b(dse|ds|deployment)\b/i.test(file)) return "Deployment Server";
-    if (/\b(ms|management)\b/i.test(file)) return "Management Service";
-    if (/\b(identity|sso|auth)\b/i.test(file)) return "SOTI Identity";
-    if (/\b(xsight|collector|telemetry)\b/i.test(file)) return "SOTI XSight";
-    if (/\b(connect|connector|gateway)\b/i.test(file)) return "SOTI Connect";
-    if (/\b(identity|saml|oidc|oauth|ldap|token|federation|sso)\b/i.test(source)) return "SOTI Identity";
-    if (/\b(xsight|collector|elastic|telemetry|analytics)\b/i.test(source)) return "SOTI XSight";
-    if (/\b(connect service|mqtt|iot|printer|gateway|connector)\b/i.test(source)) return "SOTI Connect";
-    if (/\b(dse|ds extension|deployment server|deploymentservice|deployment service|ds\.log|dserver)\b/i.test(source)) return "Deployment Server";
-    if (/\b(agent|device agent|ddr|device debug|check-in|check in|heartbeat|enrollment|enrolment)\b/i.test(source)) return "Device/Agent";
-    if (/\b(ms\.log|management service|managementservice|mobicontrol\.management|soti management)\b/i.test(source)) return "Management Service";
-    if (/\b(web console|console|api)\b/i.test(source)) return "Management Service";
+    
+    // SOTI MC-specific components
+    if (categories.includes('SOTI MC/Infrastructure') || 
+        /\b(MCMR|MobiControl MC|MC Management Service|MC Services|SOTI MC Web Console|MCMC|MC Core)\b/i.test(source)) {
+        return "SOTI MC Infrastructure";
+    }
+    
+    if (categories.includes('SOTI MC/Deployment') ||
+        /\b(MC Deployment Server|Deployment Manager|Content Distribution|Package Management|MC DDM)\b/i.test(source)) {
+        return "SOTI MC Deployment";
+    }
+    
+    if (categories.includes('SOTI MC/Baseline') || 
+        /\b(Configuration Baseline|MCAU|MCSB|Baseline Engine|Compliance Management)\b/i.test(source)) {
+        return "SOTI MC Baseline";
+    }
+    
+    // SQL/Database components
+    if (categories.includes('SQL/Database') || 
+        /\b(sql server|sqlexception|dbinstall|sqlazure|sqlclient|sqlcommand|sqlreader|sqladapter|sqladapter)\b/i.test(source)) {
+        return "SQL Database/SQL Azure";
+    }
+    
+    // Device/Agent components
+    if (/\b(agent|ddr|device|device agent|device service|ddr collector|device communication|agent installer|mobicontrol agent)\b/i.test(source)) {
+        return "Device/Agent";
+    }
+    
+    // Deployment Server
+    if (/\b(dse|ds|deployment server|deployment service|ds extension|deploymentservice|dsm|deployment system module|dserver|dse service)\b/i.test(source)) {
+        return "Deployment Server";
+    }
+    
+    // Management Service
+    if (/\b(ms\.log|management service|management server|mobicontrol management|soti management|mcs|web console|admin console|api service|mobilecommand|management engine|mcs engine|mcs gateway|management console)\b/i.test(source)) {
+        return "Management Service";
+    }
+    
+    // Identity Service
+    if (/\b(identity|sso|auth|oauth server|oidc|saml|ldap server|token service|identity server|active directory|mcs identity|soti identity|sts|federation)\b/i.test(source)) {
+        return "SOTI Identity";
+    }
+    
+    // XSight/Telemetry
+    if (/\b(xsight|collector|telemetry|elastic|analytics|xsengine|xsdata|telemetry service|usage analytics|activity tracking)\b/i.test(source)) {
+        return "SOTI XSight";
+    }
+    
+    // Connect/Integration
+    if (/%\b(connect|connector|gateway|mqtt|iot hub|cloud connector|smtp connector|sms gateway|printer service|api gateway|sftp connector|ldap connector|mam connector)\b/i.test(source)) {
+        return "SOTI Connect";
+    }
+    
+    // Fallback cases
+    if (/\b(dse|ds extension|deployment server|ds\.log|dserver)\b/i.test(source)) return "Deployment Server";
+    if (/\b(ms\.log|mobicontrol\.management|soti management)\b/i.test(source)) return "Management Service";
+    if (/\b(web console|console|api management|mobilecommand api|mcs api|mam api|mcmr api)\b/i.test(source)) return "Management Service";
+    
     return "Unknown Component";
 }
 
@@ -4197,6 +4326,9 @@ async function fetchOllamaModels(baseUrl) {
     }
     if (!probe.ok) {
         console.warn('Ollama not reachable', probe.errors);
+        if (isStandalonePage() && probe.errors.some(e => /failed to fetch|network|cors/i.test(e))) {
+            console.warn('[Standalone] Serve this folder over http://127.0.0.1 (not file://) and set OLLAMA_ORIGINS if needed.');
+        }
         return [];
     }
     return probe.models;
@@ -4545,6 +4677,10 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
 });
 
 $('btnSyncSF').onclick = async () => {
+    if (!isChromeExtension()) {
+        toast('Salesforce sync requires the Chrome extension', 'w');
+        return;
+    }
     toast('Syncing from Salesforce...', 'i');
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -5054,6 +5190,10 @@ $('btnExport').onclick = () => {
 
 $('btnPop').onclick = () => {
     $('moreDropdown').style.display = 'none';
+    if (!isChromeExtension()) {
+        window.open(window.location.href, '_blank', 'width=480,height=900');
+        return;
+    }
     chrome.windows.create({
         url: chrome.runtime.getURL('SOTI_AI_Analyser.html'),
         type: 'popup',
@@ -5304,7 +5444,11 @@ async function refreshSettingsModal() {
             modelSel.innerHTML = '<option value="">No models found — is Ollama running?</option>';
             if (statusEl) {
                 const tried = getOllamaProbeUrls(urlInp ? urlInp.value : LOCAL_AI_URL).join(', ');
-                statusEl.textContent = '⚠ Ollama not reachable. Tried: ' + tried + ' — use http://127.0.0.1:11434 if browser works on localhost';
+                if (isStandalonePage()) {
+                    statusEl.innerHTML = '⚠ Ollama not reachable from standalone page.<br><span style="font-size:10px">Run <strong>serve_standalone.bat</strong>, open <code>http://127.0.0.1:8765/SOTI_AI_Analyser.html</code> (not file://). Ollama must be running on 127.0.0.1:11434.</span>';
+                } else {
+                    statusEl.textContent = '⚠ Ollama not reachable. Tried: ' + tried + ' — use http://127.0.0.1:11434 if browser works on localhost';
+                }
                 statusEl.style.color = 'var(--warn)';
             }
         } else {
@@ -5346,14 +5490,17 @@ $('btnSaveLocalAI').onclick = async () => {
 
 if ($('btnDownloadLocalAISetup')) {
     $('btnDownloadLocalAISetup').onclick = () => {
-        const url = chrome.runtime.getURL('setup_local_ai.bat');
-        if (chrome.downloads?.download) {
+        if (isChromeExtension() && chrome.downloads?.download) {
+            const url = chrome.runtime.getURL('setup_local_ai.bat');
             chrome.downloads.download({ url, filename: 'SOTI-setup_local_ai.bat', saveAs: false }, () => {
                 toast('Installer downloaded — run SOTI-setup_local_ai.bat from Downloads', 's', 8000);
             });
         } else {
-            window.open(url, '_blank');
-            toast('Save and run setup_local_ai.bat from the extension folder', 'w', 8000);
+            const link = document.createElement('a');
+            link.href = 'setup_local_ai.bat';
+            link.download = 'SOTI-setup_local_ai.bat';
+            link.click();
+            toast('Run setup_local_ai.bat from this folder, then reload the page', 's', 8000);
         }
     };
 }
@@ -5378,10 +5525,25 @@ $('chatMsgs').addEventListener('copy', (e) => {
     }
 });
 
-// Real-time sync between Sidepanel and Floating Window
-chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && (changes.cases || changes.activeCaseId)) {
-        if (busy || _suppressStorageReload) return;
-        loadState();
+// Real-time sync between Sidepanel and Floating Window (extension only)
+if (isChromeExtension() && chrome.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && (changes.cases || changes.activeCaseId)) {
+            if (busy || _suppressStorageReload) return;
+            loadState();
+        }
+    });
+}
+
+function initStandaloneUI() {
+    if (!isStandalonePage()) return;
+    const help = $('localAiStandaloneHelp');
+    if (help) help.style.display = 'block';
+    if (location.protocol === 'file:') {
+        setTimeout(() => {
+            toast('Standalone: run serve_standalone.bat and open http://127.0.0.1:8765/SOTI_AI_Analyser.html (file:// blocks Ollama)', 'w', 12000);
+        }, 800);
     }
-});
+}
+
+initStandaloneUI();

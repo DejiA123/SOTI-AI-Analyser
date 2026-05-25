@@ -189,11 +189,30 @@ if (-not (Test-Path $ollamaExe)) {
 
 # --- Step 2: Start / verify service ---
 Write-Header "Step 2: Start Ollama"
-if (-not (Get-Process ollama -ErrorAction SilentlyContinue)) {
-    Write-Info "Starting Ollama..."
-    Start-Process -FilePath $ollamaExe -WindowStyle Hidden
-    Start-Sleep -Seconds 2
+
+Write-Info "Configuring OLLAMA_ORIGINS=* to allow standalone browser access..."
+[System.Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "*", "User")
+$env:OLLAMA_ORIGINS = "*"
+
+$runningOllama = Get-Process ollama -ErrorAction SilentlyContinue
+$runningOllamaApp = Get-Process "ollama app" -ErrorAction SilentlyContinue
+
+if ($runningOllama -or $runningOllamaApp) {
+    Write-Info "Restarting Ollama to apply standalone CORS permissions..."
+    if ($runningOllamaApp) { Stop-Process -Name "ollama app" -Force -ErrorAction SilentlyContinue }
+    if ($runningOllama) { Stop-Process -Name "ollama" -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 3
 }
+
+$appExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama app.exe"
+if (Test-Path $appExe) {
+    Write-Info "Starting Ollama tray app..."
+    Start-Process -FilePath $appExe
+} else {
+    Write-Info "Starting Ollama backend..."
+    Start-Process -FilePath $ollamaExe -WindowStyle Hidden
+}
+Start-Sleep -Seconds 3
 if (-not (Wait-OllamaApi)) {
     Write-Err "Ollama API not responding to setup checks."
     Write-Info "If http://127.0.0.1:11434 works in your browser, continue manually:"
