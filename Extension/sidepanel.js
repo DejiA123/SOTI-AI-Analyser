@@ -7,9 +7,7 @@ let RELEASE_NOTES_CONTENT = "";
 let PULSE_SEARCH_RESULTS = "";
 let DOCS_SEARCH_RESULTS = "";
 let RESEARCHED_ARTICLE_CONTENT = "";
-let VERSIONS = ['2026.1.0', '2026.0.2', '2026.0.1', '2026.0.0', '2025.2.0', '2025.1.3', '2025.1.2', '2025.1.1', '2025.1.0', '2025.0.3', '2025.0.2', '2025.0.1', '2025.0.0', '2024.1.2', '2024.1.1', '2024.1.0', '2024.0.2', '2024.0.1', '2024.0.0'];
-let AGENT_VERSIONS = ['2026.1.3', '2026.1.2', '2026.1.1', '2026.1.0', '2026.0.0', '2025.2.0', '2025.1.0', '2025.0.0', '2024.1.0', '2024.0.0'];
-let IDENTITY_VERSIONS = ['2026.1.0', '2026.0.0', '2025.2.0', '2025.1.0', '2025.0.2', '2025.0.0', '2024.1.1', '2024.1.0', '2024.0.1', '2024.0.0'];
+let VERSIONS = [], AGENT_VERSIONS = [], IDENTITY_VERSIONS = [];
 const PULSE_ORIGIN = 'https://pulse.soti.net';
 const DOCS_ORIGIN = 'https://docs.soti.net';
 let PULSE_RELEASE_NOTE_CATALOG = {};
@@ -39,11 +37,31 @@ function md(t) {
 }
 
 function sanitizeAssistantResponse(text) {
-    return (text || "")
-        .replace(/\bAccording to\s+(?:available information|\[(?:MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE NOTES|PULSE SEARCH|DOCS SEARCH|DEEP RESEARCH|CASE|CASE DETAILS|CASE CONTEXT|CASE ISSUE SUMMARY|CASE MEETING NOTES|CASE EMAIL CHAIN|RELEASE_NOTES)\])\s*,?\s*/gi, "")
-        .replace(/\bbased on\s+\[(?:MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE NOTES|PULSE SEARCH|DOCS SEARCH|DEEP RESEARCH|CASE|CASE DETAILS|CASE CONTEXT|CASE ISSUE SUMMARY|CASE MEETING NOTES|CASE EMAIL CHAIN|RELEASE_NOTES)\]\s*,?\s*/gi, "")
-        .replace(/\s*\[(?:MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE NOTES|PULSE SEARCH|DOCS SEARCH|DEEP RESEARCH|CASE|CASE DETAILS|CASE CONTEXT|CASE ISSUE SUMMARY|CASE MEETING NOTES|CASE EMAIL CHAIN|RELEASE_NOTES)\]\s*,?\s*/gi, " ")
-        .replace(/\b(?:for more (?:detailed )?information|reference|see)\s*,?\s*(?:at\s*)?\[(?:DEEP RESEARCH|DOCS SEARCH|PULSE SEARCH)\][^\n.]*/gi, "")
+    if (!text) return "";
+    
+    // Replace bracketed labels with natural English to maintain grammar if the model outputs them as nouns
+    let cleaned = text
+        .replace(/\[LATEST MOBICONTROL VERSION\]/gi, "latest MobiControl version")
+        .replace(/\[ALL MOBICONTROL VERSIONS\]/gi, "MobiControl versions")
+        .replace(/\[LATEST ANDROID AGENT VERSION\]/gi, "latest Android Agent version")
+        .replace(/\[ALL ANDROID AGENT VERSIONS\]/gi, "Android Agent versions")
+        .replace(/\[LATEST IDENTITY VERSION\]/gi, "latest SOTI Identity version")
+        .replace(/\[ALL IDENTITY VERSIONS\]/gi, "SOTI Identity versions")
+        .replace(/\[RELEASE NOTES\]/gi, "release notes")
+        .replace(/\[PULSE SEARCH\]/gi, "SOTI Pulse search")
+        .replace(/\[DOCS SEARCH\]/gi, "SOTI Docs search")
+        .replace(/\[DEEP RESEARCH\]/gi, "deep research");
+
+    const LABELS = 'MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|LATEST MOBICONTROL VERSION|ALL MOBICONTROL VERSIONS|LATEST ANDROID AGENT VERSION|ALL ANDROID AGENT VERSIONS|LATEST IDENTITY VERSION|ALL IDENTITY VERSIONS|RELEASE NOTES|RELEASE_NOTES|PULSE SEARCH|PULSE_SEARCH|PULSESEARCH|DOCS SEARCH|DOCS_SEARCH|DOCSSEARCH|DEEP RESEARCH|DEEP_RESEARCH|DEEPRESEARCH|CASE|CASE CONTEXT|CASE_CONTEXT|ISSUE SUMMARY|ISSUE_SUMMARY|ISSUESUMMARY';
+    const labelRx = new RegExp(`\\[(?:${LABELS})\\]`, 'gi');
+    const accordingRx = new RegExp(`\\b(?:According to|based on)\\s+(?:available information|(?:${labelRx.source}(?:,\\s*|\\s+and\\s+)?)+)\\s*,?\\s*`, 'gi');
+    const strayRx = new RegExp(`\\s*${labelRx.source}(?:,\\s*|\\s+and\\s+)?\\s*`, 'gi');
+    const refRx = /\b(?:for more (?:detailed )?information|reference|see)\s*,?\s*(?:at\s*)?\[(?:DEEP RESEARCH|DEEP_RESEARCH|DEEPRESEARCH|DOCS SEARCH|DOCS_SEARCH|DOCSSEARCH|PULSE SEARCH|PULSE_SEARCH|PULSESEARCH)\][^\n.]*/gi;
+    
+    return cleaned
+        .replace(accordingRx, "")
+        .replace(strayRx, " ")
+        .replace(refRx, "")
         .replace(/\bNo specific highlights[^.]*\./gi, "")
         .replace(/\s{2,}/g, " ")
         .replace(/\n {1,}/g, "\n")
@@ -56,7 +74,6 @@ function getDefaultCI() {
         scrubAccount: '', scrubCustomer: '', 
         meetingNotes: 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:',
         issueSummary: '', product: '', emailChain: '',
-        enviro: '', dsCfg: '', affDev: '',
         jiraExpected: '', jiraImpact: '', jiraPriority: 'Medium', jiraRepro: ''
     };
 }
@@ -89,9 +106,6 @@ function buildCaseCiFromForm() {
         issueSummary: $('issueSummary').value,
         product: $('product').value,
         emailChain: $('emailChain').value,
-        enviro: $('enviro').value,
-        dsCfg: $('dsCfg').value,
-        affDev: $('affDev').value,
         jiraExpected: $('jiraExpected').value,
         jiraImpact: $('jiraImpact').value,
         jiraPriority: $('jiraPriority').value,
@@ -281,14 +295,9 @@ function switchCase(id) {
         return;
     }
 
+    // Capture old case data from DOM into memory SYNCHRONOUSLY before switching
     if (activeCaseId) syncActiveCaseCiFromForm();
     activeCaseId = id;
-    
-    // Restore cached RAG search results
-    PULSE_SEARCH_RESULTS = c.pulseSearchResults || "";
-    DOCS_SEARCH_RESULTS = c.docsSearchResults || "";
-    RESEARCHED_ARTICLE_CONTENT = c.researchedArticleContent || "";
-    RELEASE_NOTES_CONTENT = c.releaseNotesContent || "";
     
     // Update UI Fields
     $('caseNum').value = c.ci.caseNum || '';
@@ -301,9 +310,6 @@ function switchCase(id) {
     $('issueSummary').value = c.ci.issueSummary || '';
     $('product').value = c.ci.product || '';
     $('emailChain').value = c.ci.emailChain || '';
-    $('enviro').value = c.ci.enviro || '';
-    $('dsCfg').value = c.ci.dsCfg || '';
-    $('affDev').value = c.ci.affDev || '';
     $('jiraExpected').value = c.ci.jiraExpected || '';
     $('jiraImpact').value = c.ci.jiraImpact || '';
     $('jiraPriority').value = c.ci.jiraPriority || 'Medium';
@@ -3215,57 +3221,46 @@ function scrubPII(s) {
 function getLeanQAPrompt() {
     return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
-CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
+CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
 
 RULES YOU MUST FOLLOW:
 1. NEVER tell the user to "check the SOTI website", "visit support.soti.com", "check Pulse", or "contact support". YOU already have the data. Just answer directly.
-2. LATEST VERSION QUERIES: When asked "what is the latest version" of any SOTI product, check the corresponding version list (e.g., [MC VERSIONS] for MobiControl Console/Server, [AGENT VERSIONS] for Android Agent, [IDENTITY VERSIONS] for SOTI Identity) and pick the first (most recent) version in that list. Answer directly in plain language, e.g., "The latest MobiControl Console version is 2026.1.0 and the latest Android Agent version is 2026.1.3." Do NOT mention internal prompt section names. Do NOT confuse version numbers found in case context (the customer's currently installed version) with the latest available release.
-3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE DETAILS] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
-4. When asked about release notes or what's new for a SPECIFIC version (e.g. 2026.1.0): use ONLY the blocks labeled ### VERSION 2026.1.0 in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. If Highlights are empty but Resolved Issues exist for that version, present the resolved issues — do not claim the version has no information. If there is truly no ### VERSION block for the requested version, say you do not have that version's Pulse notes. NEVER tell the user to check [DEEP RESEARCH], [DOCS SEARCH], or any internal prompt label.
-5. DOCUMENTATION GROUNDING: For technical configuration, solution, release notes, or platform reference questions, prioritize the official SOTI documentation in [DEEP RESEARCH], [RELEASE NOTES], [PULSE SEARCH], and [DOCS SEARCH].
-   a. For procedural "how-to", configuration, installation, or enrollment questions: Base your response strictly on the official SOTI steps in [DEEP RESEARCH]. Do not invent, reorder, or substitute steps. Do not include generic Android or IT troubleshooting steps (such as developer options, USB debugging, or ADB commands) unless they are explicitly written in the provided documentation for that specific procedure.
-   b. For troubleshooting, diagnostics, or open-ended technical questions: Treat the documentation as your primary authority, but you may also apply your SOTI system expertise to reason about root causes and diagnostics. If there is a conflict, defer to the official documentation.
-   c. If the provided documentation does not contain the answer or is insufficient, clearly state: "I was unable to find the full procedure in the available SOTI documentation for this query." Do not attempt to guess or hallucinate steps.
+2. LATEST VERSION QUERIES: When asked "what is the latest version" of any SOTI product, you MUST use the correct version list and return the FIRST entry (newest). The mapping is:
+   - "MobiControl" or "latest version" or "console" or "server" → use [LATEST MOBICONTROL VERSION] (this is the MobiControl Console/Server version)
+   - "Android Agent" or "agent version" → use [LATEST ANDROID AGENT VERSION] (this is the device-side Android Agent)
+   - "Identity" → use [LATEST IDENTITY VERSION]
+   Answer in a single direct sentence, e.g. "The latest MobiControl version is X.Y.Z." Do NOT add any extra details, citations, links, or fixes unless explicitly requested. Stop generating immediately after stating the version.
+3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
+4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. The release notes blocks are tagged with their source product (e.g. [SOTI PULSE CONSOLE DATA] for MobiControl, [SOTI PULSE AGENT DATA] for Android Agent). When the user asked about MobiControl, present ONLY blocks from CONSOLE DATA. When the user asked about Android Agent, present ONLY blocks from AGENT DATA. Present BOTH Highlights and Resolved Issues if they both exist for the requested version. If there is truly no ### VERSION block for the requested version, say so.
+5. When asked about features, configuration, or troubleshooting: use [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES] first. Only state facts that appear in those sections or in attached logs.
 6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
 7. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
-8. NEVER expose internal prompt/source labels to the user. Use natural phrasing like "The latest version is..." instead of "According to [AGENT VERSIONS]...".
-9. If [CASE ISSUE SUMMARY] is empty but [CASE MEETING NOTES] has content, treat [CASE MEETING NOTES] as the authoritative issue description (especially the Summary and Next steps sections).
+8. NEVER expose internal prompt/source labels to the user. Use natural phrasing like "The latest version is..." instead of "According to [AGENT VERSIONS]...". Never output bracketed terms (like [LATEST ANDROID AGENT VERSION]) in your response; write their natural English meaning instead.
+9. If [ISSUE SUMMARY] is empty but [CASE] meeting_notes has content, treat meeting_notes as the authoritative issue description (especially the Summary and Next steps sections).
 10. When asked for a short subject/title/name for a case, produce one concise line (about 6–12 words) from the case facts, e.g. "Certificate retrieval failure blocking device API calls" — not a generic label like "Critical SOTI MobiControl Issue Investigation".
-11. CASE VS. DOCUMENTATION CONTEXT: For questions about the customer's specific case, situation, issue details, email history, meeting notes, or logs (e.g. "case overview", "summarize the case", "what is the customer's issue", or questions about the customer's environment): rely EXCLUSIVELY on the data under [CASE DETAILS], [CASE ISSUE SUMMARY], [CASE MEETING NOTES], [CASE EMAIL CHAIN], and attached logs. Do NOT mix in or reference facts, symptoms, printer models, firmware versions, or products from [DEEP RESEARCH], [RELEASE NOTES], or search results.
+11. NEVER add meta-commentary about your own instructions, data sources, internal processing, or how the prompt is structured. NEVER say things like "additional details may have been omitted", "based on how you've structured them", "if there were any notable fixes they should be listed here", or "I need more context". Just present the facts directly. If the data is not available, say so briefly and move on.
+12. STICK TO THE USER'S QUERY: For short, simple questions (like checking a version number, checking a port, or asking a quick definition), answer DIRECTLY in 1 sentence. Do NOT generate a Transparency Brief, do NOT request case/Salesforce sync, do NOT ask for logs, and do NOT add any conversational fluff or offer proactive mentoring. Just output the direct answer and stop.
+13. STRICT TRUTH ON RELEASE NOTES: When summarizing or listing release notes or resolved issues, you MUST present the facts, codes (e.g. MCMR-xxxxx), and descriptions EXACTLY as they are written in the [RELEASE NOTES] section. You are STRICTLY FORBIDDEN from explaining, paraphrasing, translating, or expanding them. Do NOT add extra context, versions, platforms (such as Windows 10 Mobile), root causes, update details, or explanations that do not exist word-for-word in the provided text. Present them exactly as they are and stop.
+
 
 VERSIONING (always apply):
-- MobiControl Console/Server: 202X.0.x | Android Agent / SOTI Identity: 202X.1.x
-- Middle digit 0 = Console; middle digit 1 = Agent or Identity (use product context to distinguish)
+- MobiControl Console/Server and Android Agent are SEPARATE products with SEPARATE version numbers, but BOTH can have the same middle digit (e.g. both can be 202X.1.x). You CANNOT distinguish them by version number format alone.
+- Determine which product the user is asking about from the PRODUCT NAME in their query, NOT the version number:
+  * "MobiControl" / "MC" / "console" / "server" / "latest version" (without specifying agent) → MobiControl Console/Server → use [LATEST MOBICONTROL VERSION]
+  * "Android Agent" / "agent" / "device agent" / "SOTI agent" / "AEA" → Android Agent → use [LATEST ANDROID AGENT VERSION]
+  * "Identity" → SOTI Identity → use [LATEST IDENTITY VERSION]
+- These version numbers will be DIFFERENT. Do NOT mix them up or pick the higher number — use the correct list for the product being asked about.
 - Web Console is hosted inside SOTI Management Service (NEVER mention IIS or a separate web hosting service)
 - Core topology: Management Service <-> SQL <-> Deployment Server <-> Device Agent | Ports: 5494, 13131, 2197, 443
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
-- **Direct Accountability**: You are responsible for ensuring you have enough data to be accurate.
-- **Missing Salesforce Data**: If the case details under [CASE DETAILS] (like Case Number or Case Issue Summary) are empty, politely state: "I don't yet have your Salesforce case context. Please use the 'Sync from Salesforce' button so I can tailor my analysis to your specific environment."
-- **Missing Logs**: If no logs are attached, state: "I'm ready to help, but uploading logs (MS.log, DS.log, Device logs) would allow me to perform a much deeper forensic analysis."
-- **Transparency Brief**: At the start of an analysis, briefly list:
-    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version, Environment, Hosting type).
+- **Strive for Extreme Brevity**: Keep answers as short as possible. Do NOT write conversational preambles (like "Here is the information you requested..." or "Here are the highlights...") or conversational postambles (like "If you have any other questions, let me know...", "Hope this helps...", or "Remember to stay up-to-date..."). Start directly with the answer or bullet points, and stop immediately.
+- **Troubleshooting Case Constraint**: You are strictly forbidden from asking for logs, asking for Salesforce sync, or displaying the Transparency Brief unless the user is explicitly starting a troubleshooting/investigation case (e.g., describing an active error/problem and asking you to troubleshoot). For general version checks, definitions, port checks, or release notes queries, output ONLY the direct facts or notes and NOTHING else.
+- **Transparency Brief**: ONLY at the start of a troubleshooting case analysis, briefly list:
+    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version).
     2. **WHAT IS MISSING**: (e.g., Server Logs, SOTI Version).
     3. **STATUS**: (Ready / Partial / Awaiting Context).
-    4. **NEXT STEP**: (The one best action the user should take).
-
-### ENVIRONMENT-AWARE INTELLIGENCE (USE ALL CASE INFO FIELDS):
-You MUST actively reference and use ALL [CASE DETAILS] fields when answering. This includes Environment, Hosting, and Affected Devices. These fields are CRITICAL for accurate troubleshooting.
-
-12. **ENVIRONMENT FIELD** (Production / Test/UAT / POC/Setup): When the environment is "Production", treat every issue with urgency — recommend low-risk fixes first, avoid disruptive actions (like full service restarts) unless absolutely necessary, and always suggest backup steps before changes. When "Test/UAT" or "POC/Setup", you can be more exploratory — suggest reconfiguration, reinstallation, or fresh enrollment attempts more freely.
-
-13. **HOSTING FIELD** (On-Prem / Cloud):
-   - When "Cloud": Prioritize cloud-specific troubleshooting: Azure SQL limitations (ALTER DATABASE not supported, recovery model constraints), APNS/FCM proxy requirements, cloud-hosted DS certificate issues, tenant-specific configurations, and SaaS portal settings. NEVER suggest direct SQL server access, Windows Service restarts on the server, or registry edits — the customer cannot do these on cloud-hosted infrastructure.
-   - When "On-Prem": Prioritize on-premises troubleshooting: Windows Services (SOTI Management Service, SOTI Deployment Server), SQL Server permissions and connectivity, local certificate stores, port firewall rules (5494, 13131, 2197, 443), IIS-independent web console checks, and MCAU diagnostics. The customer has full server access.
-   - When empty/N/A: Ask the user to specify — "Is this environment cloud-hosted or on-premises? This significantly affects the troubleshooting approach."
-
-14. **AFFECTED DEVICES FIELD** (1-10 / 10-50 / 50-200 / 200-1000 / 1000+): Use this to calibrate severity and approach:
-   - 1-10 devices: Likely a device-specific issue (hardware, OS version, enrollment state). Suggest device-level diagnostics.
-   - 10-50 devices: Could be policy/profile-related. Check if devices share a common group, profile, or policy.
-   - 50+ devices: Almost certainly infrastructure-level (server, network, certificate, or policy push issue). Diagnose server-side first.
-   - 1000+ devices: Critical infrastructure event. Prioritize service health, SQL performance, DS capacity, and network throughput.
-
-15. **PROACTIVE CASE CONTEXT USAGE**: When answering ANY question about the case, you MUST weave in the available case details naturally. For example, instead of a generic "Check the Management Service", say "Since your [Hosting] environment is running version [SOTI Version], and this is affecting [Affected Devices] in a [Environment] environment...". Reference the actual values from [CASE DETAILS] to show the user you have absorbed their full context.`;
+    4. **NEXT STEP**: (The one best action the user should take).`;
 }
 
 function getLeanLogPrompt() {
@@ -3395,19 +3390,13 @@ CRITICAL RULES:
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
 - **Direct Accountability**: You are responsible for ensuring you have enough data to be accurate.
-- **Missing Salesforce Data**: If the case details under [CASE DETAILS] (like Case Number or Case Issue Summary) are empty, politely state: "I don't yet have your Salesforce case context. Please use the 'Sync from Salesforce' button so I can tailor my analysis to your specific environment."
+- **Missing Salesforce Data**: If the case details under [CASE] (like case_number or issue_summary) are empty, politely state: "I don't yet have your Salesforce case context. Please use the 'Sync from Salesforce' button so I can tailor my analysis to your specific environment."
 - **Missing Logs**: If no logs are attached, state: "I'm ready to help, but uploading logs (MS.log, DS.log, Device logs) would allow me to perform a much deeper forensic analysis."
 - **Transparency Brief**: At the start of an analysis, briefly list:
-    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version, Environment, Hosting type).
+    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version).
     2. **WHAT IS MISSING**: (e.g., Server Logs, SOTI Version).
     3. **STATUS**: (Ready / Partial / Awaiting Context).
-    4. **NEXT STEP**: (The one best action the user should take).
-
-### ENVIRONMENT-AWARE LOG ANALYSIS:
-- When [CASE DETAILS] shows Hosting as "Cloud": Your mitigation steps MUST NOT include Windows Service restarts, registry edits, local SQL access, or direct server file access — these are unavailable on cloud-hosted SOTI infrastructure. Focus on tenant-level configuration, Azure SQL constraints, and SOTI support escalation paths.
-- When [CASE DETAILS] shows Hosting as "On-Prem": Include specific Windows Service names, SQL commands, registry paths, and local file paths in your remediation steps.
-- When Affected Devices is 50+ or 1000+: This indicates a critical infrastructure-level event. Prioritize server-side root causes (SQL, certificates, DS capacity) over device-specific issues.
-- Always reference the Environment (Production/Test/POC) in your recommendations to calibrate urgency.`;
+    4. **NEXT STEP**: (The one best action the user should take).`;
 }
 
 function getSysPrompt(mode = 'full') {
@@ -3427,14 +3416,15 @@ ${kbStr}
 - **No Theoretical Meta-Talk**: Never explain your instructions to the user. Simply provide the technical analysis requested.
 
 ### TERMINOLOGY & VERSIONING (CRITICAL):
-- **SOTI MobiControl**: Refers ONLY to the Console/Server. Versions are in the **202X.0.x** series (e.g., 2026.0.2).
-- **SOTI Android Agent**: Refers ONLY to the device-side agent. Versions are in the **202X.1.x** series (e.g., 2026.1.1).
-- **SOTI Identity**: A separate identity provider and SSO service. Versions are in the **202X.1.x** series (e.g., 2026.1.0).
-- **The .0. vs .1. Rule**: If the middle digit is 0, it is ALWAYS MobiControl Console. If it is 1, it is EITHER SOTI Android Agent OR SOTI Identity. 
+- **SOTI MobiControl**: The Console/Server platform. When user says "MobiControl", they mean this. Version from [LATEST MOBICONTROL VERSION].
+- **SOTI Android Agent**: The device-side agent app installed on Android devices. When user says "Android Agent" or just "agent", they mean this. Version from [LATEST ANDROID AGENT VERSION].
+- **SOTI Identity**: A separate identity provider and SSO service. Version from [LATEST IDENTITY VERSION].
+- **VERSION NUMBERS CAN LOOK SIMILAR**: Both MobiControl and Android Agent versions can have the same format (e.g. both can be 202X.1.x). Do NOT try to identify the product from the version number — identify it from the product name the user mentions.
+- **CRITICAL — DO NOT MIX VERSIONS**: When asked about MobiControl, ONLY use [LATEST MOBICONTROL VERSION]. When asked about Android Agent, ONLY use [LATEST ANDROID AGENT VERSION]. NEVER substitute one for the other.
 - **Contextual Distinction**: You MUST check the [CASE CONTEXT] (product field) and query context to distinguish between the Android Agent and SOTI Identity. 
-- **Version Strictness (CRITICAL)**: You MUST match the specific version number requested (e.g., 2026.0.0) with the EXACT section in [RELEASE NOTES]. Features from one version (e.g., 2026.1.0) MUST NOT be attributed to another (e.g., 2026.0.0). If you are unsure, cite the version header you are looking at.
+- **Version Strictness (CRITICAL)**: You MUST match the specific version number requested (e.g., 2026.X.Y) with the EXACT section in [RELEASE NOTES]. Features from one version MUST NOT be attributed to another.
 - **SOTI Identity Queries**: When asked about "SOTI Identity [Version]", prioritize passwordless authentication, SSO, and user management features found in that specific release.
-- **LATEST vs CASE Versions (CRITICAL)**: The case context contains the customer's CURRENTLY INSTALLED version — use it for troubleshooting and comparison. The product version lists contain ALL available official releases sorted newest-first. When asked "what is the latest version?", answer directly with the first entry from the appropriate list using natural language, for example "The latest Android Agent version is 2026.1.0." NEVER mention internal prompt labels such as [MC VERSIONS], [AGENT VERSIONS], [IDENTITY VERSIONS], [CASE], [RELEASE NOTES], [PULSE SEARCH], or [DEEP RESEARCH]. When troubleshooting, compare the customer's case version against release notes to find fixes in newer versions.
+- **LATEST vs CASE Versions (CRITICAL)**: The case context contains the customer's CURRENTLY INSTALLED version - use it for troubleshooting and comparison. When asked "what is the latest version?", answer directly with the version from the correct product's version field. NEVER mention internal prompt labels.
 
 ### SOTI ARCHITECT'S HANDBOOK:
 - **SOTI ONLY**: You are a SOTI specialist. NEVER recommend Microsoft or non-SOTI documentation unless it is a specific, known integration (e.g., KME, Zero-touch). For enrollment, ALWAYS use the afw#mobicontrol, QR, and EMM portal workflows defined in the handbook.
@@ -3550,15 +3540,10 @@ When logs from multiple SOTI products are present, you MUST check for inter-prod
 - **Missing Salesforce Data**: If [CASE CONTEXT DATA] fields (like case_number or issue_summary) are empty, politely state: "I don't yet have your Salesforce case context. Please use the 'Sync from Salesforce' button so I can tailor my analysis to your specific environment."
 - **Missing Logs**: If [DIAGNOSTIC DATA] is empty or no logs are attached, state: "I'm ready to help, but uploading logs (MS.log, DS.log, Device logs) would allow me to perform a much deeper forensic analysis."
 - **Transparency Brief**: At the start of an analysis, briefly list:
-    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version, Environment, Hosting type).
+    1. **WHAT I HAVE**: (e.g., Case Summary, Agent Version).
     2. **WHAT IS MISSING**: (e.g., Server Logs, SOTI Version).
     3. **STATUS**: (Ready / Partial / Awaiting Context).
     4. **NEXT STEP**: (The one best action the user should take).
-
-### ENVIRONMENT-AWARE INTELLIGENCE:
-- **Hosting (Cloud vs On-Prem)**: When Cloud — NEVER suggest direct SQL access, Windows Service restarts, registry edits, or local server file access. When On-Prem — include specific Windows Service names, SQL commands, and file paths.
-- **Affected Devices**: 1-10 = device-specific; 10-50 = policy/profile; 50+ = infrastructure; 1000+ = critical infrastructure event requiring server-side diagnosis first.
-- **Environment (Production/Test/POC)**: Production = low-risk fixes first with backup steps; Test/POC = more exploratory troubleshooting allowed.
 
 ### OPERATIONAL MANDATES (SOTI ELITE):
 - **STRICT DATA-FIRST POLICY**: The [LATEST...] tags and [ATTACHED LOGS] are the ABSOLUTE TRUTH. If you see specific MCMR codes or version highlights in the context, you MUST report them exactly.
@@ -3570,46 +3555,60 @@ When logs from multiple SOTI products are present, you MUST check for inter-prod
 }
 
 // --- RESEARCH ENGINE ---
-async function sotiFetch(url, timeout = 4000) {
-    // Helper: fetch with an AbortController timeout — rejects on failure/timeout
-    async function timedFetch(fetchUrl, ms) {
-        const ctrl = new AbortController();
-        const tid = setTimeout(() => ctrl.abort(), ms);
-        try {
-            const res = await fetch(fetchUrl, { signal: ctrl.signal });
-            clearTimeout(tid);
-            if (res.ok) {
-                const text = await res.text();
-                if (text && text.length > 200) return text;
-            }
-        } catch (e) {
-            clearTimeout(tid);
+const sotiFetchCache = new Map();
+async function sotiFetch(url, timeout = 5000) {
+    const now = Date.now();
+    if (sotiFetchCache.has(url)) {
+        const cached = sotiFetchCache.get(url);
+        if (now - cached.timestamp < 15 * 60 * 1000) {
+            console.log('[CACHE HIT] sotiFetch:', url);
+            return cached.text;
         }
-        throw new Error(`Fetch failed or timed out for ${fetchUrl}`);
+        sotiFetchCache.delete(url);
     }
 
-    const fetchPromises = [];
-    if (isChromeExtension()) {
-        fetchPromises.push(timedFetch(url, timeout));
-    }
+    let fetchedText = null;
 
-    const proxyUrls = [
-        `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
-    ];
-
-    proxyUrls.forEach(p => {
-        fetchPromises.push(timedFetch(p, timeout));
-    });
-
+    // Priority 1: Direct Fetch (Uses manifest permissions)
     try {
-        const result = await Promise.any(fetchPromises);
-        return result || null;
-    } catch (e) {
-        return null;
-    }
-}
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), timeout);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(tid);
+        if (res.ok) {
+            const text = await res.text();
+            if (text && text.length > 500) {
+                fetchedText = text;
+            }
+        }
+    } catch (e) { console.warn('Direct fetch failed, trying proxies...', e); }
 
+    if (!fetchedText) {
+        // Priority 2: Proxies
+        const rawProxies = [
+            `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+            `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+        ];
+        
+        for (const p of rawProxies) {
+            try {
+                const res = await fetch(p);
+                if (res.ok) {
+                    const text = await res.text();
+                    if (text && text.length > 500) {
+                        fetchedText = text;
+                        break;
+                    }
+                }
+            } catch (e) { }
+        }
+    }
+
+    if (fetchedText) {
+        sotiFetchCache.set(url, { text: fetchedText, timestamp: now });
+    }
+    return fetchedText;
+}
 
 async function fetchReleaseNotes(type, version) {
     const catalog = type === 'identity' ? [] : await discoverPulseReleaseNoteCatalog('soti-mobicontrol');
@@ -3618,7 +3617,7 @@ async function fetchReleaseNotes(type, version) {
         : selectReleaseNoteSources(`${type} ${version}`, '', null, catalog);
     const preferred = sources.find(s => s.type.toLowerCase().includes(type)) || sources[0];
     if (!preferred) return null;
-    const html = await sotiFetch(preferred.url, 4000);
+    const html = await sotiFetch(preferred.url, 12000);
     if (!html) return null;
     const blocks = extractPulseReleaseNoteBlocks(html).filter(b => b.version === version || b.version.startsWith(version));
     if (blocks.length) {
@@ -3659,7 +3658,7 @@ function classifyPulseSectionHeading(text) {
 function extractPulseReleaseNoteBlocks(html) {
     const doc = new DOMParser().parseFromString(html || "", 'text/html');
     doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
-    const versionHeadingRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/;
+    const versionHeadingRx = /\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/;
     const blocks = [];
     const layoutItems = Array.from(doc.querySelectorAll('.umb-block-grid__layout-item'));
 
@@ -3793,7 +3792,7 @@ async function discoverPulseReleaseNoteCatalog(supportSlug = 'soti-mobicontrol')
     }
     const entries = [];
     const indexUrl = `${PULSE_ORIGIN}/support/${supportSlug}/product-notes/`;
-    const html = await sotiFetch(indexUrl, 4000);
+    const html = await sotiFetch(indexUrl, 12000);
     if (html) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         doc.querySelectorAll('a[href*="/product-notes/"]').forEach(a => {
@@ -3845,33 +3844,60 @@ function isPulseBoilerplateHighlight(text) {
     return t.length < 100 && /google play store|agent downloads page/i.test(t);
 }
 
-async function fetchPulseReleaseBlocksForVersion(baseUrl, primaryVersion) {
+async function fetchPulseReleaseBlocksForVersion(baseUrl, queryVersions) {
     const base = (baseUrl || "").replace(/\?.*$/, "");
-    const pageHtml = await sotiFetch(base, 4000);
-    const urls = buildPulseVersionFetchUrls(baseUrl, primaryVersion, pageHtml);
-    for (const fetchUrl of urls) {
-        const html = await sotiFetch(fetchUrl, 4000);
-        if (!html) continue;
-        let blocks = extractPulseReleaseNoteBlocks(html);
-        if (primaryVersion) {
-            const matched = blocks.filter(b => b.version === primaryVersion);
-            if (matched.length) {
-                blocks = blocks
-                    .filter(b => b.version === primaryVersion)
-                    .map(b => (b.type === "Highlights" && isPulseBoilerplateHighlight(b.text) ? { ...b, text: "" } : b))
-                    .filter(b => cleanPulseText(b.text).length > 15);
-                return { blocks, fetchUrl };
+    const pageHtml = await sotiFetch(base, 15000);
+
+    if (pageHtml) {
+        const extracted = extractVersionsFromDOM(pageHtml);
+        if (extracted && extracted.length > 0) {
+            if (base.includes('android-agent')) {
+                AGENT_VERSIONS = extracted;
+            } else if (base.includes('soti-identity')) {
+                IDENTITY_VERSIONS = extracted;
+            } else if (base.includes('product-notes/release-notes') || base.includes('mobicontrol')) {
+                VERSIONS = extracted;
             }
-        } else if (blocks.length) {
-            return { blocks, fetchUrl };
+            updateVersionDropdowns();
+            try {
+                if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                    chrome.storage.local.set({ cachedVersions: { VERSIONS, AGENT_VERSIONS, IDENTITY_VERSIONS } });
+                } else {
+                    localStorage.setItem('soti_ai_cached_versions', JSON.stringify({ VERSIONS, AGENT_VERSIONS, IDENTITY_VERSIONS }));
+                }
+            } catch (e) {}
         }
     }
-    if (!pageHtml) return { blocks: [], fetchUrl: base };
-    let blocks = extractPulseReleaseNoteBlocks(pageHtml);
-    if (primaryVersion) {
-        blocks = blocks.filter(b => b.version === primaryVersion);
+
+    const targets = Array.isArray(queryVersions) ? queryVersions : (queryVersions ? [queryVersions] : []);
+    let urls = [base];
+    targets.forEach(v => {
+        const params = discoverPulseVersionParamVariants(pageHtml, v);
+        params.forEach(p => urls.push(`${base}?version=${encodeURIComponent(p)}`));
+    });
+    urls = [...new Set(urls)];
+
+    let allBlocks = [];
+    for (const fetchUrl of urls) {
+        const html = await sotiFetch(fetchUrl, 15000);
+        if (!html) continue;
+        let blocks = extractPulseReleaseNoteBlocks(html);
+        
+        blocks.forEach(b => {
+            const exists = allBlocks.some(a => a.version === b.version && a.type === b.type && a.text === b.text);
+            if (!exists) allBlocks.push(b);
+        });
     }
-    return { blocks, fetchUrl: base };
+
+    if (allBlocks.length === 0 && pageHtml) {
+        allBlocks = extractPulseReleaseNoteBlocks(pageHtml);
+    }
+    
+    allBlocks = allBlocks
+        .map(b => (b.type === "Highlights" && isPulseBoilerplateHighlight(b.text) ? { ...b, text: "" } : b))
+        .filter(b => cleanPulseText(b.text).length > 15);
+                         
+    return { blocks: allBlocks, fetchUrl: base };
 }
 
 function buildEffectiveIssueSummary(ci) {
@@ -3894,10 +3920,7 @@ function getCaseResearchContext(query, history, ci) {
         ci?.email_chain || '',
         ci?.product || '',
         ci?.soti_version || '',
-        ci?.agent_version || '',
-        ci?.environment || '',
-        ci?.hosting || '',
-        ci?.affected_devices || ''
+        ci?.agent_version || ''
     ].join('\n');
 }
 
@@ -3931,22 +3954,22 @@ function isLowQualityResearchArticle(text) {
 }
 
 function parseRequestedVersions(query, history, ci) {
-    const fromQuery = [...new Set((query.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []))];
+    const fromQuery = [...new Set((query.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
     if (fromQuery.length) return fromQuery;
     const caseText = [ci?.meeting_notes, ci?.issue_summary, ci?.email_chain, history].filter(Boolean).join('\n');
-    const fromCase = [...new Set((caseText.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []))];
+    const fromCase = [...new Set((caseText.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
     if (fromCase.length) return fromCase;
-    const fromHistory = [...new Set((history.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []))];
+    const fromHistory = [...new Set((history.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
     if (fromHistory.length) return fromHistory.slice(0, 2);
     const combined = `${query} ${history}`.toLowerCase();
     const asksAgent = /\b(android|agent|aea|device agent)\b/.test(combined);
     if (ci) {
         if (asksAgent && ci.agent_version) {
-            const m = ci.agent_version.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+            const m = ci.agent_version.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/);
             if (m) return [m[1]];
         }
         if (ci.soti_version) {
-            const m = ci.soti_version.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/);
+            const m = ci.soti_version.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/);
             if (m) return [m[1]];
         }
     }
@@ -3960,9 +3983,27 @@ function selectReleaseNoteSources(query, history, ci, catalog) {
         const normalized = path.startsWith('http') ? path : `${PULSE_ORIGIN}${path.startsWith('/') ? path : '/' + path}`;
         if (!sources.some(s => s.url === normalized)) sources.push({ url: normalized, type });
     };
+
+    // Known full fallback paths for each product (used when catalog lookup fails)
+    const FALLBACK_PATHS = {
+        'release-notes':                '/support/soti-mobicontrol/product-notes/release-notes/',
+        'android-agent-release-notes':  '/support/soti-mobicontrol/product-notes/android-agent-release-notes/',
+        'ios-agent-release-notes':      '/support/soti-mobicontrol/product-notes/ios-agent-release-notes/',
+        'linux-agent-release-notes':    '/support/soti-mobicontrol/product-notes/linux-agent-release-notes/',
+        'macos-agent-release-notes':    '/support/soti-mobicontrol/product-notes/macos-agent-release-notes/',
+        'soti-surf-release-notes':      '/support/soti-mobicontrol/product-notes/soti-surf-release-notes/',
+        'soti-hub-release-notes':       '/support/soti-mobicontrol/product-notes/soti-hub-release-notes/',
+        'settings-manager-release-notes':'/support/soti-mobicontrol/product-notes/settings-manager-release-notes/',
+        'cloud-link-release-notes':     '/support/soti-mobicontrol/product-notes/cloud-link-release-notes/',
+        'android-companion':            '/support/soti-mobicontrol/product-notes/android-companion/',
+        'stella':                       '/support/soti-mobicontrol/product-notes/stella/'
+    };
+
     const addByFragment = (fragment, type) => {
         const entry = catalog.find(e => e.path.includes(fragment));
         if (entry) addPath(entry.path, type);
+        else if (FALLBACK_PATHS[fragment]) addPath(FALLBACK_PATHS[fragment], type);
+        else addPath(`/support/soti-mobicontrol/product-notes/${fragment}/`, type);
     };
 
     if (/identity/.test(combined) || (ci?.product || '').toLowerCase().includes('identity')) {
@@ -3981,19 +4022,21 @@ function selectReleaseNoteSources(query, history, ci, catalog) {
         { rx: /\b(companion)\b/, fragment: 'android-companion', type: 'Android Companion' },
         { rx: /\b(stella)\b/, fragment: 'stella', type: 'Stella' },
         { rx: /\b(android|aea|device agent|play store agent)\b/, fragment: 'android-agent-release-notes', type: 'Agent' },
-        { rx: /\b(console|server|management service|mc\s+version|soti\s+version)\b/, fragment: 'product-notes/release-notes', type: 'Console' },
-        { rx: /\b(mobicontrol)\b/, fragment: 'product-notes/release-notes', type: 'Console' }
+        { rx: /\b(console|server|management service|mc\s+version|soti\s+version|mobicontrol)\b/, fragment: 'release-notes', type: 'Console' }
     ];
     rules.forEach(rule => {
         if (rule.rx.test(combined)) addByFragment(rule.fragment, rule.type);
     });
 
-    if (!sources.length) {
-        ['release-notes', 'android-agent-release-notes'].forEach(fragment => {
-            const entry = catalog.find(e => e.path.includes(fragment));
-            if (entry) addPath(entry.path, fragment.includes('android') ? 'Agent' : 'Console');
-        });
+    // ALWAYS include MobiControl Console + Android Agent as baseline so the AI
+    // always has version data for the core products regardless of query phrasing
+    if (!sources.some(s => s.type === 'Console')) {
+        addByFragment('release-notes', 'Console');
     }
+    if (!sources.some(s => s.type === 'Agent')) {
+        addByFragment('android-agent-release-notes', 'Agent');
+    }
+
     return sources;
 }
 
@@ -4006,12 +4049,12 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const combinedLower = caseBlob.toLowerCase();
         
         const asksIdentity = combinedLower.includes('identity') || (ci && ci.product === 'SOTI Identity');
-        const asksReleaseNotes = /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|mcmr[\s-]*\d|fixed\s+in|fixed\s+since)\b/i.test(combinedLower);
-        const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enroll(?:ment)?|work\s+managed|work\s+profile|device\s+owner|deployment server|management service|device policy|profiles?|afw|soti agent|android enterprise|android\s+plus|certificate|cert\b|api\s+call|qr\s*code|factory\s*reset|nfc\s+enroll|zero[- ]touch|knox)\b/i.test(combinedLower);
+        const asksReleaseNotes = /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|mcmr[\s-]*\d|fixed\s+in|fixed\s+since|latest|newest|current\s+version)\b/i.test(combinedLower);
+        const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(combinedLower);
         
         const asksVersion = asksReleaseNotes || /\b(latest|version|release|update|fixed|resolved|mcmr|bug|upgrade|certificate|cert\b)\b/i.test(combinedLower) ||
                             /\b(what about|how about)\b/i.test(query) ||
-                            /\b(20\d\d\.\d+(?:\.\d+)?)\b/.test(caseBlob);
+                            /\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/.test(caseBlob);
 
         if (asksVersion) {
             let notes = [];
@@ -4026,8 +4069,7 @@ async function searchPulseAndDocs(query, msgs, ci) {
                 toast(`Fetching ${type} notes from Pulse...`, 'i');
                 
                 const queryVersionsEarly = parseRequestedVersions(query, history, ci);
-                const primaryVersionEarly = queryVersionsEarly[0] || null;
-                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, primaryVersionEarly);
+                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
                 const blocks = pulseLoad.blocks;
                 const resolvedUrl = pulseLoad.fetchUrl;
                 if (blocks.length) {
@@ -4115,12 +4157,21 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     const strictVersionFilter = !!primaryVersion;
                     
                     if (primaryVersion) {
-                        clean += `\n[USER REQUESTED VERSION: ${primaryVersion} — cite ONLY ### VERSION ${primaryVersion} sections below]\n`;
+                        clean += `\n[USER REQUESTED VERSION: ${primaryVersion}]\n`;
                     }
                     
+                    const includedVersions = new Set();
                     for (const sb of scoredBlocks) {
                         if (strictVersionFilter && sb.block.version !== primaryVersion) continue;
                         if (sb.score < 0) continue;
+                        
+                        // Limit to top 3 versions if no specific version is requested, to keep local inference fast.
+                        if (!strictVersionFilter) {
+                            if (!includedVersions.has(sb.block.version) && includedVersions.size >= 3) {
+                                continue;
+                            }
+                        }
+                        
                         // Skip unrelevant older blocks if we have high-scoring ones
                         if (!strictVersionFilter && sb.score === 0 && includedCount >= 2 && highestScore > 0) {
                             continue;
@@ -4129,11 +4180,13 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         const formatBlock = `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()}:\n${sb.block.text}\n`;
                         if (clean.length + formatBlock.length <= charBudget) {
                             clean += formatBlock;
+                            includedVersions.add(sb.block.version);
                             includedCount++;
                         } else {
                             if (sb.score >= 100 && clean.length < (charBudget * 0.4)) {
                                 const remaining = charBudget - clean.length;
                                 clean += `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()} (TRUNCATED):\n${sb.block.text.slice(0, remaining - 100)}\n`;
+                                includedVersions.add(sb.block.version);
                                 includedCount++;
                             }
                             break;
@@ -4141,7 +4194,7 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     }
                     
                     if (clean.length > 200) {
-                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA - RELEVANT NOTES]\nOfficial source: ${resolvedUrl}\n${clean}`);
+                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n${clean}`);
                         toast(`✓ ${type} RAG Context Loaded`, 's');
                     }
                 }
@@ -4151,6 +4204,7 @@ async function searchPulseAndDocs(query, msgs, ci) {
                 RELEASE_NOTES_CONTENT = notes.join('\n\n---\n\n');
             } else {
                 toast('Autonomous Research failed', 'w');
+                RELEASE_NOTES_CONTENT = "ERROR: Failed to fetch release notes from SOTI Pulse (network error or page not found).";
             }
         }
             
@@ -4164,167 +4218,64 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const keywords = keywordParts.slice(0, 6).join('%20');
         if (!keywords) return;
 
-        // Utility to translate a dynamic SOTI Help URL to its actual static HTML content URL
-        function translateToStaticHelpUrl(url, shellHtml) {
-            if (!shellHtml) return null;
-            
-            // Match typical SOTI Help URL pattern: /support/soti-mobicontrol/help/?V=...&T=...
-            const regex = /\/support\/(\S+?)-(\S+?)\/help\/(?:\?(?:V=(\d+\.\d+(?:\.\d+){0,2}|latest))?(?:&)?(?:T=(.+))?)?/i;
-            const match = url.match(regex);
-            if (!match) return null;
-            
-            const [_, productPrefix, productSuffix, urlVersion, path] = match;
-            const product = (productPrefix + productSuffix).toLowerCase();
-            let version = urlVersion || "2026.1";
-            
-            // Extract the timestamp from the shell page HTML
-            const tsMatch = shellHtml.match(/var\s+timeStamp\s*=\s*["'](\d+)["']/i) || 
-                            shellHtml.match(/const\s+backupVersion\s*=\s*["'][^"']+-(\d+)["']/i);
-            const timeStamp = tsMatch ? tsMatch[1] : "1779306278"; // Fallback to safe default
-            
-            // Strip URL fragment (#...) and leading slash — fragment included in T= capture
-            // causes the built URL to be: path#fragment.html which the browser fetches as
-            // just 'path' (no .html), returning the Pulse login page instead of the doc.
-            const pathNoFragment = (path || '').replace(/#.*$/, '').replace(/^\//, '');
-            const cleanPath = (!pathNoFragment || pathNoFragment === "index") ? "start" : pathNoFragment;
-            
-            return `${PULSE_ORIGIN}/help/${product}/${version}-${timeStamp}/${cleanPath}.html`;
-        }
+        const [pHtml, dHtml, iHtml] = await Promise.all([
+            sotiFetch(`${PULSE_ORIGIN}/search/?q=${keywords}`, 10000),
+            sotiFetch(`${DOCS_ORIGIN}/soti-mobicontrol/search/?q=${keywords}`, 10000),
+            asksIdentity ? sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/search/?q=${keywords}`, 10000) : Promise.resolve(null)
+        ]);
 
-        let searchProd = "MobiControl";
-        if (asksIdentity) searchProd = "Identity";
-        else if (combinedLower.includes("snap")) searchProd = "Snap";
-        else if (combinedLower.includes("xsight") || combinedLower.includes("x-sight")) searchProd = "XSight";
-        else if (combinedLower.includes("connect")) searchProd = "Connect";
-        
-        let productSupportFilter = `${searchProd}[help,productSupport,videos,articles]`;
-        const searchApiUrl = `${PULSE_ORIGIN}/api/pulse/search/GetSearchResults?terms=${keywords}&product=${searchProd}&ProductSupport=${encodeURIComponent(productSupportFilter)}&area=all&pageSize=12`;
+        // Helper to resolve relative URLs to absolute (DOMParser resolves to chrome-extension:// otherwise)
+        function resolveLink(href, baseOrigin) {
+            if (!href || href.startsWith('#') || href.startsWith('javascript:')) return null;
+            if (href.startsWith('http://') || href.startsWith('https://')) return href;
+            if (href.startsWith('/')) return baseOrigin + href;
+            return baseOrigin + '/' + href;
+        }
 
         const deepLinks = [];
-        const searchTitles = [];
-        
-        try {
-            const rawJson = await sotiFetch(searchApiUrl, 4000).catch(() => null);
-            if (rawJson) {
-                const results = JSON.parse(rawJson);
-                if (Array.isArray(results)) {
-                    results.forEach(item => {
-                        if (item.url) {
-                            let href = item.url.startsWith('http') ? item.url : `${PULSE_ORIGIN}${item.url.startsWith('/') ? '' : '/'}${item.url}`;
-                            let title = item.title || item.header || '';
-                            deepLinks.push({ href, text: title });
-                            searchTitles.push(title);
-                        }
-                    });
-                }
-            }
-        } catch (jsonErr) {
-            console.warn('Failed to parse search API response', jsonErr);
+        if (pHtml) {
+            const doc = new DOMParser().parseFromString(pHtml, 'text/html');
+            const items = [...doc.querySelectorAll('a')].map(a => ({
+                href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
+                text: a.textContent.trim()
+            })).filter(a => a.href && a.href.includes('pulse.soti.net/support') && isUsefulPulseResearchLink(a.href, a.text))
+                .slice(0, asksMobiControl ? 5 : 3);
+            PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
-        
-        // Populate display search results for the prompt
-        if (searchTitles.length > 0) {
-            PULSE_SEARCH_RESULTS = searchTitles.slice(0, 6).map(t => `- ${t}`).join('\n');
-            DOCS_SEARCH_RESULTS = searchTitles.slice(6, 12).map(t => `- ${t}`).join('\n');
+        if (dHtml) {
+            const doc = new DOMParser().parseFromString(dHtml, 'text/html');
+            const items = [...doc.querySelectorAll('a')].map(a => ({
+                href: resolveLink(a.getAttribute('href'), DOCS_ORIGIN),
+                text: a.textContent.trim()
+            })).filter(a => a.href && a.href.includes('/help/')).slice(0, asksMobiControl ? 5 : 3);
+            DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
+        }
+        if (iHtml) {
+            const doc = new DOMParser().parseFromString(iHtml, 'text/html');
+            const items = [...doc.querySelectorAll('a')].map(a => ({
+                href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
+                text: a.textContent.trim()
+            })).filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
+            DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
         }
 
         const deepLinkLimit = asksMobiControl || asksReleaseNotes ? 5 : 3;
-        const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 35000 : 15000;
-
-        // Extract relevant child help-page links from a static HTML string.
-        // Looks for ?T=... links that point to enrollment, steps, or procedure sub-pages.
-        // Returns links sorted so the most specific (device_side_steps, afw) come first.
-        function extractHelpChildLinks(staticHtml, baseHref) {
-            const childLinks = [];
-            const seen = new Set();
-            // Keywords that signal a child page has actionable step-by-step content
-            const stepKeywords = /device[_-]side|enroll|adding|steps?|procedure|how[_-]to|qr[_-]code|android[_-]enroll|enrolling|afw|work[_-]managed|work_managed|device_owner/i;
-            // High-priority patterns — these pages are most likely to have the actual hands-on steps
-            const highPriority = /device[_-]side|steps[_-]for[_-]enroll|afw|device_owner|qr[_-]code/i;
-            const hrefRx = /href="(\/support\/[^"]+\?(?:[^"]*&)?T=([^"#&]+)(?:#[^"]*)?)"[^>]*>/gi;
-            let m;
-            while ((m = hrefRx.exec(staticHtml)) !== null) {
-                const fullUrl = `https://pulse.soti.net${m[1]}`;
-                const tPath = m[2];
-                // Skip the same page we just fetched and obvious nav-only pages
-                const baseT = (baseHref.match(/[?&]T=([^&#]+)/) || [])[1] || '';
-                if (tPath === baseT || tPath === '/index' || tPath === '/start') continue;
-                if (!stepKeywords.test(tPath)) continue;
-                // Deduplicate
-                const cleanT = tPath.replace(/^\//, '');
-                if (seen.has(cleanT)) continue;
-                seen.add(cleanT);
-                childLinks.push({ url: fullUrl, tPath: cleanT, priority: highPriority.test(tPath) ? 0 : 1 });
-            }
-            // Sort: high-priority (device_side_steps, afw, etc.) first
-            childLinks.sort((a, b) => a.priority - b.priority);
-            return childLinks.map(c => c.url);
-        }
-
+        const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 25000 : 15000;
         if (deepLinks.length > 0) {
             const linksToFetch = deepLinks.slice(0, deepLinkLimit);
-            const perArticleBudget = Math.floor(deepArticleBudget / Math.max(linksToFetch.length, 1));
-            
-            const fetchParentAndChildren = async (link) => {
-                const subArticles = [];
-                try {
-                    const shellHtml = await sotiFetch(link.href, 3000).catch(() => null);
-                    if (!shellHtml) return subArticles;
+            const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
+            const articles = [];
+            const perArticleBudget = Math.floor(deepArticleBudget / linksToFetch.length);
 
-                    let finalContent = "";
-                    const staticUrl = translateToStaticHelpUrl(link.href, shellHtml);
-                    if (staticUrl) {
-                        finalContent = await sotiFetch(staticUrl, 3000).catch(() => null);
+            fetched.forEach((content, idx) => {
+                if (content) {
+                    const doc = new DOMParser().parseFromString(content, 'text/html');
+                    const article = extractDeepResearchArticle(doc);
+                    if (article.length > 100 && !isLowQualityResearchArticle(article)) {
+                        articles.push(`[DEEP RESEARCH - ${linksToFetch[idx]}]:\n${article.slice(0, perArticleBudget)}`);
                     }
-                    if (!finalContent) {
-                        finalContent = shellHtml;
-                    }
-
-                    if (finalContent) {
-                        const doc = new DOMParser().parseFromString(finalContent, 'text/html');
-                        const article = extractDeepResearchArticle(doc);
-                        if (article.length > 100 && !isLowQualityResearchArticle(article)) {
-                            subArticles.push(`[DEEP RESEARCH - ${link.href}]:\n${article.slice(0, perArticleBudget)}`);
-                        }
-
-                        // Concurrently fetch children
-                        if (staticUrl && subArticles.length > 0) {
-                            const childLinks = extractHelpChildLinks(finalContent, link.href);
-                            const childBudget = Math.floor(perArticleBudget * 0.6);
-                            
-                            const childFetchPromises = childLinks.slice(0, 2).map(async (childHref) => {
-                                try {
-                                    const childStaticUrl = translateToStaticHelpUrl(childHref, shellHtml);
-                                    if (childStaticUrl) {
-                                        const childContent = await sotiFetch(childStaticUrl, 3000).catch(() => null);
-                                        if (childContent) {
-                                            const childDoc = new DOMParser().parseFromString(childContent, 'text/html');
-                                            const childArticle = extractDeepResearchArticle(childDoc);
-                                            if (childArticle.length > 100 && !isLowQualityResearchArticle(childArticle)) {
-                                                console.log('[RAG] Child page fetched in parallel:', childHref);
-                                                return `[DEEP RESEARCH (child page) - ${childHref}]:\n${childArticle.slice(0, childBudget)}`;
-                                            }
-                                        }
-                                    }
-                                } catch (childErr) {
-                                    console.warn('[RAG] Child page fetch failed:', childHref, childErr);
-                                }
-                                return null;
-                            });
-
-                            const childResults = await Promise.all(childFetchPromises);
-                            childResults.filter(Boolean).forEach(res => subArticles.push(res));
-                        }
-                    }
-                } catch (articleErr) {
-                    console.warn('Failed to process deep research article', link.href, articleErr);
                 }
-                return subArticles;
-            };
-
-            const parentPromises = linksToFetch.map(link => fetchParentAndChildren(link));
-            const nestedArticles = await Promise.all(parentPromises);
-            const articles = nestedArticles.flat();
+            });
 
             if (articles.length > 0) {
                 RESEARCHED_ARTICLE_CONTENT = articles.join('\n\n---\n\n');
@@ -4333,53 +4284,43 @@ async function searchPulseAndDocs(query, msgs, ci) {
     } catch (e) { console.warn('Research failed', e); }
 }
 
+function extractVersionsFromDOM(html) {
+    if (!html) return [];
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script, style, nav, footer, svg, path, iframe, link').forEach(el => el.remove());
+    const versions = new Set();
+    const vRx = /\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/;
+    doc.querySelectorAll('h1.release-note-h1, h1[class*="release-note"], h4').forEach(el => {
+        const match = (el.textContent || '').match(vRx);
+        if (match) versions.add(match[1]);
+    });
+    doc.querySelectorAll('[onclick*="setQueryParam"]').forEach(el => {
+        const match = (el.textContent || '').match(vRx);
+        if (match) versions.add(match[1]);
+    });
+    if (versions.size === 0) {
+        const bodyText = doc.body ? doc.body.textContent : '';
+        (bodyText.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []).forEach(v => versions.add(v));
+    }
+    return [...versions].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
+}
+
 async function fetchLatestSOTIVersions() {
-    const mcCatalog = await discoverPulseReleaseNoteCatalog('soti-mobicontrol').catch(() => []);
+    const mcCatalog = await discoverPulseReleaseNoteCatalog('soti-mobicontrol');
     const consolePath = mcCatalog.find(e => e.path.includes('product-notes/release-notes'))?.path
         || '/support/soti-mobicontrol/product-notes/release-notes/';
     const agentPath = mcCatalog.find(e => e.path.includes('android-agent-release-notes'))?.path
         || '/support/soti-mobicontrol/product-notes/android-agent-release-notes/';
 
     const [consoleHtml, agentHtml, identityHtml] = await Promise.all([
-        sotiFetch(`${PULSE_ORIGIN}${consolePath}`, 4000).catch(() => null),
-        sotiFetch(`${PULSE_ORIGIN}${agentPath}`, 4000).catch(() => null),
-        sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/release-notes/`, 4000).catch(() => null)
+        sotiFetch(`${PULSE_ORIGIN}${consolePath}`, 15000),
+        sotiFetch(`${PULSE_ORIGIN}${agentPath}`, 15000),
+        sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/release-notes/`, 15000)
     ]);
 
-    function extractVersionsFromDOM(html) {
-        if (!html) return [];
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        doc.querySelectorAll('script, style, nav, footer, svg, path, iframe, link').forEach(el => el.remove());
-        const versions = new Set();
-        const vRx = /\b(20\d\d\.\d+(?:\.\d+)?)\b/;
-        doc.querySelectorAll('h1.release-note-h1, h1[class*="release-note"], h4').forEach(el => {
-            const match = (el.textContent || '').match(vRx);
-            if (match) versions.add(match[1]);
-        });
-        doc.querySelectorAll('[onclick*="setQueryParam"]').forEach(el => {
-            const match = (el.textContent || '').match(vRx);
-            if (match) versions.add(match[1]);
-        });
-        if (versions.size === 0) {
-            const docBody = doc.body;
-            const bodyText = docBody ? docBody.textContent : '';
-            (bodyText.match(/\b(20\d\d\.\d+(?:\.\d+)?)\b/g) || []).forEach(v => versions.add(v));
-        }
-        return [...versions].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
-    }
-
-    if (consoleHtml) {
-        const consoleVersions = extractVersionsFromDOM(consoleHtml);
-        if (consoleVersions.length > 0) VERSIONS = consoleVersions;
-    }
-    if (agentHtml) {
-        const agentVersions = extractVersionsFromDOM(agentHtml);
-        if (agentVersions.length > 0) AGENT_VERSIONS = agentVersions;
-    }
-    if (identityHtml) {
-        const identityVersions = extractVersionsFromDOM(identityHtml);
-        if (identityVersions.length > 0) IDENTITY_VERSIONS = identityVersions;
-    }
+    if (consoleHtml) VERSIONS = extractVersionsFromDOM(consoleHtml);
+    if (agentHtml) AGENT_VERSIONS = extractVersionsFromDOM(agentHtml);
+    if (identityHtml) IDENTITY_VERSIONS = extractVersionsFromDOM(identityHtml);
     
     updateVersionDropdowns();
 
@@ -4463,16 +4404,21 @@ async function saveLocalAISettings() {
 
 function sortOllamaModels(models) {
     return [...models].sort((a, b) => {
-        const aLlama = /llama3\.2/i.test(a) ? 0 : 1;
-        const bLlama = /llama3\.2/i.test(b) ? 0 : 1;
-        if (aLlama !== bLlama) return aLlama - bLlama;
+        const score = m => {
+            if (/phi4/i.test(m)) return 0;
+            if (/llama3\.2/i.test(m)) return 1;
+            return 2;
+        };
+        const aScore = score(a);
+        const bScore = score(b);
+        if (aScore !== bScore) return aScore - bScore;
         return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
     });
 }
 
 function pickPreferredOllamaModel(models) {
     const sorted = sortOllamaModels(models);
-    return sorted.find(m => /llama3\.2/i.test(m)) || sorted[0] || '';
+    return sorted.find(m => /phi4/i.test(m)) || sorted.find(m => /llama3\.2/i.test(m)) || sorted[0] || '';
 }
 
 function getOllamaProbeUrls(baseUrl) {
@@ -4571,11 +4517,19 @@ const OpenRouterAI = {
                 return m;
             });
 
-            const totalChars = messages.reduce((acc, m) => acc + (typeof m.content === 'string' ? m.content.length : 0), 0);
-            const estTokens = Math.ceil(totalChars / 3.5);
-            const numCtx = Math.max(8192, Math.min(131072, estTokens + 2048));
-
             const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+            
+            // Calculate dynamic context window (num_ctx) to prevent memory bloating.
+            // On a resource-constrained laptop (e.g. 8GB RAM), a fixed 128k context window forces Ollama
+            // to pre-allocate massive KV caches, causing CPU swapping and extremely slow generation.
+            const totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
+            const estimatedTokens = Math.ceil(totalChars / 3.5);
+            const neededTokens = estimatedTokens + 1500; // room for response
+            // Minimum is 8192, and we round up to nearest 4096. Max is 131072.
+            const numCtx = Math.max(8192, Math.min(131072, Math.ceil(neededTokens / 4096) * 4096));
+            
+            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
+
             const res = await fetch(`${baseUrl}/v1/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -4584,7 +4538,8 @@ const OpenRouterAI = {
                     messages, 
                     stream: true,
                     options: {
-                        num_ctx: numCtx
+                        num_ctx: numCtx,
+                        temperature: 0.1
                     }
                 })
             });
@@ -4661,10 +4616,7 @@ async function send(overrideText = null, silent = false) {
         meeting_notes: $('meetingNotes').value,
         product: $('product').value,
         issue_summary: $('issueSummary').value,
-        email_chain: $('emailChain').value,
-        environment: $('enviro').value,
-        hosting: $('dsCfg').value,
-        affected_devices: $('affDev').value
+        email_chain: $('emailChain').value
     };
 
     // Rich Preview Injection
@@ -4682,124 +4634,122 @@ async function send(overrideText = null, silent = false) {
     addMsg('user', displayTxt, false, silent);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
     
-    const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog|enroll|enrollment|how\s+to|how\s+do|steps?|procedure|configure|configuration|setup|install|deploy|add\s+device|work\s+managed|work\s+profile|android\s+enterprise|afw|qr\s*code|device\s+owner|policy|troubleshoot|fix|error|fail|not\s+work)\b/i.test(txt);
+    const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
     
-    const hasCachedResearch = !!(c.pulseSearchResults || c.docsSearchResults || c.researchedArticleContent || c.releaseNotesContent);
-    const shouldSearch = needsDeepPulse || !hasCachedResearch;
-
-    if (shouldSearch) {
-        const researchMs = needsDeepPulse ? 3000 : 1500;
+    if (!isGreeting) {
+        const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+        const researchMs = needsDeepPulse ? 20000 : 10000;
         try {
             await Promise.race([
                 searchPulseAndDocs(txt, c.msgs, ci),
                 new Promise(r => setTimeout(r, researchMs))
             ]);
-            c.pulseSearchResults = PULSE_SEARCH_RESULTS;
-            c.docsSearchResults = DOCS_SEARCH_RESULTS;
-            c.researchedArticleContent = RESEARCHED_ARTICLE_CONTENT;
-            c.releaseNotesContent = RELEASE_NOTES_CONTENT;
-            saveState();
-        } catch (e) {
-            console.warn('Research timed out or failed', e);
-        }
-    } else {
-        PULSE_SEARCH_RESULTS = c.pulseSearchResults || "";
-        DOCS_SEARCH_RESULTS = c.docsSearchResults || "";
-        RESEARCHED_ARTICLE_CONTENT = c.researchedArticleContent || "";
-        RELEASE_NOTES_CONTENT = c.releaseNotesContent || "";
+        } catch (e) { console.warn('Research timed out'); }
     }
 
     try {
-        const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt) && txt.split(' ').length < 3;
-        const promptMode = isGreeting ? 'greeting' : 'full';
-
-        // --- LOG CONTEXT ---
-        const hasLogs = c.logs.length > 0;
-        const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
-        let logContext = "";
-
-        if (hasLogs) {
-            if (forensicRun) {
-                logContext = buildLogAnalysisContext(c.logs);
+        let sysPrompt = "";
+        let modelMessages = [];
+        let userMsgForModel = txt;
+        
+        if (isGreeting) {
+            sysPrompt = "You are SOTI AI, a technical architect assistant for the SOTI ONE Platform. Respond politely to the user's greeting, ask how you can help, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
+            userMsgForModel = txt;
+            
+            if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
+                c.msgs[c.msgs.length - 1].content = userMsgForModel;
+                c.msgs[c.msgs.length - 1].hidden = silent;
             } else {
-                logContext = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
-                logContext += buildLogPatternProfile(c.logs);
-                logContext += buildCrossLogIncidentIndex(c.logs, { patternMode: true });
-                const perLogLimit = Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
-                c.logs.forEach(l => {
-                    logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, perLogLimit, l.name)}\n=== END: ${l.name} ===`;
-                });
+                c.msgs.push({ role: 'user', content: userMsgForModel, hidden: silent });
             }
-        }
+            modelMessages = [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-5)];
+        } else {
+            // --- LOG CONTEXT ---
+            const hasLogs = c.logs.length > 0;
+            const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
+            let logContext = "";
 
-        const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
+            if (hasLogs) {
+                if (forensicRun) {
+                    logContext = buildLogAnalysisContext(c.logs);
+                } else {
+                    logContext = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
+                    logContext += buildLogPatternProfile(c.logs);
+                    logContext += buildCrossLogIncidentIndex(c.logs, { patternMode: true });
+                    const perLogLimit = Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
+                    c.logs.forEach(l => {
+                        logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, perLogLimit, l.name)}\n=== END: ${l.name} ===`;
+                    });
+                }
+            }
 
-        const corePrompt = hasLogs
-            ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
-            : getLeanQAPrompt();
+            const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
-        const caseDetailsMarkdown = `[CASE DETAILS]
-- Case Number: ${ci.case_number || 'N/A'}
-- Product: ${ci.product || 'N/A'}
-- SOTI Version: ${ci.soti_version || 'N/A'}
-- Agent Version: ${ci.agent_version || 'N/A'}
-- Platform: ${ci.platform || 'N/A'}
-- Account: ${ci.account_scrub || 'N/A'}
-- Environment: ${ci.environment || 'N/A'}
-- Hosting: ${ci.hosting || 'N/A'}
-- Affected Devices: ${ci.affected_devices || 'N/A'}
+            const corePrompt = hasLogs
+                ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
+                : getLeanQAPrompt();
 
-[CASE ISSUE SUMMARY]
-${summaryText}
+            let liveDataSection = "";
+            const liveDataLines = [];
+            liveDataLines.push(`[ISSUE SUMMARY]: ${summaryText}`);
+            liveDataLines.push(`[TIME]: ${new Date().toLocaleString()}`);
+            liveDataLines.push(`[CASE]: ${JSON.stringify(ci, null, 2)}`);
+            
+            if (VERSIONS.length > 0) {
+                liveDataLines.push(`[LATEST MOBICONTROL VERSION]: ${VERSIONS[0]}`);
+                liveDataLines.push(`[ALL MOBICONTROL VERSIONS]: ${VERSIONS.join(', ')}`);
+            }
+            if (AGENT_VERSIONS.length > 0) {
+                liveDataLines.push(`[LATEST ANDROID AGENT VERSION]: ${AGENT_VERSIONS[0]}`);
+                liveDataLines.push(`[ALL ANDROID AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}`);
+            }
+            if (IDENTITY_VERSIONS.length > 0) {
+                liveDataLines.push(`[LATEST IDENTITY VERSION]: ${IDENTITY_VERSIONS[0]}`);
+                liveDataLines.push(`[ALL IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}`);
+            }
+            if (RELEASE_NOTES_CONTENT && RELEASE_NOTES_CONTENT.trim()) {
+                liveDataLines.push(`[RELEASE NOTES]:\n${RELEASE_NOTES_CONTENT}`);
+            }
+            if (PULSE_SEARCH_RESULTS && PULSE_SEARCH_RESULTS.trim()) {
+                liveDataLines.push(`[PULSE SEARCH]:\n${PULSE_SEARCH_RESULTS}`);
+            }
+            if (DOCS_SEARCH_RESULTS && DOCS_SEARCH_RESULTS.trim()) {
+                liveDataLines.push(`[DOCS SEARCH]:\n${DOCS_SEARCH_RESULTS}`);
+            }
+            if (RESEARCHED_ARTICLE_CONTENT && RESEARCHED_ARTICLE_CONTENT.trim()) {
+                liveDataLines.push(`[DEEP RESEARCH]:\n${RESEARCHED_ARTICLE_CONTENT}`);
+            }
+            liveDataSection = liveDataLines.join('\n');
 
-[CASE MEETING NOTES]
-${ci.meeting_notes || 'N/A'}
-
-[CASE EMAIL CHAIN]
-${ci.email_chain || 'N/A'}`;
-
-        const sysPrompt = forensicRun && hasLogs
-            ? scrubPII(`${corePrompt}
+            sysPrompt = forensicRun && hasLogs
+                ? scrubPII(`${corePrompt}
 
 ${imgContext}`)
-            : scrubPII(`${corePrompt}
+                : scrubPII(`${liveDataSection}
 
-=== CONTEXT DATA ===
-[TIME]: ${new Date().toLocaleString()}
-${caseDetailsMarkdown}
-[MC VERSIONS]: ${VERSIONS.join(', ')}
-[AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}
-[IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}
-[RELEASE NOTES]: ${RELEASE_NOTES_CONTENT}
-[PULSE SEARCH]: ${PULSE_SEARCH_RESULTS}
-[DOCS SEARCH]: ${DOCS_SEARCH_RESULTS}
-[DEEP RESEARCH]: ${RESEARCHED_ARTICLE_CONTENT}
+${corePrompt}
 
 ${imgContext}
+
 ${logContext}`);
 
-        const userMsgForModel = forensicRun && hasLogs
-            ? scrubPII(`${logContext}\n\n${txt}\n\n[Instruction: Analyze using pattern/keyword profile only — no line-by-line walkthrough. Group findings by pattern category and explain root cause from pattern combinations.]`)
-            : (() => {
-                let base = scrubPII(txt);
-                if (imgContext && !(forensicRun && hasLogs)) {
-                    base += `\n\n(Extracted Image Data via OCR):\n${imgContext}`;
-                }
-                return base;
-            })();
+            userMsgForModel = forensicRun && hasLogs
+                ? scrubPII(`${logContext}\n\n${txt}\n\n[Instruction: Analyze using pattern/keyword profile only — no line-by-line walkthrough. Group findings by pattern category and explain root cause from pattern combinations.]`)
+                : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
 
-        if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
-            c.msgs[c.msgs.length - 1].content = userMsgForModel;
-            c.msgs[c.msgs.length - 1].hidden = silent;
-        } else {
-            c.msgs.push({ role: 'user', content: userMsgForModel, hidden: silent });
+            if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
+                c.msgs[c.msgs.length - 1].content = userMsgForModel;
+                c.msgs[c.msgs.length - 1].hidden = silent;
+            } else {
+                c.msgs.push({ role: 'user', content: userMsgForModel, hidden: silent });
+            }
+
+            modelMessages = hasLogs
+                ? [{ role: 'system', content: sysPrompt }, c.msgs[c.msgs.length - 1]]
+                : [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)];
         }
 
         const selectedModel = LOCAL_AI_MODEL || null;
-
-        const modelMessages = hasLogs
-            ? [{ role: 'system', content: sysPrompt }, c.msgs[c.msgs.length - 1]]
-            : [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)];
 
         const reader = await OpenRouterAI.completions.create({
             model: selectedModel,
@@ -4822,13 +4772,13 @@ ${logContext}`);
                     const tok = json.choices[0]?.delta?.content || '';
                     if (tok) {
                         resp += tok;
-                        aib.innerHTML = md(resp);
+                        aib.innerHTML = md(sanitizeAssistantResponse(resp));
                         $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
                     }
                 } catch (e) { }
             }
         }
-        c.msgs.push({ role: 'assistant', content: resp });
+        c.msgs.push({ role: 'assistant', content: sanitizeAssistantResponse(resp) });
         saveState();
     } catch (e) { aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
     finally { 
@@ -4959,8 +4909,8 @@ $('btnSyncSF').onclick = async () => {
             }
             if (data.licenseType) {
                 const lt = data.licenseType.toLowerCase();
-                if (lt.includes('cloud') || lt.includes('hosted')) $('dsCfg').value = 'Cloud';
-                else if (lt.includes('subscription') || lt.includes('perpetual') || lt.includes('on-prem') || lt.includes('on prem')) $('dsCfg').value = 'On-Prem';
+                if (lt.includes('cloud')) $('dsCfg').value = 'Cloud';
+                 if (lt.includes('subscription')) $('dsCfg').value = 'On-Prem';
             }
             if (data.emailChain) $('emailChain').value = data.emailChain;
             
@@ -5673,7 +5623,7 @@ $('mJiraClose').onclick = $('btnJiraDone').onclick = () => $('mJira').style.disp
 $('btnCopyJira').onclick = () => { $('jiraTa').select(); document.execCommand('copy'); toast('Copied!', 's'); };
 
 loadState();
-fetchLatestSOTIVersions().catch(err => console.error('fetchLatestSOTIVersions failed:', err));
+fetchLatestSOTIVersions();
 loadLocalAISettings().then(() => updateLocalAIBadge());
 
 // --- SETTINGS MODAL (AI — OLLAMA) ---
