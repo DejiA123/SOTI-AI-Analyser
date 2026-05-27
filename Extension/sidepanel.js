@@ -3218,7 +3218,16 @@ function scrubPII(s) {
     return s;
 }
 
-function getLeanQAPrompt() {
+function getLeanQAPrompt(isSmall = false) {
+    if (isSmall) {
+        return `You are SOTI AI, a Senior SOTI Technical Architect. Use the provided LIVE DATA to answer.
+
+RULES:
+1. ALWAYS answer directly using ONLY the facts present in [RELEASE NOTES], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [PULSE SEARCH], and [DOCS SEARCH]. Do not invent, hallucinate, or extrapolate details.
+2. NEVER say "check the website", "visit Pulse", or "click here". Do NOT output links or tell the user to go elsewhere. Just print the facts.
+3. Keep answers extremely short and direct (1-2 sentences). Do not add conversational fluff.
+4. For release notes, list the highlights and the first 10-15 resolved issues from the [RELEASE NOTES] section exactly as written. You must copy the MCMR codes and descriptions word-for-word. Do not alter any digits or fabricate issues. If the release notes are empty, state that no notes were found in the prompt data.`;
+    }
     return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
 CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
@@ -3592,7 +3601,10 @@ async function sotiFetch(url, timeout = 5000) {
         
         for (const p of rawProxies) {
             try {
-                const res = await fetch(p);
+                const controller = new AbortController();
+                const tid = setTimeout(() => controller.abort(), 6000);
+                const res = await fetch(p, { signal: controller.signal });
+                clearTimeout(tid);
                 if (res.ok) {
                     const text = await res.text();
                     if (text && text.length > 500) {
@@ -3660,6 +3672,17 @@ function extractPulseReleaseNoteBlocks(html) {
     doc.querySelectorAll('script, style, nav, footer, header, svg, path, iframe, link').forEach(el => el.remove());
     const versionHeadingRx = /\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/;
     const blocks = [];
+
+    let globalVersion = null;
+    const allHeadings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, .text-3xl'));
+    for (const h of allHeadings) {
+        const m = (h.textContent || "").match(versionHeadingRx);
+        if (m) {
+            globalVersion = m[1];
+            break;
+        }
+    }
+
     const layoutItems = Array.from(doc.querySelectorAll('.umb-block-grid__layout-item'));
 
     if (layoutItems.length > 0) {
@@ -3668,23 +3691,26 @@ function extractPulseReleaseNoteBlocks(html) {
         const buckets = { Highlights: [], "Resolved Issues": [], "Known Issues": [] };
 
         layoutItems.forEach(item => {
-            const h1 = item.querySelector('h1');
+            const h1 = item.querySelector('h1, h2, h3, h4');
             if (h1 && versionHeadingRx.test(h1.textContent || "")) {
-                flushPulseNoteBuckets(currentVersion, buckets, blocks);
+                flushPulseNoteBuckets(currentVersion || globalVersion, buckets, blocks);
                 currentVersion = ((h1.textContent || "").match(versionHeadingRx) || [])[1];
                 Object.keys(buckets).forEach(k => { buckets[k] = []; });
                 currentType = "Highlights";
                 return;
             }
-            const h2 = item.querySelector('h2');
-            if (h2) {
-                const section = classifyPulseSectionHeading(h2.textContent || "");
+            
+            const sectionHeader = item.querySelector('h1, h2, h3, h4');
+            if (sectionHeader) {
+                const section = classifyPulseSectionHeading(sectionHeader.textContent || "");
                 if (section) {
                     currentType = section;
                     return;
                 }
             }
-            if (!currentVersion) return;
+            
+            const activeVersion = currentVersion || globalVersion;
+            if (!activeVersion) return;
 
             const table = item.querySelector('table');
             if (table) {
@@ -3716,7 +3742,7 @@ function extractPulseReleaseNoteBlocks(html) {
                 if (parts.length) buckets[currentType].push(parts.join("\n"));
             }
         });
-        flushPulseNoteBuckets(currentVersion, buckets, blocks);
+        flushPulseNoteBuckets(currentVersion || globalVersion, buckets, blocks);
         if (blocks.length > 0) return blocks;
     }
 
@@ -4028,12 +4054,9 @@ function selectReleaseNoteSources(query, history, ci, catalog) {
         if (rule.rx.test(combined)) addByFragment(rule.fragment, rule.type);
     });
 
-    // ALWAYS include MobiControl Console + Android Agent as baseline so the AI
-    // always has version data for the core products regardless of query phrasing
-    if (!sources.some(s => s.type === 'Console')) {
+    // Only add baseline if no product-specific sources were matched to avoid mixing release notes
+    if (sources.length === 0) {
         addByFragment('release-notes', 'Console');
-    }
-    if (!sources.some(s => s.type === 'Agent')) {
         addByFragment('android-agent-release-notes', 'Agent');
     }
 
@@ -4143,14 +4166,10 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     
                     // Build context under dynamic character budget (up to 80k if no log attachments)
                     let clean = "";
-                    let charBudget = 15000;
+                    let charBudget = 25000; // optimized for extremely fast local prefill
                     
                     const activeCase = typeof cases !== 'undefined' ? cases.find(x => x.id === activeCaseId) : null;
                     const hasLogs = (activeCase && activeCase.logs && activeCase.logs.length > 0) || history.includes('[diagnostic data') || history.includes('=== file:');
-                    
-                    if (!hasLogs || asksVersion) {
-                        charBudget = 80000;
-                    }
                     
                     let includedCount = 0;
                     const highestScore = scoredBlocks[0]?.score || 0;
@@ -4318,9 +4337,18 @@ async function fetchLatestSOTIVersions() {
         sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/release-notes/`, 15000)
     ]);
 
-    if (consoleHtml) VERSIONS = extractVersionsFromDOM(consoleHtml);
-    if (agentHtml) AGENT_VERSIONS = extractVersionsFromDOM(agentHtml);
-    if (identityHtml) IDENTITY_VERSIONS = extractVersionsFromDOM(identityHtml);
+    if (consoleHtml) {
+        const consoleVers = extractVersionsFromDOM(consoleHtml);
+        if (consoleVers && consoleVers.length > 0) VERSIONS = consoleVers;
+    }
+    if (agentHtml) {
+        const agentVers = extractVersionsFromDOM(agentHtml);
+        if (agentVers && agentVers.length > 0) AGENT_VERSIONS = agentVers;
+    }
+    if (identityHtml) {
+        const identityVers = extractVersionsFromDOM(identityHtml);
+        if (identityVers && identityVers.length > 0) IDENTITY_VERSIONS = identityVers;
+    }
     
     updateVersionDropdowns();
 
@@ -4405,9 +4433,13 @@ async function saveLocalAISettings() {
 function sortOllamaModels(models) {
     return [...models].sort((a, b) => {
         const score = m => {
-            if (/phi4/i.test(m)) return 0;
-            if (/llama3\.2/i.test(m)) return 1;
-            return 2;
+            if (/qwen2\.5/i.test(m)) return 0;
+            if (/qwen3\.5/i.test(m)) return 1;
+            if (/qwen/i.test(m)) return 2;
+            if (/llama3\.1/i.test(m)) return 3;
+            if (/phi4/i.test(m)) return 4;
+            if (/llama3\.2/i.test(m)) return 5;
+            return 6;
         };
         const aScore = score(a);
         const bScore = score(b);
@@ -4418,7 +4450,7 @@ function sortOllamaModels(models) {
 
 function pickPreferredOllamaModel(models) {
     const sorted = sortOllamaModels(models);
-    return sorted.find(m => /phi4/i.test(m)) || sorted.find(m => /llama3\.2/i.test(m)) || sorted[0] || '';
+    return sorted.find(m => /llama3\.1/i.test(m)) || sorted.find(m => /qwen2\.5/i.test(m)) || sorted.find(m => /qwen3\.5/i.test(m)) || sorted.find(m => /qwen/i.test(m)) || sorted[0] || '';
 }
 
 function getOllamaProbeUrls(baseUrl) {
@@ -4500,7 +4532,7 @@ function updateLocalAIBadge() {
 }
 
 // Ollama-powered AI engine (streaming, OpenAI-compatible endpoint)
-const OpenRouterAI = {
+const OllamaAI = {
     completions: {
         create: async (req) => {
             const model = LOCAL_AI_MODEL || req.model;
@@ -4525,8 +4557,8 @@ const OpenRouterAI = {
             const totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
             const estimatedTokens = Math.ceil(totalChars / 3.5);
             const neededTokens = estimatedTokens + 1500; // room for response
-            // Minimum is 8192, and we round up to nearest 4096. Max is 131072.
-            const numCtx = Math.max(8192, Math.min(131072, Math.ceil(neededTokens / 4096) * 4096));
+            // Minimum is 4096, and we round up to nearest 2048. Max is 32768.
+            const numCtx = Math.max(4096, Math.min(32768, Math.ceil(neededTokens / 2048) * 2048));
             
             console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
 
@@ -4539,7 +4571,10 @@ const OpenRouterAI = {
                     stream: true,
                     options: {
                         num_ctx: numCtx,
-                        temperature: 0.1
+                        temperature: 0.0,
+                        repeat_penalty: 1.1,
+                        top_p: 0.9,
+                        num_predict: 800 // limits response generation to be bullet-fast without mid-sentence truncation
                     }
                 })
             });
@@ -4685,9 +4720,10 @@ async function send(overrideText = null, silent = false) {
 
             const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
+            const isSmallModel = !!(LOCAL_AI_MODEL && /\b(1\.5b|3b|mini|3\.2)\b/i.test(LOCAL_AI_MODEL));
             const corePrompt = hasLogs
                 ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
-                : getLeanQAPrompt();
+                : getLeanQAPrompt(isSmallModel);
 
             let liveDataSection = "";
             const liveDataLines = [];
@@ -4751,7 +4787,7 @@ ${logContext}`);
 
         const selectedModel = LOCAL_AI_MODEL || null;
 
-        const reader = await OpenRouterAI.completions.create({
+        const reader = await OllamaAI.completions.create({
             model: selectedModel,
             messages: modelMessages,
             stream: true
@@ -5603,7 +5639,14 @@ ${JIRA_TEMPLATE}`);
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userPrompt }
                 ],
-                stream: false
+                stream: false,
+                options: {
+                    num_ctx: 8192,
+                    temperature: 0.0,
+                    repeat_penalty: 1.1,
+                    top_p: 0.9,
+                    num_predict: 1024 // limits JIRA response to prevent looping
+                }
             })
         });
         if (!res.ok) throw new Error(`Ollama error ${res.status}`);

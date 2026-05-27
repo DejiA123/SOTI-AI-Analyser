@@ -5,7 +5,7 @@ echo SOTI AI Analyser - Automated Local AI Setup
 echo ==========================================
 echo.
 echo Installs Ollama using the official ollama.com/install.ps1 script,
-echo then downloads llama3.2 for the extension.
+echo then downloads llama3.1 for the extension.
 echo.
 echo If Bitdefender asks, allow PowerShell and ollama.com (official installer).
 echo.
