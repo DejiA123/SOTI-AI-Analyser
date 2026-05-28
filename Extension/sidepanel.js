@@ -2470,22 +2470,24 @@ function buildLogAnalysisContext(logs) {
 }
 
 function getLogForensicsSystemPrompt() {
-    return `You are a SOTI log forensics engineer.
+    return `You are a SOTI log forensics engineer. You must be extremely concise and direct.
 
 Output structure:
 ## Log Analysis Report
 ### Detected Root Cause
+[1-2 sentences maximum]
 ### Analysis
+[Use a Markdown Table to show the exact errors, timestamps, and custom actions]
 ### Recommendations
+[Brief bullet points]
 
 Rules:
-- For standard service logs, use the CROSS-LOG INCIDENT INDEX.
+- NEVER write long paragraphs.
 - For MSI/Installer logs, you MUST follow the PRODUCT-SPECIFIC LOG SIGNATURES explicitly.
-- CRITICAL: "Return value 3" and "1603" are FATAL ROLLBACK TRIGGERS in MSI logs.
-- If you see "Return value 3" or "1603", you MUST identify the exact CustomAction or failure immediately preceding them.
+- CRITICAL: "Return value 3" and "1603" are FATAL ROLLBACK TRIGGERS in MSI logs. 
+- If you see "Return value 3" or "1603", you MUST identify the exact CustomAction immediately preceding them.
 - DO NOT list SQL or Authentication as the root cause if a CustomAction 1603 triggered the rollback. Ignore earlier SQL errors completely if a 1603 is present.
-- Quote exact exception messages and timestamps.
-- Match the formatting from the PRODUCT-SPECIFIC LOG SIGNATURES if applicable.`;
+- Quote exact exception messages, lines, and timestamps in your table.`;
 }
 
 function validateForensicAIResponse(text, logs) {
