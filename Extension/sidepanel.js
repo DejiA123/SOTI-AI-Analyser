@@ -1563,7 +1563,7 @@ function buildInstallerFailureAnalysis(logs) {
             if (seen.has(key)) return;
             seen.add(key);
             const lines = lineMap.get(e.file) || [];
-            const block = installerEvidenceWindow(lines, e.lineNum - 1, 2, 10);
+            const block = installerEvidenceWindow(lines, e.lineNum - 1, 30, 15);
             if (!block) return;
             report += `\nAnchor (${e.classification}) @ ${e.file}:Line ${e.lineNum}${e.timestamp ? ` (${formatInstallerTime(e.timestamp)})` : ""}:\n`;
             report += "```text\n" + block + "\n```\n";
@@ -2470,24 +2470,18 @@ function buildLogAnalysisContext(logs) {
 }
 
 function getLogForensicsSystemPrompt() {
-    return `You are a SOTI log forensics engineer. You must be extremely concise and direct.
+    return `You are a SUPER INTELLIGENT, expert SOTI log forensics analyzer. 
 
-Output structure:
-## Log Analysis Report
-### Detected Root Cause
-[1-2 sentences maximum]
-### Analysis
-[Use a Markdown Table to show the exact errors, timestamps, and custom actions]
-### Recommendations
-[Brief bullet points]
+Your goal is to provide a highly accurate, definitive, and professional Forensic Installation Failure Report.
+Do not write like a robot. Synthesize the context gracefully to point out the exact root cause of the failure.
 
 Rules:
-- NEVER write long paragraphs.
 - For MSI/Installer logs, you MUST follow the PRODUCT-SPECIFIC LOG SIGNATURES explicitly.
 - CRITICAL: "Return value 3" and "1603" are FATAL ROLLBACK TRIGGERS in MSI logs. 
-- If you see "Return value 3" or "1603", you MUST identify the exact CustomAction immediately preceding them.
+- If you see "Return value 3" or "1603", you MUST read the lines immediately preceding them to identify the exact CustomAction or script that failed.
 - DO NOT list SQL or Authentication as the root cause if a CustomAction 1603 triggered the rollback. Ignore earlier SQL errors completely if a 1603 is present.
-- Quote exact exception messages, lines, and timestamps in your table.`;
+- IGNORE MSI noise: Do not focus on "Closing MSIHANDLE", "Note: 1: 2265", "User policy value", or "Machine policy value". These are irrelevant symptoms. Focus entirely on the CustomAction execution failures.
+- Quote the exact CustomAction and exception messages using the exact timestamps from the evidence provided.`;
 }
 
 function validateForensicAIResponse(text, logs) {
