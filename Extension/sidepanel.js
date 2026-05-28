@@ -4646,23 +4646,37 @@ async function send(overrideText = null, silent = false) {
                 : getLeanQAPrompt(isSmallModel);
 
             // Fetch external heuristics if logs are present
-            if (hasLogs && ci && ci.product) {
+            let detectedProduct = ci && ci.product ? ci.product : null;
+            if (hasLogs) {
+                for (let log of c.logs) {
+                    const ln = (log.name || "").toLowerCase();
+                    if (ln.includes('setupsotixsight') || ln.includes('xsight')) {
+                        detectedProduct = "SOTI XSight";
+                        break;
+                    } else if (ln.includes('mobicontrol') || ln.includes('adb.log') || /\b(ms|ds|dse)\b/i.test(log.name) || /^(ms|ds|dse)/i.test(log.name)) {
+                        detectedProduct = "MobiControl";
+                        break;
+                    }
+                }
+            }
+
+            if (hasLogs && detectedProduct) {
                 const map = {
                     "MobiControl": "MobiControl.md",
                     "SOTI XSight": "XSight.md",
                     "SOTI Connect": "Connect.md"
                 };
-                if (map[ci.product]) {
+                if (map[detectedProduct]) {
                     try {
                         const url = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
-                            ? chrome.runtime.getURL('knowledge/' + map[ci.product])
-                            : 'knowledge/' + map[ci.product];
+                            ? chrome.runtime.getURL('knowledge/' + map[detectedProduct])
+                            : 'knowledge/' + map[detectedProduct];
                         const res = await fetch(url);
                         if (res.ok) {
                             corePrompt += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES:\n` + await res.text();
                         }
                     } catch (e) {
-                        console.warn("Could not load knowledge for " + ci.product, e);
+                        console.warn("Could not load knowledge for " + detectedProduct, e);
                     }
                 }
             }
