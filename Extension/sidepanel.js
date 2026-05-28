@@ -3906,16 +3906,22 @@ async function fetchPulseReleaseBlocksForVersion(baseUrl, queryVersions) {
     urls = [...new Set(urls)];
 
     let allBlocks = [];
-    for (const fetchUrl of urls) {
-        const html = await sotiFetch(fetchUrl, 15000);
-        if (!html) continue;
-        let blocks = extractPulseReleaseNoteBlocks(html);
-        
+    const fetchPromises = urls.map(async (fetchUrl) => {
+        try {
+            const html = await sotiFetch(fetchUrl, 15000);
+            if (!html) return [];
+            return extractPulseReleaseNoteBlocks(html);
+        } catch (_) {
+            return [];
+        }
+    });
+    const results = await Promise.all(fetchPromises);
+    results.forEach(blocks => {
         blocks.forEach(b => {
             const exists = allBlocks.some(a => a.version === b.version && a.type === b.type && a.text === b.text);
             if (!exists) allBlocks.push(b);
         });
-    }
+    });
 
     if (allBlocks.length === 0 && pageHtml) {
         allBlocks = extractPulseReleaseNoteBlocks(pageHtml);
@@ -4073,17 +4079,28 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const qLower = query.toLowerCase();
         const history = (msgs || []).map(m => m.content.toLowerCase()).join(' ');
         const caseBlob = getCaseResearchContext(query, history, ci);
-        const combinedLower = caseBlob.toLowerCase();
         
-        const asksIdentity = combinedLower.includes('identity') || (ci && ci.product === 'SOTI Identity');
-        const asksReleaseNotes = /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|mcmr[\s-]*\d|fixed\s+in|fixed\s+since|latest|newest|current\s+version)\b/i.test(combinedLower);
-        const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(combinedLower);
+        const asksIdentity = qLower.includes('identity') || (ci && ci.product === 'SOTI Identity');
         
-        const asksVersion = asksReleaseNotes || /\b(latest|version|release|update|fixed|resolved|mcmr|bug|upgrade|certificate|cert\b)\b/i.test(combinedLower) ||
-                            /\b(what about|how about)\b/i.test(query) ||
-                            /\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/.test(caseBlob);
+        const isListingAll = /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(qLower) ||
+                             /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(history);
+        
+        const asksReleaseNotes = isListingAll || 
+                                 /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since)\b/i.test(qLower) ||
+                                 /\b(mcmr[\s-]*\d+)\b/i.test(qLower);
 
-        if (asksVersion) {
+        const isTroubleshoot = /\b(how\s+do|how\s+to|error|fail|broken|issue|troubleshoot|cannot|unable|configure|setup|install|database|sql|port|certificate|ca|disconnect|offline|enroll|license|sync|crash|freeze|slow|bug)\b/i.test(qLower) || 
+                               (qLower.split(/\s+/).length > 6 && !asksReleaseNotes);
+        
+        const shouldFetchReleaseNotes = asksReleaseNotes || isTroubleshoot;
+        const shouldDoWebSearch = isTroubleshoot;
+
+        let charBudget = 0;
+        if (isListingAll) charBudget = 40000;
+        else if (asksReleaseNotes) charBudget = 20000;
+        else if (isTroubleshoot) charBudget = 10000;
+
+        if (shouldFetchReleaseNotes && charBudget > 0) {
             let notes = [];
             const catalog = asksIdentity
                 ? []
@@ -4164,7 +4181,7 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         return { block: b, score: score };
                     });
                     
-                    // Sort descending by score, then by version, prioritizing Resolved Issues over Highlights on ties
+                    // Score tie-breaking
                     scoredBlocks.sort((a, b) => {
                         if (b.score !== a.score) return b.score - a.score;
                         const vComp = b.block.version.localeCompare(a.block.version, undefined, { numeric: true });
@@ -4177,10 +4194,11 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     const activeCase = typeof cases !== 'undefined' ? cases.find(x => x.id === activeCaseId) : null;
                     const hasLogs = (activeCase && activeCase.logs && activeCase.logs.length > 0) || history.includes('[diagnostic data') || history.includes('=== file:');
 
-                    // Build context under dynamic character budget
-                    let clean = "";
-                    let charBudget = hasLogs ? 25000 : 60000; // larger budget if no logs attached, ensuring complete release notes
+                    // Adjust local budget if logs are present
+                    let localBudget = charBudget;
+                    if (hasLogs) localBudget = Math.min(localBudget, 12000);
                     
+                    let clean = "";
                     let includedCount = 0;
                     const highestScore = scoredBlocks[0]?.score || 0;
                     const strictVersionFilter = !!primaryVersion;
@@ -4201,19 +4219,19 @@ async function searchPulseAndDocs(query, msgs, ci) {
                             }
                         }
                         
-                        // Skip unrelevant older blocks if we have high-scoring ones
+                        // Skip irrelevant older blocks if we have high-scoring ones
                         if (!strictVersionFilter && sb.score === 0 && includedCount >= 2 && highestScore > 0) {
                             continue;
                         }
                         
                         const formatBlock = `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()}:\n${sb.block.text}\n`;
-                        if (clean.length + formatBlock.length <= charBudget) {
+                        if (clean.length + formatBlock.length <= localBudget) {
                             clean += formatBlock;
                             includedVersions.add(sb.block.version);
                             includedCount++;
                         } else {
-                            if (sb.score >= 100 && clean.length < (charBudget * 0.4)) {
-                                const remaining = charBudget - clean.length;
+                            if (sb.score >= 100 && clean.length < (localBudget * 0.4)) {
+                                const remaining = localBudget - clean.length;
                                 clean += `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()} (TRUNCATED):\n${sb.block.text.slice(0, remaining - 100)}\n`;
                                 includedVersions.add(sb.block.version);
                                 includedCount++;
@@ -4231,88 +4249,92 @@ async function searchPulseAndDocs(query, msgs, ci) {
             
             if (notes.length > 0) {
                 RELEASE_NOTES_CONTENT = notes.join('\n\n---\n\n');
-            } else {
+            } else if (asksReleaseNotes) {
                 toast('Autonomous Research failed', 'w');
                 RELEASE_NOTES_CONTENT = "ERROR: Failed to fetch release notes from SOTI Pulse (network error or page not found).";
             }
         }
             
+        if (shouldDoWebSearch) {
+            const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for', 'give', 'short', 'subject', 'name', 'meeting', 'notes', 'critical', 'investigation']);
+            const combinedLower = caseBlob.toLowerCase();
+            let keywordParts = caseBlob.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
+            const seenKw = new Set();
+            keywordParts = keywordParts.filter(w => { if (seenKw.has(w)) return false; seenKw.add(w); return true; });
+            const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(qLower);
+            if (asksMobiControl && !keywordParts.includes('mobicontrol')) keywordParts.unshift('mobicontrol');
+            if (/\bcertificate|cert\b/i.test(qLower) && !keywordParts.includes('certificate')) keywordParts.unshift('certificate');
+            const keywords = keywordParts.slice(0, 6).join('%20');
+            
+            if (keywords) {
+                const [pHtml, dHtml, iHtml] = await Promise.all([
+                    sotiFetch(`${PULSE_ORIGIN}/search/?q=${keywords}`, 10000),
+                    sotiFetch(`${DOCS_ORIGIN}/soti-mobicontrol/search/?q=${keywords}`, 10000),
+                    asksIdentity ? sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/search/?q=${keywords}`, 10000) : Promise.resolve(null)
+                ]);
 
-        const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for', 'give', 'short', 'subject', 'name', 'meeting', 'notes', 'critical', 'investigation']);
-        let keywordParts = caseBlob.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
-        const seenKw = new Set();
-        keywordParts = keywordParts.filter(w => { if (seenKw.has(w)) return false; seenKw.add(w); return true; });
-        if (asksMobiControl && !keywordParts.includes('mobicontrol')) keywordParts.unshift('mobicontrol');
-        if (/\bcertificate|cert\b/i.test(combinedLower) && !keywordParts.includes('certificate')) keywordParts.unshift('certificate');
-        const keywords = keywordParts.slice(0, 6).join('%20');
-        if (!keywords) return;
+                // Helper to resolve relative URLs to absolute
+                function resolveLink(href, baseOrigin) {
+                    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return null;
+                    if (href.startsWith('http://') || href.startsWith('https://')) return href;
+                    if (href.startsWith('/')) return baseOrigin + href;
+                    return baseOrigin + '/' + href;
+                }
 
-        const [pHtml, dHtml, iHtml] = await Promise.all([
-            sotiFetch(`${PULSE_ORIGIN}/search/?q=${keywords}`, 10000),
-            sotiFetch(`${DOCS_ORIGIN}/soti-mobicontrol/search/?q=${keywords}`, 10000),
-            asksIdentity ? sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/search/?q=${keywords}`, 10000) : Promise.resolve(null)
-        ]);
+                let deepLinks = [];
+                if (pHtml) {
+                    const doc = new DOMParser().parseFromString(pHtml, 'text/html');
+                    const items = [...doc.querySelectorAll('a')].map(a => ({
+                        href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
+                        text: a.textContent.trim()
+                    })).filter(a => a.href && a.href.includes('pulse.soti.net/support') && isUsefulPulseResearchLink(a.href, a.text))
+                        .slice(0, asksMobiControl ? 5 : 3);
+                    PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
+                }
+                if (dHtml) {
+                    const doc = new DOMParser().parseFromString(dHtml, 'text/html');
+                    const items = [...doc.querySelectorAll('a')].map(a => ({
+                        href: resolveLink(a.getAttribute('href'), DOCS_ORIGIN),
+                        text: a.textContent.trim()
+                    })).filter(a => a.href && a.href.includes('/help/')).slice(0, asksMobiControl ? 5 : 3);
+                    DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
+                }
+                if (iHtml) {
+                    const doc = new DOMParser().parseFromString(iHtml, 'text/html');
+                    const items = [...doc.querySelectorAll('a')].map(a => ({
+                        href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
+                        text: a.textContent.trim()
+                    })).filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
+                    DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
+                }
 
-        // Helper to resolve relative URLs to absolute (DOMParser resolves to chrome-extension:// otherwise)
-        function resolveLink(href, baseOrigin) {
-            if (!href || href.startsWith('#') || href.startsWith('javascript:')) return null;
-            if (href.startsWith('http://') || href.startsWith('https://')) return href;
-            if (href.startsWith('/')) return baseOrigin + href;
-            return baseOrigin + '/' + href;
-        }
+                const deepLinkLimit = asksMobiControl || asksReleaseNotes ? 5 : 3;
+                const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 25000 : 12000;
+                
+                if (asksReleaseNotes && typeof RELEASE_NOTES_CONTENT !== 'undefined' && RELEASE_NOTES_CONTENT) {
+                    deepLinks = deepLinks.filter(url => !url.includes('release-notes') && !url.includes('product-notes'));
+                }
 
-        const deepLinks = [];
-        if (pHtml) {
-            const doc = new DOMParser().parseFromString(pHtml, 'text/html');
-            const items = [...doc.querySelectorAll('a')].map(a => ({
-                href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
-                text: a.textContent.trim()
-            })).filter(a => a.href && a.href.includes('pulse.soti.net/support') && isUsefulPulseResearchLink(a.href, a.text))
-                .slice(0, asksMobiControl ? 5 : 3);
-            PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
-        }
-        if (dHtml) {
-            const doc = new DOMParser().parseFromString(dHtml, 'text/html');
-            const items = [...doc.querySelectorAll('a')].map(a => ({
-                href: resolveLink(a.getAttribute('href'), DOCS_ORIGIN),
-                text: a.textContent.trim()
-            })).filter(a => a.href && a.href.includes('/help/')).slice(0, asksMobiControl ? 5 : 3);
-            DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
-        }
-        if (iHtml) {
-            const doc = new DOMParser().parseFromString(iHtml, 'text/html');
-            const items = [...doc.querySelectorAll('a')].map(a => ({
-                href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
-                text: a.textContent.trim()
-            })).filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
-            DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
-        }
+                if (deepLinks.length > 0) {
+                    const linksToFetch = deepLinks.slice(0, deepLinkLimit);
+                    const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
+                    const articles = [];
+                    const perArticleBudget = Math.floor(deepArticleBudget / linksToFetch.length);
 
-        const deepLinkLimit = asksMobiControl || asksReleaseNotes ? 5 : 3;
-        const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 25000 : 15000;
-        
-        if (asksReleaseNotes && typeof RELEASE_NOTES_CONTENT !== 'undefined' && RELEASE_NOTES_CONTENT) {
-            deepLinks = deepLinks.filter(url => !url.includes('release-notes') && !url.includes('product-notes'));
-        }
+                    fetched.forEach((content, idx) => {
+                        if (content) {
+                            const doc = new DOMParser().parseFromString(content, 'text/html');
+                            const article = extractDeepResearchArticle(doc);
+                            if (article.length > 100 && !isLowQualityResearchArticle(article)) {
+                                articles.push(`[DEEP RESEARCH - ${linksToFetch[idx]}]:\n${article.slice(0, perArticleBudget)}`);
+                            }
+                        }
+                    });
 
-        if (deepLinks.length > 0) {
-            const linksToFetch = deepLinks.slice(0, deepLinkLimit);
-            const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
-            const articles = [];
-            const perArticleBudget = Math.floor(deepArticleBudget / linksToFetch.length);
-
-            fetched.forEach((content, idx) => {
-                if (content) {
-                    const doc = new DOMParser().parseFromString(content, 'text/html');
-                    const article = extractDeepResearchArticle(doc);
-                    if (article.length > 100 && !isLowQualityResearchArticle(article)) {
-                        articles.push(`[DEEP RESEARCH - ${linksToFetch[idx]}]:\n${article.slice(0, perArticleBudget)}`);
+                    if (articles.length > 0) {
+                        RESEARCHED_ARTICLE_CONTENT = articles.join('\n\n---\n\n');
                     }
                 }
-            });
-
-            if (articles.length > 0) {
-                RESEARCHED_ARTICLE_CONTENT = articles.join('\n\n---\n\n');
             }
         }
     } catch (e) { console.warn('Research failed', e); }
@@ -4566,19 +4588,51 @@ const OllamaAI = {
 
             const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
             
-            // Calculate dynamic context window (num_ctx) and output limit (num_predict) to prevent memory bloating
-            // and premature truncation when listing large datasets (like 72 release notes).
-            const totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
-            const estimatedTokens = Math.ceil(totalChars / 3.5);
-            
             const lastMessage = messages[messages.length - 1]?.content || "";
             const isListingAll = /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(lastMessage) ||
                                  /\b(release\s*notes?|changelog)\b/i.test(lastMessage);
-            const numPredict = isListingAll ? 4096 : 800;
+            const hasLogs = messages.some(m => m.content && (m.content.includes('[DIAGNOSTIC DATA') || m.content.includes('=== FILE:')));
             
+            // If listing all release notes or doing log analysis, use 8192. Otherwise use 4096 for extremely fast CPU/GPU response.
+            const maxCtxTokens = (isListingAll || hasLogs) ? 8192 : 4096;
+            const numPredict = isListingAll ? 4096 : 800;
+
+            let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
+            let estimatedTokens = Math.ceil(totalChars / 3.5);
+            
+            // Strict token budget matching: if estimatedTokens exceeds the target context window,
+            // we must trim the system prompt (RAG results & log snippets) to fit so Ollama doesn't choke or truncate.
+            const maxAllowedTokens = maxCtxTokens - numPredict - 600;
+            const maxAllowedChars = Math.floor(maxAllowedTokens * 3.2);
+            
+            if (totalChars > maxAllowedChars && messages[0] && messages[0].role === 'system') {
+                let sysText = messages[0].content;
+                if (sysText.includes('=== FILE:')) {
+                    // Truncate logs section first
+                    const logIndex = sysText.indexOf('=== FILE:');
+                    if (logIndex !== -1) {
+                        const preLogText = sysText.substring(0, logIndex);
+                        const otherMsgsChars = messages.reduce((acc, m, i) => i === 0 ? acc : acc + (m.content ? m.content.length : 0), 0);
+                        const availableChars = maxAllowedChars - preLogText.length - otherMsgsChars;
+                        if (availableChars > 1000) {
+                            messages[0].content = preLogText + sysText.substring(logIndex).slice(0, availableChars - 100) + "\n\n[LOG DATA TRUNCATED TO FIT CONTEXT BUDGET]";
+                        } else {
+                            messages[0].content = preLogText.slice(0, Math.max(2000, maxAllowedChars - 100)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
+                        }
+                    }
+                } else {
+                    // Truncate general system prompt
+                    const otherMsgsChars = messages.reduce((acc, m, i) => i === 0 ? acc : acc + (m.content ? m.content.length : 0), 0);
+                    const availableChars = maxAllowedChars - otherMsgsChars;
+                    messages[0].content = sysText.slice(0, Math.max(2000, availableChars)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
+                }
+                // Recalculate total characters and estimated tokens
+                totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
+                estimatedTokens = Math.ceil(totalChars / 3.5);
+            }
+
             const neededTokens = estimatedTokens + numPredict + 500; // room for response
-            // Minimum is 4096, round up to nearest 2048. Capped at 8192 for CPU performance on low-end hardware.
-            const numCtx = Math.max(4096, Math.min(8192, Math.ceil(neededTokens / 2048) * 2048));
+            const numCtx = Math.max(4096, Math.min(maxCtxTokens, Math.ceil(neededTokens / 2048) * 2048));
             
             console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, num_predict: ${numPredict}`);
 
