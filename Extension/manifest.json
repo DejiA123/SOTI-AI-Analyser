@@ -34,7 +34,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["lib/worker.min.js", "lib/*.wasm", "lib/*.gz"],
+      "resources": ["lib/worker.min.js", "lib/*.wasm", "lib/*.gz", "knowledge/*.md"],
       "matches": [
         "https://*.soti.net/*",
         "https://*.salesforce.com/*",
