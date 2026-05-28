@@ -3226,7 +3226,7 @@ RULES:
 1. ALWAYS answer directly using ONLY the facts present in [RELEASE NOTES], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [PULSE SEARCH], and [DOCS SEARCH]. Do not invent, hallucinate, or extrapolate details.
 2. NEVER say "check the website", "visit Pulse", or "click here". Do NOT output links or tell the user to go elsewhere. Just print the facts.
 3. Keep answers extremely short and direct (1-2 sentences). Do not add conversational fluff.
-4. For release notes, list the highlights and the first 10-15 resolved issues from the [RELEASE NOTES] section exactly as written. You must copy the MCMR codes and descriptions word-for-word. Do not alter any digits or fabricate issues. If the release notes are empty, state that no notes were found in the prompt data.`;
+4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.`;
     }
     return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
@@ -3240,7 +3240,7 @@ RULES YOU MUST FOLLOW:
    - "Identity" → use [LATEST IDENTITY VERSION]
    Answer in a single direct sentence, e.g. "The latest MobiControl version is X.Y.Z." Do NOT add any extra details, citations, links, or fixes unless explicitly requested. Stop generating immediately after stating the version.
 3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
-4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. The release notes blocks are tagged with their source product (e.g. [SOTI PULSE CONSOLE DATA] for MobiControl, [SOTI PULSE AGENT DATA] for Android Agent). When the user asked about MobiControl, present ONLY blocks from CONSOLE DATA. When the user asked about Android Agent, present ONLY blocks from AGENT DATA. Present BOTH Highlights and Resolved Issues if they both exist for the requested version. If there is truly no ### VERSION block for the requested version, say so.
+4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. The release notes blocks are tagged with their source product (e.g. [SOTI PULSE CONSOLE DATA] for MobiControl, [SOTI PULSE AGENT DATA] for Android Agent). When the user asked about MobiControl, present ONLY blocks from CONSOLE DATA. When the user asked about Android Agent, present ONLY blocks from AGENT DATA. In SOTI terminology, "Release Notes" means "Resolved Issues" (the fixes). You MUST prioritize presenting the Resolved Issues explicitly. Do not blend them with Highlights. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data (e.g., due to pagination), state clearly that only the listed items are available in the current context. If there are no Resolved Issues for the requested version, state that none were found.
 5. When asked about features, configuration, or troubleshooting: use [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES] first. Only state facts that appear in those sections or in attached logs.
 6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
 7. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
@@ -3691,8 +3691,8 @@ function extractPulseReleaseNoteBlocks(html) {
         const buckets = { Highlights: [], "Resolved Issues": [], "Known Issues": [] };
 
         layoutItems.forEach(item => {
-            const h1 = item.querySelector('h1, h2, h3, h4');
-            if (h1 && versionHeadingRx.test(h1.textContent || "")) {
+            const h1 = item.querySelector('h1, h2, h3, h4, .text-3xl, .text-2xl, .text-xl, p > strong');
+            if (h1 && (h1.textContent || "").trim().length < 60 && versionHeadingRx.test(h1.textContent || "")) {
                 flushPulseNoteBuckets(currentVersion || globalVersion, buckets, blocks);
                 currentVersion = ((h1.textContent || "").match(versionHeadingRx) || [])[1];
                 Object.keys(buckets).forEach(k => { buckets[k] = []; });
@@ -3700,7 +3700,7 @@ function extractPulseReleaseNoteBlocks(html) {
                 return;
             }
             
-            const sectionHeader = item.querySelector('h1, h2, h3, h4');
+            const sectionHeader = item.querySelector('h1, h2, h3, h4, .text-3xl, .text-2xl, .text-xl, p > strong');
             if (sectionHeader) {
                 const section = classifyPulseSectionHeading(sectionHeader.textContent || "");
                 if (section) {
@@ -3712,26 +3712,28 @@ function extractPulseReleaseNoteBlocks(html) {
             const activeVersion = currentVersion || globalVersion;
             if (!activeVersion) return;
 
-            const table = item.querySelector('table');
-            if (table) {
-                table.querySelectorAll('tr').forEach(tr => {
-                    const cells = tr.querySelectorAll('td');
-                    if (cells.length >= 2) {
-                        const code = cleanPulseText(cells[0].textContent);
-                        const desc = cleanPulseText(cells[1].textContent);
-                        if (code && desc) buckets["Resolved Issues"].push(`- ${code}: ${desc}`);
-                    } else if (cells.length === 1) {
-                        const t = cleanPulseText(cells[0].textContent);
-                        if (t) buckets[currentType].push(`- ${t}`);
-                    }
+            const tables = item.querySelectorAll('table');
+            if (tables.length > 0) {
+                tables.forEach(table => {
+                    table.querySelectorAll('tr').forEach(tr => {
+                        const cells = tr.querySelectorAll('td');
+                        if (cells.length >= 2) {
+                            const code = cleanPulseText(cells[0].textContent);
+                            const desc = cleanPulseText(cells[1].textContent);
+                            if (code && desc) buckets["Resolved Issues"].push(`- ${code}: ${desc}`);
+                        } else if (cells.length === 1) {
+                            const t = cleanPulseText(cells[0].textContent);
+                            if (t) buckets[currentType].push(`- ${t}`);
+                        }
+                    });
                 });
-                return;
             }
 
             const rich = item.querySelector('.umbBlockGridRichTextBlock, .contents');
             if (rich) {
                 const parts = [];
                 rich.querySelectorAll('p, li, h3, h4').forEach(el => {
+                    if (el.closest('table')) return;
                     const t = cleanPulseText(el.textContent || "");
                     if (t && t.length > 2) parts.push(`- ${t}`);
                 });
@@ -4145,33 +4147,39 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         }
                         
                         // Intent-based type boost
-                        const hasFixKeywords = /\b(fix|fixed|bug|mcmr|resolve|resolved|issue|error|exception|crash|prevent|correct|correctly)\b/i.test(qLower) || 
-                                               /\b(fix|fixed|bug|mcmr|resolve|resolved|issue|error|exception|crash|prevent|correct|correctly)\b/i.test(history);
-                        if (hasFixKeywords && b.type === 'Resolved Issues') {
-                            score += 150;
-                        }
+                        const hasFixKeywords = /\b(fix|fixed|bug|mcmr|resolve|resolved|issue|error|exception|crash|prevent|correct|correctly|release\s*notes?|changelog|list|show|all|more|them)\b/i.test(qLower) || 
+                                               /\b(fix|fixed|bug|mcmr|resolve|resolved|issue|error|exception|crash|prevent|correct|correctly|release\s*notes?|changelog|list|show|all|more|them)\b/i.test(history);
                         
-                        const hasHighlightKeywords = /\b(feature|highlight|improvement|note|new|whatsnew|what's\s+new)\b/i.test(qLower) ||
-                                                     /\b(feature|highlight|improvement|note|new|whatsnew|what's\s+new)\b/i.test(history);
+                        const hasHighlightKeywords = /\b(feature|highlight|improvement|whatsnew|what's\s+new)\b/i.test(qLower) ||
+                                                     /\b(feature|highlight|improvement|whatsnew|what's\s+new)\b/i.test(history);
+                                                     
                         if (hasHighlightKeywords && b.type === 'Highlights') {
-                            score += 150;
+                            score += 1000;
+                        } else if (hasFixKeywords && b.type === 'Resolved Issues') {
+                            score += 1000; // Prioritize resolved issues over highlights
+                        } else if (asksReleaseNotes && b.type === 'Resolved Issues') {
+                            score += 800; // Prioritize resolved issues for any release notes search by default
                         }
                         
                         return { block: b, score: score };
                     });
                     
-                    // Sort descending by score, then by version
+                    // Sort descending by score, then by version, prioritizing Resolved Issues over Highlights on ties
                     scoredBlocks.sort((a, b) => {
                         if (b.score !== a.score) return b.score - a.score;
-                        return b.block.version.localeCompare(a.block.version, undefined, { numeric: true });
+                        const vComp = b.block.version.localeCompare(a.block.version, undefined, { numeric: true });
+                        if (vComp !== 0) return vComp;
+                        if (a.block.type === 'Resolved Issues' && b.block.type === 'Highlights') return -1;
+                        if (a.block.type === 'Highlights' && b.block.type === 'Resolved Issues') return 1;
+                        return 0;
                     });
-                    
-                    // Build context under dynamic character budget (up to 80k if no log attachments)
-                    let clean = "";
-                    let charBudget = 25000; // optimized for extremely fast local prefill
                     
                     const activeCase = typeof cases !== 'undefined' ? cases.find(x => x.id === activeCaseId) : null;
                     const hasLogs = (activeCase && activeCase.logs && activeCase.logs.length > 0) || history.includes('[diagnostic data') || history.includes('=== file:');
+
+                    // Build context under dynamic character budget
+                    let clean = "";
+                    let charBudget = hasLogs ? 25000 : 60000; // larger budget if no logs attached, ensuring complete release notes
                     
                     let includedCount = 0;
                     const highestScore = scoredBlocks[0]?.score || 0;
@@ -4282,6 +4290,11 @@ async function searchPulseAndDocs(query, msgs, ci) {
 
         const deepLinkLimit = asksMobiControl || asksReleaseNotes ? 5 : 3;
         const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 25000 : 15000;
+        
+        if (asksReleaseNotes && typeof RELEASE_NOTES_CONTENT !== 'undefined' && RELEASE_NOTES_CONTENT) {
+            deepLinks = deepLinks.filter(url => !url.includes('release-notes') && !url.includes('product-notes'));
+        }
+
         if (deepLinks.length > 0) {
             const linksToFetch = deepLinks.slice(0, deepLinkLimit);
             const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
@@ -4553,16 +4566,21 @@ const OllamaAI = {
 
             const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
             
-            // Calculate dynamic context window (num_ctx) to prevent memory bloating.
-            // On a resource-constrained laptop (e.g. 8GB RAM), a fixed 128k context window forces Ollama
-            // to pre-allocate massive KV caches, causing CPU swapping and extremely slow generation.
+            // Calculate dynamic context window (num_ctx) and output limit (num_predict) to prevent memory bloating
+            // and premature truncation when listing large datasets (like 72 release notes).
             const totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
             const estimatedTokens = Math.ceil(totalChars / 3.5);
-            const neededTokens = estimatedTokens + 1500; // room for response
+            
+            const lastMessage = messages[messages.length - 1]?.content || "";
+            const isListingAll = /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(lastMessage) ||
+                                 /\b(release\s*notes?|changelog)\b/i.test(lastMessage);
+            const numPredict = isListingAll ? 4096 : 800;
+            
+            const neededTokens = estimatedTokens + numPredict + 500; // room for response
             // Minimum is 4096, and we round up to nearest 2048. Max is 32768.
             const numCtx = Math.max(4096, Math.min(32768, Math.ceil(neededTokens / 2048) * 2048));
             
-            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
+            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, num_predict: ${numPredict}`);
 
             const res = await fetch(`${baseUrl}/v1/chat/completions`, {
                 method: 'POST',
@@ -4576,7 +4594,7 @@ const OllamaAI = {
                         temperature: 0.0,
                         repeat_penalty: 1.1,
                         top_p: 0.9,
-                        num_predict: 800 // limits response generation to be bullet-fast without mid-sentence truncation
+                        num_predict: numPredict // dynamic limit based on query complexity to prevent mid-sentence truncation
                     }
                 })
             });
@@ -4722,7 +4740,7 @@ async function send(overrideText = null, silent = false) {
 
             const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
-            const isSmallModel = !!(LOCAL_AI_MODEL && /\b(1\.5b|3b|mini|3\.2)\b/i.test(LOCAL_AI_MODEL));
+            const isSmallModel = !!(LOCAL_AI_MODEL && /\b(1\.5b|3b|mini|3\.2|7b|8b|9b)\b/i.test(LOCAL_AI_MODEL));
             const corePrompt = hasLogs
                 ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
                 : getLeanQAPrompt(isSmallModel);
