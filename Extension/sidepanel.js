@@ -1573,7 +1573,7 @@ function buildInstallerFailureAnalysis(logs) {
             if (stack) report += "Stack excerpt:\n```text\n" + stack + "\n```\n";
         });
 
-    report += `\nAI instructions: From this evidence and the full log snippets, build propagation path, symptom-vs-source, conclusion, and recommendations. `;
+    report += `\nAI instructions: You MUST format your response as a strict Markdown table showing the exact CustomAction that failed with 1603 or Return value 3. `;
     report += `CRITICAL MSI RULE: The true root cause is almost ALWAYS the CustomAction, script execution, or error immediately preceding "Return value 3" or "Closing MSIHANDLE". `;
     report += `Do NOT randomly blame early SQL/login lines unless they are directly above the fatal Return value 3 rollback trigger! `;
     report += `Follow the specific MSI rules in the PRODUCT-SPECIFIC LOG SIGNATURES section if available.\n`;
@@ -2236,7 +2236,7 @@ function buildDeterministicForensicReport(logs) {
             md += `| Line ${deployPhase.lineNum}: Location Service database deployment error | **Fatal custom action** |\n`;
         }
         if (rollbackPhase || returnCode) {
-            md += `| Return ${returnCode || "1603"} / MSI rollback | **Final symptom** — not the underlying cause |\n`;
+            md += `| Return ${returnCode || "1603"} / MSI rollback | **FATAL TRIGGER** - Check the CustomAction immediately preceding this |\n`;
         }
 
         md += `\n### Root cause verdict\n\n`;
@@ -2383,7 +2383,7 @@ function buildLogPatternProfile(logs) {
     report += `- Azure SQL + ALTER DATABASE + RECOVERY SIMPLE → migration script incompatible with Azure SQL.\n`;
     report += `- Cannot open database / login failed → permissions or missing DB (often prerequisite).\n`;
     report += `- Location Service deployment + SqlException → XSight DB migration failure.\n`;
-    report += `- MSI 1603 after SQL errors → install rollback symptom, not root cause.\n`;
+    report += `- MSI 1603 or Return value 3 indicates a FATAL CustomAction failure.\n`;
     report += `- Ignore MSI noise: MSIHANDLE, System Restore, Note: 1: 1402, unless no SQL patterns exist.\n`;
     report += `=== END LOG PATTERN & KEYWORD PROFILE ===\n`;
     return report;
@@ -2439,7 +2439,7 @@ function buildMandatoryForensicChecklist(logs) {
 
         lines.push(`FILE: ${fileName} — ${fileLines.length} lines scanned`);
         if (sqlTarget) lines.push(`- SQL target: ${sqlTarget}${azureSql ? " (Azure SQL)" : ""}`);
-        if (returnMatch) lines.push(`- MSI fatal return: ${returnMatch[1]} at end of install (symptom, not root cause)`);
+        if (returnMatch) lines.push(`- MSI fatal return: ${returnMatch[1]} at end of install (CRITICAL: find the preceding CustomAction error)`);
         phases.forEach(p => lines.push(`- MUST cite Line ${p.lineNum}: ${p.title}`));
         if (alterLine >= 0) {
             lines.push(`- MUST cite Line ${alterLine + 1}: SqlException — ALTER DATABASE not supported (installer runs SET RECOVERY SIMPLE; unsupported on Azure SQL)`);
