@@ -3983,9 +3983,11 @@ function parseRequestedVersions(query, history, ci) {
     const fromQuery = [...new Set((query.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
     if (fromQuery.length) return fromQuery;
     const caseText = [ci?.meeting_notes, ci?.issue_summary, ci?.email_chain, history].filter(Boolean).join('\n');
-    const fromCase = [...new Set((caseText.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
+    const caseMatches = caseText.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || [];
+    const fromCase = [...new Set(caseMatches.reverse())];
     if (fromCase.length) return fromCase;
-    const fromHistory = [...new Set((history.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
+    const historyMatches = history.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || [];
+    const fromHistory = [...new Set(historyMatches.reverse())];
     if (fromHistory.length) return fromHistory.slice(0, 2);
     const combined = `${query} ${history}`.toLowerCase();
     const asksAgent = /\b(android|agent|aea|device agent)\b/.test(combined);
@@ -4808,8 +4810,10 @@ ${logContext}`);
                     const tok = json.choices[0]?.delta?.content || '';
                     if (tok) {
                         resp += tok;
+                        const chat = $('chatMsgs');
+                        const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
                         aib.innerHTML = md(sanitizeAssistantResponse(resp));
-                        $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
+                        if (isNearBottom) chat.scrollTop = chat.scrollHeight;
                     }
                 } catch (e) { }
             }
@@ -4838,8 +4842,10 @@ function addMsg(role, content, push = true, hidden = false) {
     const w = document.createElement('div'); w.className = `msg ${role}`;
     const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(content);
     w.appendChild(b);
-    $('chatMsgs').appendChild(w);
-    $('chatMsgs').scrollTop = $('chatMsgs').scrollHeight;
+    const chat = $('chatMsgs');
+    const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
+    chat.appendChild(w);
+    if (isNearBottom) chat.scrollTop = chat.scrollHeight;
     return b;
 }
 
