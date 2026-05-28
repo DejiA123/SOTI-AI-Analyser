@@ -1574,9 +1574,9 @@ function buildInstallerFailureAnalysis(logs) {
         });
 
     report += `\nAI instructions: From this evidence and the full log snippets, build propagation path, symptom-vs-source, conclusion, and recommendations. `;
-    report += `Do not treat early SQL/login lines as root cause unless later lines show the installer aborted because of them. `;
-    report += `Return 1603/rollback is usually a final symptom. XSFatalErrorDlg/CopyInstallationLog are post-failure UI actions. `;
-    report += `Do not assume Azure SQL, ALTER DATABASE, or a specific custom action unless quoted in cited raw lines.\n`;
+    report += `CRITICAL MSI RULE: The true root cause is almost ALWAYS the CustomAction, script execution, or error immediately preceding "Return value 3" or "Closing MSIHANDLE". `;
+    report += `Do NOT randomly blame early SQL/login lines unless they are directly above the fatal Return value 3 rollback trigger! `;
+    report += `Follow the specific MSI rules in the PRODUCT-SPECIFIC LOG SIGNATURES section if available.\n`;
     report += `=== END INSTALLER EVIDENCE ===`;
     return report;
 }
@@ -2451,7 +2451,6 @@ function buildMandatoryForensicChecklist(logs) {
     });
 
     lines.push("");
-    lines.push("FORBIDDEN as root cause: MSIHANDLE closed, System Restore sequence, Return value 3, CopyInstallationLog, disk space from MSI property lines.");
     lines.push("REQUIRED: SqlException + ALTER DATABASE + Location Service deployment + Azure SQL host if present in log.");
 
     return `\n=== MANDATORY FACTS (full-file scan — address every line above) ===\n${lines.join("\n")}\n=== END MANDATORY FACTS ===\n`;
@@ -2461,36 +2460,32 @@ function buildLogAnalysisContext(logs) {
     if (!logs || logs.length === 0) return "";
     let ctx = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
     ctx += buildLogPatternProfile(logs);
-    ctx += buildCrossLogIncidentIndex(logs, { patternMode: true });
+    ctx += buildCrossLogIncidentIndex(logs, { patternMode: false });
     logs.forEach(log => {
         const content = normalizeLogText(log.content || "");
         const name = log.name || "Attached log";
-        const lines = content.split('\n');
-        if (lines.length < 3000 || isInstallerLogContent(name, content)) return;
         ctx += `\n=== FILE: ${name} ===\n${getSmartLogSnippet(content, 200000, name)}\n=== END FILE ===\n`;
     });
     return ctx;
 }
 
 function getLogForensicsSystemPrompt() {
-    return `You are a SOTI log forensics engineer. Analyze using **keywords, patterns, and signature counts** from LOG PATTERN & KEYWORD PROFILE and CROSS-LOG INCIDENT INDEX — not line-by-line narration.
+    return `You are a SOTI log forensics engineer.
 
 Output structure:
 ## Log Analysis Report
-### Overview
-### Environment (product, SQL target, Azure SQL if pattern detected)
-### Detected patterns & keywords (group by category: SQL, MSI, Auth, Network, etc.)
-### Failure propagation (which patterns led to which — use pattern names, not line numbers)
-### Root cause vs symptom
-### Root cause verdict
+### Detected Root Cause
+### Analysis
 ### Recommendations
 
 Rules:
-- Base conclusions on **pattern combinations** (e.g. Azure SQL + ALTER DATABASE + RECOVERY SIMPLE).
-- Quote exception **messages** from signature samples when relevant; do **not** cite Line numbers or build line-by-line timelines.
-- MSI 1603 / Return value 3 are usually **symptoms** after SQL/deployment failure.
-- Ignore MSI noise (MSIHANDLE, System Restore, Note: 1: 1402) when SQL patterns are present.
-- Do not invent "PR 1/2/3" sections or generic disk-space root causes without matching patterns.`;
+- For standard service logs, use the CROSS-LOG INCIDENT INDEX.
+- For MSI/Installer logs, you MUST follow the PRODUCT-SPECIFIC LOG SIGNATURES explicitly.
+- CRITICAL: "Return value 3" and "1603" are FATAL ROLLBACK TRIGGERS in MSI logs.
+- If you see "Return value 3" or "1603", you MUST identify the exact CustomAction or failure immediately preceding them.
+- DO NOT list SQL or Authentication as the root cause if a CustomAction 1603 triggered the rollback. Ignore earlier SQL errors completely if a 1603 is present.
+- Quote exact exception messages and timestamps.
+- Match the formatting from the PRODUCT-SPECIFIC LOG SIGNATURES if applicable.`;
 }
 
 function validateForensicAIResponse(text, logs) {
@@ -4739,7 +4734,7 @@ ${imgContext}
 ${logContext}`);
 
             userMsgForModel = forensicRun && hasLogs
-                ? scrubPII(`${logContext}\n\n${txt}\n\n[Instruction: Analyze using pattern/keyword profile only — no line-by-line walkthrough. Group findings by pattern category and explain root cause from pattern combinations.]`)
+                ? scrubPII(`${logContext}\n\n${txt}`)
                 : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
