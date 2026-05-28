@@ -4577,8 +4577,8 @@ const OllamaAI = {
             const numPredict = isListingAll ? 4096 : 800;
             
             const neededTokens = estimatedTokens + numPredict + 500; // room for response
-            // Minimum is 4096, and we round up to nearest 2048. Max is 32768.
-            const numCtx = Math.max(4096, Math.min(32768, Math.ceil(neededTokens / 2048) * 2048));
+            // Minimum is 4096, round up to nearest 2048. Capped at 8192 for CPU performance on low-end hardware.
+            const numCtx = Math.max(4096, Math.min(8192, Math.ceil(neededTokens / 2048) * 2048));
             
             console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, num_predict: ${numPredict}`);
 
@@ -4594,7 +4594,8 @@ const OllamaAI = {
                         temperature: 0.0,
                         repeat_penalty: 1.1,
                         top_p: 0.9,
-                        num_predict: numPredict // dynamic limit based on query complexity to prevent mid-sentence truncation
+                        num_predict: numPredict, // dynamic limit based on query complexity to prevent mid-sentence truncation
+                        num_thread: navigator.hardwareConcurrency || 4 // Utilize all logical threads for faster CPU inference
                     }
                 })
             });
