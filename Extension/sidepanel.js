@@ -1393,7 +1393,7 @@ function getInstallerEvent(line, logName, lineNum) {
             ...base,
             classification: "Installer custom action",
             phase: "MSI custom action",
-            score: 180
+            score: 310
         };
     }
     if (/Return 1603|returning 1603|error code 1603|Fatal error|Return value 3|Installation failed|rollback/i.test(text)) {
@@ -1401,7 +1401,15 @@ function getInstallerEvent(line, logName, lineNum) {
             ...base,
             classification: "Installer abort/rollback",
             phase: "MSI rollback",
-            score: 130
+            score: 300
+        };
+    }
+    if (/Closing MSIHANDLE/i.test(text)) {
+        return {
+            ...base,
+            classification: "MSIHANDLE Closing (Immediate pre-rollback context)",
+            phase: "MSIHANDLE context",
+            score: 290
         };
     }
     if (/FQDN.*incorrect|validation.*(?:failed|warning)|could not validate/i.test(text)) {
@@ -2039,7 +2047,10 @@ function extractFailurePhases(lines) {
         { id: "alter_fatal", title: "Fatal SQL: ALTER DATABASE not supported", regex: /\bALTER DATABASE statement is not supported\b/i, radius: 85 },
         { id: "dbup", title: "DbUp upgrade failure", regex: /\bUpgrade failed due to an unexpected exception\b/i, radius: 55 },
         { id: "custom_action", title: "Location Service database deployment failed", regex: /\bLocation Service database deployment\b/i, radius: 35 },
-        { id: "rollback", title: "MSI rollback (fatal return)", regex: /\bMainEngineThread is returning 1603\b/i, radius: 15 }
+        { id: "rollback", title: "MSI rollback (fatal return)", regex: /\bMainEngineThread is returning 1603\b/i, radius: 15 },
+        { id: "return_3", title: "Return value 3 (Fatal Rollback trigger)", regex: /\bReturn value 3\b/i, radius: 25 },
+        { id: "msihandle", title: "Closing MSIHANDLE before rollback", regex: /\bClosing MSIHANDLE \(\d+\) of type \d+ for thread\b/i, radius: 25 },
+        { id: "custom_action_1603", title: "CustomAction failed with 1603", regex: /\bCustomAction .* returned actual error code 1603\b/i, radius: 25 }
     ];
     const phases = [];
     const seen = new Set();
@@ -2756,6 +2767,7 @@ function buildCrossLogIncidentIndex(logs, options = {}) {
     if (patternMode && largeInstallerLogs.length === logs.length && logs.length > 0) {
         report += `\n[Note: Large MSI/installer log(s) — analysis uses pattern/keyword profile (see LOG PATTERN & KEYWORD PROFILE). Line-by-line sweep omitted.]\n`;
         report += buildInstallerPatternSummary(logs);
+        if (installerReport) report += installerReport;
     } else {
         report += renderSignalSummary(signalSummary, "CROSS-LOG EXCEPTION / ERROR KEYWORD SWEEP");
         if (installerReport) report += installerReport;
@@ -2873,6 +2885,7 @@ function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") 
     if (totalLines >= 5000 && isInstallerLogContent(fileName, content)) {
         let focused = buildLogPatternProfile([{ name: fileName, content }]);
         focused += buildInstallerPatternSummary([{ name: fileName, content }]);
+        focused += buildInstallerFailureAnalysis([{ name: fileName, content }]);
         if (focused.length > limit) {
             focused = `${focused.slice(0, limit)}\n\n[TRUNCATED: pattern profile preserved]\n`;
         }
@@ -5131,8 +5144,14 @@ const handleFiles = async (files) => {
     renderLogs();
     saveState();
 
-    if (added.length > 0) toast('Logs uploaded', 's', 2500);
-    else hideToast();
+    if (added.length > 0) {
+        toast('Logs uploaded', 's', 2500);
+        if ($('panelR') && $('panelR').classList.contains('collapsed') && typeof $('toggleR').onclick === 'function') {
+            $('toggleR').onclick();
+        }
+    } else {
+        hideToast();
+    }
 };
 
 $('dz').onclick = () => $('fileIn').click();
