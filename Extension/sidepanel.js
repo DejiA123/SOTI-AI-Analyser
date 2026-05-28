@@ -4593,8 +4593,8 @@ const OllamaAI = {
                                  /\b(release\s*notes?|changelog)\b/i.test(lastMessage);
             const hasLogs = messages.some(m => m.content && (m.content.includes('[DIAGNOSTIC DATA') || m.content.includes('=== FILE:')));
             
-            // If listing all release notes or doing log analysis, use 8192. Otherwise use 4096 for extremely fast CPU/GPU response.
-            const maxCtxTokens = (isListingAll || hasLogs) ? 8192 : 4096;
+            // If listing all release notes or doing log analysis, use 8192. Otherwise use 2048 for extremely fast CPU/GPU response.
+            const maxCtxTokens = (isListingAll || hasLogs) ? 8192 : 2048;
             const numPredict = isListingAll ? 4096 : 800;
 
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
@@ -4632,7 +4632,7 @@ const OllamaAI = {
             }
 
             const neededTokens = estimatedTokens + numPredict + 500; // room for response
-            const numCtx = Math.max(4096, Math.min(maxCtxTokens, Math.ceil(neededTokens / 2048) * 2048));
+            const numCtx = Math.max(2048, Math.min(maxCtxTokens, Math.ceil(neededTokens / 1024) * 1024));
             
             console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, num_predict: ${numPredict}`);
 
@@ -4643,13 +4643,13 @@ const OllamaAI = {
                     model, 
                     messages, 
                     stream: true,
+                    keep_alive: -1, // Keep model loaded indefinitely for instant subsequent responses
                     options: {
                         num_ctx: numCtx,
                         temperature: 0.0,
                         repeat_penalty: 1.1,
                         top_p: 0.9,
-                        num_predict: numPredict, // dynamic limit based on query complexity to prevent mid-sentence truncation
-                        num_thread: navigator.hardwareConcurrency || 4 // Utilize all logical threads for faster CPU inference
+                        num_predict: numPredict // dynamic limit based on query complexity to prevent mid-sentence truncation
                     }
                 })
             });
@@ -5719,6 +5719,7 @@ ${JIRA_TEMPLATE}`);
                     { role: 'user', content: userPrompt }
                 ],
                 stream: false,
+                keep_alive: -1,
                 options: {
                     num_ctx: 8192,
                     temperature: 0.0,
