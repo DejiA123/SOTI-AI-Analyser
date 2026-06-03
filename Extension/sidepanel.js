@@ -4740,9 +4740,7 @@ ${logContext}`);
                 c.msgs.push({ role: 'user', content: userMsgForModel, hidden: silent });
             }
 
-            modelMessages = hasLogs
-                ? [{ role: 'system', content: sysPrompt }, c.msgs[c.msgs.length - 1]]
-                : [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)];
+            modelMessages = [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)];
         }
 
         const selectedModel = LOCAL_AI_MODEL || null;
