@@ -2,7 +2,38 @@
 const $ = id => document.getElementById(id);
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
-let busy = false;
+// Per-case busy tracking — enables simultaneous AI chats across cases
+const busyMap = new Map();       // caseId -> true/false
+const streamControllers = new Map(); // caseId -> AbortController
+const streamingElements = new Map(); // caseId -> live aib DOM element currently being streamed into
+
+// Keep-alive: prevent browser from throttling the side panel when user switches tabs.
+// Without this, the fetch/stream loop is paused mid-response when the panel is hidden.
+(function installVisibilityKeepAlive() {
+    let keepAliveInterval = null;
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            // Start a no-op interval to keep the JS event loop warm while tab is hidden
+            if (!keepAliveInterval) {
+                keepAliveInterval = setInterval(() => { /* keep-alive ping */ }, 200);
+            }
+        } else {
+            // Tab is visible again — clear the keep-alive and re-scroll to any active stream
+            if (keepAliveInterval) {
+                clearInterval(keepAliveInterval);
+                keepAliveInterval = null;
+            }
+            // Re-scroll to the live streaming element so user can see it resumed
+            if (activeCaseId) {
+                const liveEl = streamingElements.get(activeCaseId);
+                const chat = document.getElementById('chatMsgs');
+                if (liveEl && chat && chat.contains(liveEl)) {
+                    liveEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+                }
+            }
+        }
+    });
+})();
 let RELEASE_NOTES_CONTENT = "";
 let PULSE_SEARCH_RESULTS = "";
 let DOCS_SEARCH_RESULTS = "";
@@ -333,6 +364,17 @@ function switchCase(id) {
                 frag.appendChild(w);
             });
             chat.appendChild(frag);
+
+            // If this case is currently streaming, re-append the live element so the
+            // user sees the glowing dot and accumulating tokens after navigating back.
+            const liveAib = streamingElements.get(id);
+            if (liveAib) {
+                const liveWrapper = document.createElement('div');
+                liveWrapper.className = 'msg assistant';
+                liveWrapper.appendChild(liveAib);
+                chat.appendChild(liveWrapper);
+            }
+
             chat.scrollTop = chat.scrollHeight;
         }
     }
@@ -4488,6 +4530,7 @@ const OllamaAI = {
             const res = await fetch(`${baseUrl}/v1/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                signal: req.signal || null,  // AbortController signal for per-case cancellation
                 body: JSON.stringify({ 
                     model, 
                     messages, 
@@ -4512,12 +4555,13 @@ const OllamaAI = {
 };
 
 async function send(overrideText = null, silent = false) {
-    if (busy) return;
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
         toast('No active case selected', 'e');
         return;
     }
+    // Per-case busy guard — allows other cases to stream simultaneously
+    if (busyMap.get(c.id)) return;
     
     let txt = "";
     if (typeof overrideText === 'string') {
@@ -4527,8 +4571,8 @@ async function send(overrideText = null, silent = false) {
     }
 
     if (!txt && c.logs.length === 0 && c.imgs.length === 0) return;
-    busy = true; 
-    $('btnSend').disabled = true; 
+    busyMap.set(c.id, true);
+    $('btnSend').disabled = true;
     
     if (typeof overrideText !== 'string') {
         $('chatIn').value = ''; 
@@ -4592,6 +4636,8 @@ async function send(overrideText = null, silent = false) {
 
     addMsg('user', displayTxt, false, silent);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
+    // Register the live streaming element so tab switches can re-attach it to the DOM
+    streamingElements.set(c.id, aib);
     
     const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
     
@@ -4745,10 +4791,16 @@ ${logContext}`);
 
         const selectedModel = LOCAL_AI_MODEL || null;
 
+        // Create a per-case AbortController so navigating away or switching cases
+        // does NOT cancel the ongoing stream — only an explicit stop would.
+        const controller = new AbortController();
+        streamControllers.set(c.id, controller);
+
         const reader = await OllamaAI.completions.create({
             model: selectedModel,
             messages: modelMessages,
-            stream: true
+            stream: true,
+            signal: controller.signal
         });
 
         let resp = '';
@@ -4776,9 +4828,15 @@ ${logContext}`);
         }
         c.msgs.push({ role: 'assistant', content: sanitizeAssistantResponse(resp) });
         saveState();
-    } catch (e) { aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+    } catch (e) { 
+        if (e.name !== 'AbortError') {
+            aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+        }
+    }
     finally { 
-        busy = false; 
+        busyMap.set(c.id, false);
+        streamControllers.delete(c.id);
+        streamingElements.delete(c.id); // Clean up the live element reference
         $('btnSend').disabled = false;
         // Clear images after sending so they don't hang around for the next prompt
         if (c && c.imgs) {
@@ -5739,7 +5797,7 @@ $('chatMsgs').addEventListener('copy', (e) => {
 if (isChromeExtension() && chrome.storage?.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'local' && (changes.cases || changes.activeCaseId)) {
-            if (busy || _suppressStorageReload) return;
+            if ([...busyMap.values()].some(Boolean) || _suppressStorageReload) return;
             loadState();
         }
     });
