@@ -111,7 +111,7 @@ function getDefaultCI() {
 
 function getDefaultCase(name = 'Case 1') {
     return {
-        id: 'case-' + Date.now(),
+        id: 'case-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.floor(Math.random() * 10000)),
         name,
         msgs: [],
         logs: [],
@@ -255,7 +255,7 @@ async function loadState() {
         // Migration logic for old single-session data
         if (data.msgs && !data.cases) {
             const oldCase = {
-                id: 'case-' + Date.now(),
+                id: 'case-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.floor(Math.random() * 10000)),
                 name: 'Case 1',
                 msgs: data.msgs || [],
                 logs: data.logs || [],
