@@ -175,6 +175,23 @@ async function saveState() {
     try {
         if (!syncActiveCaseCiFromForm()) return;
 
+        // Write a lightweight quick-cache to sessionStorage for instant UI on next open.
+        // This is synchronous and extremely fast — it only stores tab names and the last 20 msgs.
+        try {
+            const quickCache = {
+                activeCaseId,
+                cases: cases.map(c => ({
+                    id: c.id,
+                    name: c.name,
+                    createdAt: c.createdAt,
+                    ci: c.ci,
+                    logs: (c.logs || []).map(l => ({ name: l.name, size: l.content ? l.content.length : 0 })),
+                    msgs: (c.msgs || []).filter(m => !m.hidden).slice(-20)
+                }))
+            };
+            sessionStorage.setItem('soti_ai_quick_cache', JSON.stringify(quickCache));
+        } catch (e) { /* sessionStorage may be unavailable in some contexts */ }
+
         _suppressStorageReload = true;
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             await chrome.storage.local.set({ cases, activeCaseId });
@@ -194,6 +211,27 @@ async function saveState() {
 }
 
 async function loadState() {
+    // --- PHASE 1: INSTANT RENDER from sessionStorage quick-cache (synchronous, zero delay) ---
+    // Paint the UI immediately so the user sees their cases the moment the extension opens.
+    try {
+        const raw = sessionStorage.getItem('soti_ai_quick_cache');
+        if (raw) {
+            const quick = JSON.parse(raw);
+            if (quick.cases && quick.cases.length > 0) {
+                // Inflate minimal case objects enough to render tabs and chat history
+                cases = quick.cases.map(c => ({
+                    ...c,
+                    logs: [],  // log content not cached (too large) — restored in phase 2
+                    imgs: []
+                }));
+                activeCaseId = null;
+                renderTabs();
+                switchCase(quick.activeCaseId || cases[0].id);
+            }
+        }
+    } catch (e) { /* ignore quick-cache errors, full load below will fix everything */ }
+
+    // --- PHASE 2: FULL LOAD from chrome.storage (async, replaces quick render if needed) ---
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
