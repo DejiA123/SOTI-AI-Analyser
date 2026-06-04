@@ -53,7 +53,9 @@ function isStandalonePage() {
 
 function md(t) {
     if (!t) return "";
-    return t
+    let html = t.trim()
+        // Force spacing before common inline headers if the model squashed them
+        .replace(/(^|\s+)(\*\*)?(Time of the meeting|Summary|Troubleshooting steps|Next steps|Additional Information|Note|Date|Time|Device|Issue|Root Cause|Resolution|Action):\s*(\*\*)?/gi, '\n\n**$3:** ')
         .replace(/```([\s\S]*?)```/g, '<div style="background:rgba(0,0,0,0.3); padding:12px; border-radius:8px; font-family:monospace; margin:15px 0; border:1px solid rgba(255,255,255,0.1); white-space:pre-wrap; word-break:break-all; font-size:12px">$1</div>')
         .replace(/\*\*\s*([\s\S]*?)\s*\*\*/g, '<strong>$1</strong>')
         .replace(/\*\s*([\s\S]*?)\s*\*/g, '<em>$1</em>')
@@ -65,6 +67,9 @@ function md(t) {
         .replace(/\n/g, '<br>')
         .replace(/^\s*(\d+\.)\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
         .replace(/^\s*[•*-]\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>');
+        
+    // Clean up any stray leading/trailing breaks that might have been injected
+    return html.replace(/^(<br>|<div style="margin-bottom:18px"><\/div>|\s)+/, '').replace(/(<br>|<div style="margin-bottom:18px"><\/div>|\s)+$/, '');
 }
 
 function sanitizeAssistantResponse(text) {
@@ -3391,6 +3396,7 @@ VERSIONING (always apply):
 - Core topology: Management Service <-> SQL <-> Deployment Server <-> Device Agent | Ports: 5494, 13131, 2197, 443
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
+- **Formatting**: ALWAYS use proper Markdown formatting. Place section headers (like 'Summary:', 'Troubleshooting Steps:', 'Next Steps:') on their own new lines. Use bullet points for steps and ensure there is a blank line between paragraphs to maximize readability.
 - **Strive for Extreme Brevity**: Keep answers as short as possible. Do NOT write conversational preambles (like "Here is the information you requested..." or "Here are the highlights...") or conversational postambles (like "If you have any other questions, let me know...", "Hope this helps...", or "Remember to stay up-to-date..."). Start directly with the answer or bullet points, and stop immediately.
 - **Troubleshooting Case Constraint**: You are strictly forbidden from asking for logs, asking for Salesforce sync, or displaying the Transparency Brief unless the user is explicitly starting a troubleshooting/investigation case (e.g., describing an active error/problem and asking you to troubleshoot). For general version checks, definitions, port checks, or release notes queries, output ONLY the direct facts or notes and NOTHING else.
 - **Transparency Brief**: ONLY at the start of a troubleshooting case analysis, briefly list:
