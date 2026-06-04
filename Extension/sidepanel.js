@@ -124,6 +124,8 @@ function getDefaultCase(name = 'Case 1') {
 let _suppressStorageReload = false;
 let _saveStateTimer = null;
 let _renderTabsTimer = null;
+let _switchTimer = null;    // debounce rapid tab clicks
+let _pendingSwitchId = null; // the last-clicked tab ID waiting to activate
 
 function buildCaseCiFromForm() {
     return {
@@ -330,6 +332,9 @@ async function loadState() {
 }
 
 function createNewCase() {
+    // Cancel any pending tab switch and renderTabs timers
+    if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; _pendingSwitchId = null; }
+    if (_renderTabsTimer) { clearTimeout(_renderTabsTimer); _renderTabsTimer = null; }
     // Find the highest number in existing case names to determine next name
     let nextNum = cases.length + 1;
     const names = cases.map(c => c.name);
@@ -343,8 +348,39 @@ function createNewCase() {
     switchCase(newCase.id);
 }
 
+// Immediately highlight the clicked tab so the UI feels instant,
+// then debounce the full content switch so rapid clicks only run once.
 function switchCase(id) {
-    if (activeCaseId === id && cases.find(x => x.id === id)) return;
+    if (!id || !cases.find(x => x.id === id)) {
+        if (cases.length > 0) switchCase(cases[0].id);
+        return;
+    }
+
+    // Optimistic highlight: give immediate visual feedback on every click
+    document.querySelectorAll('.tab-item').forEach(t =>
+        t.classList.toggle('active', t.dataset.id === id)
+    );
+
+    // If already on this tab and fully rendered, nothing more to do
+    if (activeCaseId === id) return;
+
+    // Record intent and debounce: only honour the LAST click within 30 ms
+    _pendingSwitchId = id;
+    if (_switchTimer) {
+        clearTimeout(_switchTimer);
+    }
+    _switchTimer = setTimeout(() => {
+        _switchTimer = null;
+        const targetId = _pendingSwitchId;
+        _pendingSwitchId = null;
+        _applySwitchCase(targetId);
+    }, 30);
+}
+
+function _applySwitchCase(id) {
+    // Re-validate: after debounce the user might have clicked back to the current tab
+    const c = cases.find(x => x.id === id);
+    if (!c || activeCaseId === id) return;
 
     if (_saveStateTimer) {
         clearTimeout(_saveStateTimer);
@@ -354,20 +390,11 @@ function switchCase(id) {
         clearTimeout(_renderTabsTimer);
         _renderTabsTimer = null;
     }
-    
-    const c = cases.find(x => x.id === id);
-    if (!c) {
-        // If the ID is invalid, fallback to the first case if possible
-        if (cases.length > 0) {
-            switchCase(cases[0].id);
-        }
-        return;
-    }
 
-    // Capture old case data from DOM into memory SYNCHRONOUSLY before switching
+    // Snapshot the OLD case's form values into memory before we overwrite the DOM
     if (activeCaseId) syncActiveCaseCiFromForm();
     activeCaseId = id;
-    
+
     // Update UI Fields
     $('caseNum').value = c.ci.caseNum || '';
     $('sotiVer').value = c.ci.sotiVer || '';
@@ -384,11 +411,11 @@ function switchCase(id) {
     $('jiraPriority').value = c.ci.jiraPriority || 'Medium';
     $('jiraRepro').value = c.ci.jiraRepro || '';
 
-    // Re-render Chat safely with DocumentFragment
+    // Re-render Chat
     const chat = $('chatMsgs');
     if (chat) {
         chat.querySelectorAll('.msg').forEach(m => m.remove());
-        
+
         if (c.msgs.length === 0) {
             if ($('welcome')) $('welcome').style.display = 'flex';
         } else {
@@ -403,8 +430,7 @@ function switchCase(id) {
             });
             chat.appendChild(frag);
 
-            // If this case is currently streaming, re-append the live element so the
-            // user sees the glowing dot and accumulating tokens after navigating back.
+            // Re-attach any live streaming element for this case
             const liveAib = streamingElements.get(id);
             if (liveAib) {
                 const liveWrapper = document.createElement('div');
@@ -416,30 +442,32 @@ function switchCase(id) {
             chat.scrollTop = chat.scrollHeight;
         }
     }
-    
+
     renderImgs();
     renderLogs();
     updateAllValidations();
-    // Update tab classes manually to avoid scroll jump/flicker
-    const tabs = document.querySelectorAll('.tab-item');
-    tabs.forEach(t => t.classList.toggle('active', t.dataset.id === id));
 
-    // Defer storage write — don't block the UI
+    // Sync the active highlight (may have changed during the 30 ms debounce window)
+    document.querySelectorAll('.tab-item').forEach(t =>
+        t.classList.toggle('active', t.dataset.id === id)
+    );
+
+    // Single deferred storage write — replaces any stacked rAFs from rapid clicks
     requestAnimationFrame(() => {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            chrome.storage.local.set({ cases, activeCaseId }).catch(e => {
-                console.error('SwitchCase save failed', e);
-            });
+            chrome.storage.local.set({ cases, activeCaseId }).catch(e =>
+                console.error('SwitchCase save failed', e)
+            );
         } else {
-            try {
-                localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
-            } catch(e) {}
+            try { localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId })); } catch(e) {}
         }
     });
 }
 
 function closeCase(id, e) {
     if (e) e.stopPropagation();
+    // Cancel any pending debounced switch — a close is always immediate
+    if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; _pendingSwitchId = null; }
     if (cases.length <= 1) {
         const c = cases[0];
         c.name = 'Case 1';
@@ -472,48 +500,77 @@ function renderTabs() {
     const bar = $('tabBar');
     if (!bar) return;
     const scrollLeft = bar.scrollLeft;
-    const frag = document.createDocumentFragment();
-    cases.forEach((c, i) => {
-        const t = document.createElement('div');
-        t.className = `tab-item ${c.id === activeCaseId ? 'active' : ''}`;
-        t.dataset.id = c.id;
-        t.draggable = true;
-        t.onclick = () => switchCase(c.id);
-        
-        t.ondragstart = (e) => {
-            e.dataTransfer.setData('text/plain', i);
-            t.classList.add('dragging');
-        };
-        t.ondragend = () => t.classList.remove('dragging');
-        t.ondragover = (e) => e.preventDefault();
-        t.ondrop = (e) => {
-            e.preventDefault();
-            const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
-            const toIdx = i;
-            if (fromIdx === toIdx) return;
-            const [moved] = cases.splice(fromIdx, 1);
-            cases.splice(toIdx, 0, moved);
-            renderTabs();
-            saveState();
-        };
 
-        const name = document.createElement('span');
-        name.className = 'tab-name';
-        name.textContent = c.ci.caseNum ? `Case ${c.ci.caseNum}` : c.name;
-        
-        const close = document.createElement('div');
-        close.className = 'tab-close';
-        close.textContent = '×';
-        close.onclick = (e) => closeCase(c.id, e);
-        
-        t.appendChild(name);
-        t.appendChild(close);
-        frag.appendChild(t);
+    // --- Smart in-place patch ---
+    // Build a map of existing tab elements by case ID so we can reuse them.
+    // This avoids destroying DOM nodes mid-click, which was causing the glitch.
+    const existingMap = new Map();
+    bar.querySelectorAll('.tab-item').forEach(el => {
+        existingMap.set(el.dataset.id, el);
     });
-    bar.innerHTML = '';
-    bar.appendChild(frag);
+
+    const usedIds = new Set();
+
+    cases.forEach((c, i) => {
+        const label = c.ci.caseNum ? `Case ${c.ci.caseNum}` : c.name;
+        let t = existingMap.get(c.id);
+
+        if (!t) {
+            // Brand-new tab — create the element
+            t = document.createElement('div');
+            t.dataset.id = c.id;
+            t.draggable = true;
+
+            const name = document.createElement('span');
+            name.className = 'tab-name';
+            t.appendChild(name);
+
+            const close = document.createElement('div');
+            close.className = 'tab-close';
+            close.textContent = '×';
+            close.onclick = (e) => closeCase(c.id, e);
+            t.appendChild(close);
+
+            // Wire click on the tab itself (not the close button)
+            t.onclick = (e) => {
+                if (e.target.classList.contains('tab-close')) return;
+                switchCase(c.id);
+            };
+            t.ondragstart = (e) => {
+                e.dataTransfer.setData('text/plain', i);
+                t.classList.add('dragging');
+            };
+            t.ondragend = () => t.classList.remove('dragging');
+            t.ondragover = (e) => e.preventDefault();
+            t.ondrop = (e) => {
+                e.preventDefault();
+                const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+                const toIdx = cases.findIndex(x => x.id === c.id);
+                if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+                const [moved] = cases.splice(fromIdx, 1);
+                cases.splice(toIdx, 0, moved);
+                renderTabs();
+                saveState();
+            };
+        }
+
+        // Always update class and label (cheap — no DOM destruction)
+        t.className = `tab-item${c.id === activeCaseId ? ' active' : ''}`;
+        t.querySelector('.tab-name').textContent = label;
+        usedIds.add(c.id);
+
+        // Ensure correct order: append moves it to the right position
+        bar.appendChild(t);
+    });
+
+    // Remove tabs for cases that no longer exist
+    existingMap.forEach((el, id) => {
+        if (!usedIds.has(id)) bar.removeChild(el);
+    });
+
     bar.scrollLeft = scrollLeft;
 }
+
 
 
 
