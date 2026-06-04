@@ -124,8 +124,6 @@ function getDefaultCase(name = 'Case 1') {
 let _suppressStorageReload = false;
 let _saveStateTimer = null;
 let _renderTabsTimer = null;
-let _switchTimer = null;    // debounce rapid tab clicks
-let _pendingSwitchId = null; // the last-clicked tab ID waiting to activate
 
 function buildCaseCiFromForm() {
     return {
@@ -332,8 +330,7 @@ async function loadState() {
 }
 
 function createNewCase() {
-    // Cancel any pending tab switch and renderTabs timers
-    if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; _pendingSwitchId = null; }
+    // Cancel any pending renderTabs timer
     if (_renderTabsTimer) { clearTimeout(_renderTabsTimer); _renderTabsTimer = null; }
     // Find the highest number in existing case names to determine next name
     let nextNum = cases.length + 1;
@@ -348,126 +345,116 @@ function createNewCase() {
     switchCase(newCase.id);
 }
 
-// Immediately highlight the clicked tab so the UI feels instant,
-// then debounce the full content switch so rapid clicks only run once.
+let _switching = false; // true while switchCase is executing — blocks field handlers
+
 function switchCase(id) {
     if (!id || !cases.find(x => x.id === id)) {
-        if (cases.length > 0) switchCase(cases[0].id);
+        if (cases.length > 0 && cases[0].id !== id) switchCase(cases[0].id);
         return;
     }
 
-    // Optimistic highlight: give immediate visual feedback on every click
-    document.querySelectorAll('.tab-item').forEach(t =>
-        t.classList.toggle('active', t.dataset.id === id)
-    );
-
-    // If already on this tab and fully rendered, nothing more to do
-    if (activeCaseId === id) return;
-
-    // Record intent and debounce: only honour the LAST click within 30 ms
-    _pendingSwitchId = id;
-    if (_switchTimer) {
-        clearTimeout(_switchTimer);
-    }
-    _switchTimer = setTimeout(() => {
-        _switchTimer = null;
-        const targetId = _pendingSwitchId;
-        _pendingSwitchId = null;
-        _applySwitchCase(targetId);
-    }, 30);
-}
-
-function _applySwitchCase(id) {
-    // Re-validate: after debounce the user might have clicked back to the current tab
-    const c = cases.find(x => x.id === id);
-    if (!c || activeCaseId === id) return;
-
-    if (_saveStateTimer) {
-        clearTimeout(_saveStateTimer);
-        _saveStateTimer = null;
-    }
-    if (_renderTabsTimer) {
-        clearTimeout(_renderTabsTimer);
-        _renderTabsTimer = null;
+    // If already fully rendered on this tab, just ensure highlight is correct
+    if (activeCaseId === id) {
+        document.querySelectorAll('.tab-item').forEach(t =>
+            t.classList.toggle('active', t.dataset.id === id)
+        );
+        return;
     }
 
-    // Snapshot the OLD case's form values into memory before we overwrite the DOM
-    if (activeCaseId) syncActiveCaseCiFromForm();
-    activeCaseId = id;
+    // Reentrance guard — if we're already mid-switch, just update the target
+    if (_switching) return;
+    _switching = true;
 
-    // Update UI Fields
-    $('caseNum').value = c.ci.caseNum || '';
-    $('sotiVer').value = c.ci.sotiVer || '';
-    $('platform').value = c.ci.platform || '';
-    $('agentVer').value = c.ci.agentVer || '';
-    $('scrubAccount').value = c.ci.scrubAccount || '';
-    $('scrubCustomer').value = c.ci.scrubCustomer || '';
-    $('meetingNotes').value = c.ci.meetingNotes || '';
-    $('issueSummary').value = c.ci.issueSummary || '';
-    $('product').value = c.ci.product || '';
-    $('emailChain').value = c.ci.emailChain || '';
-    $('jiraExpected').value = c.ci.jiraExpected || '';
-    $('jiraImpact').value = c.ci.jiraImpact || '';
-    $('jiraPriority').value = c.ci.jiraPriority || 'Medium';
-    $('jiraRepro').value = c.ci.jiraRepro || '';
+    // Cancel all pending timers — we're doing a definitive switch right now
+    if (_saveStateTimer) { clearTimeout(_saveStateTimer); _saveStateTimer = null; }
+    if (_renderTabsTimer) { clearTimeout(_renderTabsTimer); _renderTabsTimer = null; }
 
-    // Re-render Chat
-    const chat = $('chatMsgs');
-    if (chat) {
-        chat.querySelectorAll('.msg').forEach(m => m.remove());
+    try {
+        const c = cases.find(x => x.id === id);
+        if (!c) { _switching = false; return; }
 
-        if (c.msgs.length === 0) {
-            if ($('welcome')) $('welcome').style.display = 'flex';
-        } else {
-            if ($('welcome')) $('welcome').style.display = 'none';
-            const frag = document.createDocumentFragment();
-            c.msgs.forEach(m => {
-                if (m.hidden) return;
-                const w = document.createElement('div'); w.className = `msg ${m.role}`;
-                const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(m.content);
-                w.appendChild(b);
-                frag.appendChild(w);
-            });
-            chat.appendChild(frag);
+        // Snapshot the OLD case's form values before overwriting the DOM
+        if (activeCaseId) syncActiveCaseCiFromForm();
+        activeCaseId = id;
 
-            // Re-attach any live streaming element for this case
-            const liveAib = streamingElements.get(id);
-            if (liveAib) {
-                const liveWrapper = document.createElement('div');
-                liveWrapper.className = 'msg assistant';
-                liveWrapper.appendChild(liveAib);
-                chat.appendChild(liveWrapper);
+        // Update UI Fields
+        $('caseNum').value = c.ci.caseNum || '';
+        $('sotiVer').value = c.ci.sotiVer || '';
+        $('platform').value = c.ci.platform || '';
+        $('agentVer').value = c.ci.agentVer || '';
+        $('scrubAccount').value = c.ci.scrubAccount || '';
+        $('scrubCustomer').value = c.ci.scrubCustomer || '';
+        $('meetingNotes').value = c.ci.meetingNotes || '';
+        $('issueSummary').value = c.ci.issueSummary || '';
+        $('product').value = c.ci.product || '';
+        $('emailChain').value = c.ci.emailChain || '';
+        $('jiraExpected').value = c.ci.jiraExpected || '';
+        $('jiraImpact').value = c.ci.jiraImpact || '';
+        $('jiraPriority').value = c.ci.jiraPriority || 'Medium';
+        $('jiraRepro').value = c.ci.jiraRepro || '';
+
+        // Re-render Chat
+        const chat = $('chatMsgs');
+        if (chat) {
+            chat.querySelectorAll('.msg').forEach(m => m.remove());
+
+            if (c.msgs.length === 0) {
+                if ($('welcome')) $('welcome').style.display = 'flex';
+            } else {
+                if ($('welcome')) $('welcome').style.display = 'none';
+                const frag = document.createDocumentFragment();
+                c.msgs.forEach(m => {
+                    if (m.hidden) return;
+                    const w = document.createElement('div'); w.className = `msg ${m.role}`;
+                    const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(m.content);
+                    w.appendChild(b);
+                    frag.appendChild(w);
+                });
+                chat.appendChild(frag);
+
+                // Re-attach any live streaming element for this case
+                const liveAib = streamingElements.get(id);
+                if (liveAib) {
+                    const liveWrapper = document.createElement('div');
+                    liveWrapper.className = 'msg assistant';
+                    liveWrapper.appendChild(liveAib);
+                    chat.appendChild(liveWrapper);
+                }
+
+                chat.scrollTop = chat.scrollHeight;
             }
-
-            chat.scrollTop = chat.scrollHeight;
         }
+
+        renderImgs();
+        renderLogs();
+        updateAllValidations();
+
+        // Update tab highlight
+        document.querySelectorAll('.tab-item').forEach(t =>
+            t.classList.toggle('active', t.dataset.id === id)
+        );
+
+        // Deferred storage write — suppress onChanged so it doesn't re-trigger loadState
+        _suppressStorageReload = true;
+        requestAnimationFrame(() => {
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.set({ cases, activeCaseId }).catch(e =>
+                    console.error('SwitchCase save failed', e)
+                ).finally(() => {
+                    setTimeout(() => { _suppressStorageReload = false; }, 80);
+                });
+            } else {
+                try { localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId })); } catch(e) {}
+                setTimeout(() => { _suppressStorageReload = false; }, 80);
+            }
+        });
+    } finally {
+        _switching = false;
     }
-
-    renderImgs();
-    renderLogs();
-    updateAllValidations();
-
-    // Sync the active highlight (may have changed during the 30 ms debounce window)
-    document.querySelectorAll('.tab-item').forEach(t =>
-        t.classList.toggle('active', t.dataset.id === id)
-    );
-
-    // Single deferred storage write — replaces any stacked rAFs from rapid clicks
-    requestAnimationFrame(() => {
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            chrome.storage.local.set({ cases, activeCaseId }).catch(e =>
-                console.error('SwitchCase save failed', e)
-            );
-        } else {
-            try { localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId })); } catch(e) {}
-        }
-    });
 }
 
 function closeCase(id, e) {
     if (e) e.stopPropagation();
-    // Cancel any pending debounced switch — a close is always immediate
-    if (_switchTimer) { clearTimeout(_switchTimer); _switchTimer = null; _pendingSwitchId = null; }
     if (cases.length <= 1) {
         const c = cases[0];
         c.name = 'Case 1';
@@ -5003,6 +4990,7 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
     const el = $(id);
     if (el) {
         const onFieldInput = () => {
+            if (_switching) return; // Don't process field events during tab switch
             syncActiveCaseCiFromForm();
             requestAnimationFrame(() => updateFieldValidation(id));
             if (id === 'caseNum') scheduleRenderTabs();
@@ -5010,6 +4998,7 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
             scheduleSaveState();
         };
         const onFieldCommit = () => {
+            if (_switching) return; // Don't process field events during tab switch
             syncActiveCaseCiFromForm();
             updateFieldValidation(id);
             if (id === 'caseNum') renderTabs();
