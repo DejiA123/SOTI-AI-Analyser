@@ -3647,13 +3647,18 @@ function extractPulseReleaseNoteBlocks(html) {
     const blocks = [];
 
     let globalVersion = null;
-    const allHeadings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, .text-3xl'));
-    for (const h of allHeadings) {
-        const m = (h.textContent || "").match(versionHeadingRx);
+    const allElements = Array.from(doc.querySelectorAll('h1, h2, h3, h4, .text-3xl, .text-2xl, span, p > strong, div > span'));
+    for (const el of allElements) {
+        const m = (el.textContent || "").match(versionHeadingRx);
         if (m) {
             globalVersion = m[1];
             break;
         }
+    }
+    
+    if (!globalVersion) {
+        const bodyMatch = (doc.body.textContent || "").match(versionHeadingRx);
+        if (bodyMatch) globalVersion = bodyMatch[1];
     }
 
     const layoutItems = Array.from(doc.querySelectorAll('.umb-block-grid__layout-item'));
@@ -3751,6 +3756,28 @@ function extractPulseReleaseNoteBlocks(html) {
         });
         flushPulseNoteBuckets(ver, buckets, blocks);
     });
+    
+    if (blocks.length === 0 && globalVersion) {
+        const types = ["Resolved Issues", "Highlights", "Known Issues"];
+        types.forEach(type => {
+            const rx = new RegExp(`<h2[^>]*>\\s*${type}\\s*<\\/h2>.*?(?:<tbody|<ul)[^>]*>(.*?)(?:<\\/tbody>|<\\/ul>)`, 'is');
+            const m = (html || "").match(rx);
+            if (m) {
+                let text = "";
+                const items = m[1].match(/<(?:tr|li)[^>]*>.*?<\/(?:tr|li)>/gis) || [];
+                items.forEach(item => {
+                    const cleanItem = item.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+                    if (cleanItem.length > 10 && !cleanItem.toLowerCase().includes('ticket number')) {
+                        text += "- " + cleanItem + "\n";
+                    }
+                });
+                if (text.trim()) {
+                    blocks.push({ version: globalVersion, type: type, text: text.trim() });
+                }
+            }
+        });
+    }
+
     return blocks;
 }
 
@@ -4085,8 +4112,34 @@ async function searchPulseAndDocs(query, msgs, ci) {
             for (const { url, type } of pulseSources) {
                 toast(`Fetching ${type} notes from Pulse...`, 'i');
                 
-                const queryVersionsEarly = parseRequestedVersions(query, history, ci);
-                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
+                let queryVersionsEarly = parseRequestedVersions(query, history, ci);
+                
+                // Fallback to cached VERSIONS if available
+                if (queryVersionsEarly.length === 0) {
+                    const isAgent = /\b(android|agent|aea|device agent)\b/i.test(query);
+                    const isIdentity = /\b(identity)\b/i.test(query);
+                    if (isAgent && typeof AGENT_VERSIONS !== 'undefined' && AGENT_VERSIONS.length > 0) queryVersionsEarly = [AGENT_VERSIONS[0]];
+                    else if (isIdentity && typeof IDENTITY_VERSIONS !== 'undefined' && IDENTITY_VERSIONS.length > 0) queryVersionsEarly = [IDENTITY_VERSIONS[0]];
+                    else if (typeof VERSIONS !== 'undefined' && VERSIONS.length > 0) queryVersionsEarly = [VERSIONS[0]];
+                }
+
+                let pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
+                
+                // Chicken and Egg: if VERSIONS was empty, fetchPulseReleaseBlocksForVersion(url, []) just populated it!
+                if (queryVersionsEarly.length === 0) {
+                    const isAgent = /\b(android|agent|aea|device agent)\b/i.test(query);
+                    const isIdentity = /\b(identity)\b/i.test(query);
+                    if (isAgent && typeof AGENT_VERSIONS !== 'undefined' && AGENT_VERSIONS.length > 0) queryVersionsEarly = [AGENT_VERSIONS[0]];
+                    else if (isIdentity && typeof IDENTITY_VERSIONS !== 'undefined' && IDENTITY_VERSIONS.length > 0) queryVersionsEarly = [IDENTITY_VERSIONS[0]];
+                    else if (typeof VERSIONS !== 'undefined' && VERSIONS.length > 0) queryVersionsEarly = [VERSIONS[0]];
+                    
+                    if (queryVersionsEarly.length > 0) {
+                        pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
+                    } else {
+                        throw new Error("No version provided and unable to automatically discover latest versions from SOTI Pulse");
+                    }
+                }
+                
                 const blocks = pulseLoad.blocks;
                 const resolvedUrl = pulseLoad.fetchUrl;
                 if (blocks.length) {
@@ -4740,34 +4793,6 @@ async function send(overrideText = null, silent = false) {
         let modelMessages = [];
         let userMsgForModel = txt;
         const qLower = (txt || "").toLowerCase();
-        
-        let bypassContent = null;
-        if (qLower.includes('enroll') && (qLower.includes('android') || qLower.includes('work managed'))) {
-            bypassContent = `To enroll your Android device as Work Managed (Device Owner mode), you must first factory reset the device. Here are the 3 mandatory methods:\n\n**Method 1: QR Code Enrollment (Most Common)**\n- Factory reset the device and power it on to the Welcome screen.\n- Tap the screen 6 times in the exact same spot to trigger the QR reader.\n- Connect to Wi-Fi.\n- Scan the Enrollment QR code provided by the MDM (SOTI MobiControl).\n- Accept prompts to let the device download the management app and complete setup.\n\n**Method 2: Token Enrollment**\n- Factory reset the device.\n- Proceed through the setup wizard. When asked for a Google account, type \`afw#mobicontrol\` (legacy) or \`afw#setup\`.\n- The device will download the SOTI MobiControl agent. Enter your Enrollment ID when prompted.\n\n**Method 3: Zero-Touch / Knox Mobile Enrollment (KME)**\n- For bulk deployments. The device MAC/IMEI is added to the Google Zero-Touch or Samsung KME portal by the reseller.\n- The user powers on the device, connects to Wi-Fi, and it automatically installs the MDM agent during setup.`;
-        } else if (qLower.includes('latest') || qLower.includes('version')) {
-            if (qLower.includes('agent') || qLower.includes('android')) {
-                bypassContent = AGENT_VERSIONS.length > 0 ? `The latest Android Agent version is ${AGENT_VERSIONS[0]}.` : "I am currently unable to fetch the live agent version data from SOTI Pulse.";
-            } else if (qLower.includes('identity')) {
-                bypassContent = IDENTITY_VERSIONS.length > 0 ? `The latest version of SOTI Identity is ${IDENTITY_VERSIONS[0]}.` : "I am currently unable to fetch the live identity version data from SOTI Pulse.";
-            } else if (qLower.includes('mobicontrol') || qLower.includes('console') || qLower.includes('server')) {
-                bypassContent = VERSIONS.length > 0 ? `The latest version of MobiControl is ${VERSIONS[0]}.` : "I am currently unable to fetch the live version data from SOTI Pulse.";
-            }
-        } else if (/\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since|what\s+is\s+fixed|what\s+got\s+fixed|fixes\s+for|patch\s+notes?)\b/i.test(qLower)) {
-            bypassContent = RELEASE_NOTES_CONTENT && !RELEASE_NOTES_CONTENT.includes('ERROR:') 
-                ? `Here are the release notes from SOTI Pulse:\n\n${RELEASE_NOTES_CONTENT}`
-                : "I am currently unable to fetch the live release notes from SOTI Pulse. Please check the official SOTI documentation site.";
-        }
-
-        if (bypassContent) {
-            c.msgs.push({ role: 'user', content: txt, hidden: silent });
-            c.msgs.push({ role: 'assistant', content: bypassContent, hidden: false });
-            saveState();
-            aib.innerHTML = typeof md === 'function' ? md(bypassContent) : bypassContent;
-            streamingElements.delete(c.id);
-            const chatEl = document.getElementById('chat');
-            if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
-            return;
-        }
 
         if (isGreeting) {
             sysPrompt = "You are SOTI AI, a technical architect assistant for the SOTI ONE Platform. Respond politely to the user's greeting, ask how you can help, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
@@ -4902,19 +4927,33 @@ async function send(overrideText = null, silent = false) {
                 ? scrubPII(`${logContext}\n\n${txt}`)
                 : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
 
-            if (knowledgeBaseText) {
-                const qLower = (txt || "").toLowerCase();
-                let injectionInstruction = "[STRICT SYSTEM INSTRUCTION: Answer the user's question using ONLY the data provided below. Do not invent details.]";
-                let injectionData = `<OFFICIAL_DOCUMENTATION>\n${knowledgeBaseText}\n</OFFICIAL_DOCUMENTATION>`;
-                
-                if (qLower.includes('enroll')) {
-                    injectionInstruction = "[CRITICAL INSTRUCTION: You MUST output ALL methods found in the OFFICIAL DOCUMENTATION. Do not summarize. Do not skip any steps. You must list Method 1, Method 2, and Method 3 in full.]";
-                } else if (qLower.includes('version')) {
-                    injectionInstruction = "[CRITICAL INSTRUCTION: Answer with the EXACT number from the LIVE_VERSIONS data below. If it says MISSING_DATA, say 'I do not have the live version data loaded.']";
-                    let mcVers = VERSIONS.length > 0 ? VERSIONS[0] : "MISSING_DATA";
-                    injectionData = `<LIVE_VERSIONS>\nMobiControl Latest: ${mcVers}\n</LIVE_VERSIONS>`;
+            // Pure AI Prompt Injection Layer
+            const qLowerPrompt = (txt || "").toLowerCase();
+            let injectionInstruction = "";
+            let injectionData = "";
+
+            if (/\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since|what\s+is\s+fixed|what\s+got\s+fixed|fixes\s+for|patch\s+notes?)\b/i.test(qLowerPrompt)) {
+                injectionInstruction = "[CRITICAL INSTRUCTION: Output the release notes from the LIVE_DATA section EXACTLY. Do not summarize. Do not invent details or URLs. If the data says ERROR or MISSING_DATA, output the exact error message and nothing else.]";
+                injectionData = `<LIVE_DATA>\nRelease Notes:\n${RELEASE_NOTES_CONTENT || 'MISSING_DATA'}\n</LIVE_DATA>`;
+            } else if (qLowerPrompt.includes('enroll')) {
+                if (qLowerPrompt.includes('work profile') || qLowerPrompt.includes('byod')) {
+                    injectionInstruction = "[CRITICAL INSTRUCTION: The user is asking about Work Profile (BYOD) enrollment. You MUST output these 5 steps exactly: 1. Open Google Play Store. 2. Download SOTI MobiControl. 3. Enter Enrollment ID. 4. Accept Work Profile creation. 5. Wait for configuration. DO NOT output Work Managed factory reset steps.]";
+                } else {
+                    injectionInstruction = "[CRITICAL INSTRUCTION: The user is asking about Work Managed (Device Owner) enrollment. You MUST output Method 1 (QR Code), Method 2 (Token), and Method 3 (Zero-Touch). Do not summarize. Do not skip steps.]";
+                    injectionData = knowledgeBaseText ? `<OFFICIAL_DOCUMENTATION>\n${knowledgeBaseText}\n</OFFICIAL_DOCUMENTATION>` : "";
                 }
-                
+            } else if (qLowerPrompt.includes('latest') || qLowerPrompt.includes('version')) {
+                injectionInstruction = "[CRITICAL INSTRUCTION: Answer with the EXACT number from the LIVE_VERSIONS data below. If it says MISSING_DATA, say 'I am currently unable to fetch the live version data.']";
+                let vConsole = VERSIONS.length > 0 ? VERSIONS[0] : "MISSING_DATA";
+                let vAgent = AGENT_VERSIONS.length > 0 ? AGENT_VERSIONS[0] : "MISSING_DATA";
+                let vIdentity = IDENTITY_VERSIONS.length > 0 ? IDENTITY_VERSIONS[0] : "MISSING_DATA";
+                injectionData = `<LIVE_VERSIONS>\nMobiControl Latest: ${vConsole}\nAndroid Agent Latest: ${vAgent}\nIdentity Latest: ${vIdentity}\n</LIVE_VERSIONS>`;
+            } else if (knowledgeBaseText) {
+                injectionInstruction = "[STRICT SYSTEM INSTRUCTION: Answer the user's question using ONLY the OFFICIAL DOCUMENTATION below. Do not invent details.]";
+                injectionData = `<OFFICIAL_DOCUMENTATION>\n${knowledgeBaseText}\n</OFFICIAL_DOCUMENTATION>`;
+            }
+
+            if (injectionInstruction) {
                 userMsgForModel = `${injectionInstruction}\n\n${injectionData}\n\nUser Question: ${userMsgForModel}`;
             }
 
