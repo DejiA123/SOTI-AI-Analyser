@@ -3760,7 +3760,7 @@ function extractPulseReleaseNoteBlocks(html) {
     if (blocks.length === 0 && globalVersion) {
         const types = ["Resolved Issues", "Highlights", "Known Issues"];
         types.forEach(type => {
-            const rx = new RegExp(`<h2[^>]*>\\s*${type}\\s*<\\/h2>.*?(?:<tbody|<ul)[^>]*>(.*?)(?:<\\/tbody>|<\\/ul>)`, 'is');
+            const rx = new RegExp(`<h[1-6][^>]*>\\s*${type}\\s*<\\/h[1-6]>.*?(?:<tbody|<ul)[^>]*>(.*?)(?:<\\/tbody>|<\\/ul>)`, 'is');
             const m = (html || "").match(rx);
             if (m) {
                 let text = "";
@@ -4932,7 +4932,7 @@ async function send(overrideText = null, silent = false) {
             let injectionInstruction = "";
             let injectionData = "";
 
-            if (/\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since|what\s+is\s+fixed|what\s+got\s+fixed|fixes\s+for|patch\s+notes?)\b/i.test(qLowerPrompt)) {
+            if (/\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since|what\s+is\s+fixed|what\s+got\s+fixed|fixes\s+for|patch\s+notes?|fixes\s+are\s+in|fixes\b)\b/i.test(qLowerPrompt)) {
                 injectionInstruction = "[CRITICAL INSTRUCTION: Output the release notes from the LIVE_DATA section EXACTLY. Do not summarize. Do not invent details or URLs. If the data says ERROR or MISSING_DATA, output the exact error message and nothing else.]";
                 injectionData = `<LIVE_DATA>\nRelease Notes:\n${RELEASE_NOTES_CONTENT || 'MISSING_DATA'}\n</LIVE_DATA>`;
             } else if (qLowerPrompt.includes('enroll')) {
