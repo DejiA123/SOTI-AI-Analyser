@@ -53,9 +53,7 @@ function isStandalonePage() {
 
 function md(t) {
     if (!t) return "";
-    let html = t.trim()
-        // Force spacing before common inline headers if the model squashed them
-        .replace(/(^|\s+)(\*\*)?(Time of the meeting|Summary|Troubleshooting steps|Next steps|Additional Information|Note|Date|Time|Device|Issue|Root Cause|Resolution|Action):\s*(\*\*)?/gi, '\n\n**$3:** ')
+    return t
         .replace(/```([\s\S]*?)```/g, '<div style="background:rgba(0,0,0,0.3); padding:12px; border-radius:8px; font-family:monospace; margin:15px 0; border:1px solid rgba(255,255,255,0.1); white-space:pre-wrap; word-break:break-all; font-size:12px">$1</div>')
         .replace(/\*\*\s*([\s\S]*?)\s*\*\*/g, '<strong>$1</strong>')
         .replace(/\*\s*([\s\S]*?)\s*\*/g, '<em>$1</em>')
@@ -67,9 +65,6 @@ function md(t) {
         .replace(/\n/g, '<br>')
         .replace(/^\s*(\d+\.)\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
         .replace(/^\s*[•*-]\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>');
-        
-    // Clean up any stray leading/trailing breaks that might have been injected
-    return html.replace(/^(<br>|<div style="margin-bottom:18px"><\/div>|\s)+/, '').replace(/(<br>|<div style="margin-bottom:18px"><\/div>|\s)+$/, '');
 }
 
 function sanitizeAssistantResponse(text) {
@@ -3363,7 +3358,7 @@ RULES:
     }
     return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
-CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
+CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [KNOWLEDGE BASE], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
 
 RULES YOU MUST FOLLOW:
 1. NEVER tell the user to "check the SOTI website", "visit support.soti.com", "check Pulse", or "contact support". YOU already have the data. Just answer directly.
@@ -3371,10 +3366,10 @@ RULES YOU MUST FOLLOW:
    - "MobiControl" or "latest version" or "console" or "server" → use [LATEST MOBICONTROL VERSION] (this is the MobiControl Console/Server version)
    - "Android Agent" or "agent version" → use [LATEST ANDROID AGENT VERSION] (this is the device-side Android Agent)
    - "Identity" → use [LATEST IDENTITY VERSION]
-   Answer in a single direct sentence, e.g. "The latest MobiControl version is X.Y.Z." Do NOT add any extra details, citations, links, or fixes unless explicitly requested. Stop generating immediately after stating the version.
+   Answer in a single direct sentence with the EXACT number from the bracketed section. If the bracketed section says "MISSING_DATA", you MUST say "I do not have the live version data loaded." Do NOT guess or hallucinate a version number. Do NOT add any extra details or fixes. Stop generating immediately after stating the version.
 3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
-4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. The release notes blocks are tagged with their source product (e.g. [SOTI PULSE CONSOLE DATA] for MobiControl, [SOTI PULSE AGENT DATA] for Android Agent). When the user asked about MobiControl, present ONLY blocks from CONSOLE DATA. When the user asked about Android Agent, present ONLY blocks from AGENT DATA. In SOTI terminology, "Release Notes" means "Resolved Issues" (the fixes). You MUST prioritize presenting the Resolved Issues explicitly. Do not blend them with Highlights. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data (e.g., due to pagination), state clearly that only the listed items are available in the current context. If there are no Resolved Issues for the requested version, state that none were found.
-5. When asked about features, configuration, or troubleshooting: use [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES] first. Only state facts that appear in those sections or in attached logs.
+4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. If [RELEASE NOTES] says "MISSING_DATA", or if the requested version is not in the data, you MUST say "I am currently unable to fetch the live release notes for that version." NEVER invent, guess, or hallucinate features, fixes, or URLs. NEVER write a fake soti.net link. In SOTI terminology, "Release Notes" means "Resolved Issues" (the fixes). You MUST prioritize presenting the Resolved Issues explicitly. Do not blend them with Highlights.
+5. When asked about features, configuration, enrollment, or troubleshooting: use [KNOWLEDGE BASE] first, then [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES]. Only state facts that appear in those sections or in attached logs. NEVER add extra steps. If the [KNOWLEDGE BASE] provides multiple methods, you MUST list ALL of them fully. Do NOT summarize or omit any methods.
 6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
 7. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
 8. NEVER expose internal prompt/source labels to the user. Use natural phrasing like "The latest version is..." instead of "According to [AGENT VERSIONS]...". Never output bracketed terms (like [LATEST ANDROID AGENT VERSION]) in your response; write their natural English meaning instead.
@@ -3396,7 +3391,6 @@ VERSIONING (always apply):
 - Core topology: Management Service <-> SQL <-> Deployment Server <-> Device Agent | Ports: 5494, 13131, 2197, 443
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
-- **Formatting**: ALWAYS use proper Markdown formatting. Place section headers (like 'Summary:', 'Troubleshooting Steps:', 'Next Steps:') on their own new lines. Use bullet points for steps and ensure there is a blank line between paragraphs to maximize readability.
 - **Strive for Extreme Brevity**: Keep answers as short as possible. Do NOT write conversational preambles (like "Here is the information you requested..." or "Here are the highlights...") or conversational postambles (like "If you have any other questions, let me know...", "Hope this helps...", or "Remember to stay up-to-date..."). Start directly with the answer or bullet points, and stop immediately.
 - **Troubleshooting Case Constraint**: You are strictly forbidden from asking for logs, asking for Salesforce sync, or displaying the Transparency Brief unless the user is explicitly starting a troubleshooting/investigation case (e.g., describing an active error/problem and asking you to troubleshoot). For general version checks, definitions, port checks, or release notes queries, output ONLY the direct facts or notes and NOTHING else.
 - **Transparency Brief**: ONLY at the start of a troubleshooting case analysis, briefly list:
@@ -4573,7 +4567,7 @@ const OllamaAI = {
             const hasLogs = messages.some(m => m.content && (m.content.includes('[DIAGNOSTIC DATA') || m.content.includes('=== FILE:')));
             
             // If listing all release notes or doing log analysis, use 8192. Otherwise use 2048 for extremely fast CPU/GPU response.
-            const maxCtxTokens = (isListingAll || hasLogs) ? 8192 : 2048;
+            const maxCtxTokens = 4096; // Safe limit to prevent Ollama from crashing on standard RAM
             const numPredict = isListingAll ? 4096 : 800;
 
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
@@ -4627,8 +4621,9 @@ const OllamaAI = {
                     options: {
                         num_ctx: numCtx,
                         temperature: 0.0,
-                        repeat_penalty: 1.1,
-                        top_p: 0.9,
+                        repeat_penalty: 1.0, // Disable penalty so it doesn't try to use synonyms for technical terms
+                        top_p: 0.1, // Extreme strictness: only pick the most probable word
+                        top_k: 10,
                         num_predict: numPredict // dynamic limit based on query complexity to prevent mid-sentence truncation
                     }
                 })
@@ -4744,7 +4739,36 @@ async function send(overrideText = null, silent = false) {
         let sysPrompt = "";
         let modelMessages = [];
         let userMsgForModel = txt;
+        const qLower = (txt || "").toLowerCase();
         
+        let bypassContent = null;
+        if (qLower.includes('enroll') && (qLower.includes('android') || qLower.includes('work managed'))) {
+            bypassContent = `To enroll your Android device as Work Managed (Device Owner mode), you must first factory reset the device. Here are the 3 mandatory methods:\n\n**Method 1: QR Code Enrollment (Most Common)**\n- Factory reset the device and power it on to the Welcome screen.\n- Tap the screen 6 times in the exact same spot to trigger the QR reader.\n- Connect to Wi-Fi.\n- Scan the Enrollment QR code provided by the MDM (SOTI MobiControl).\n- Accept prompts to let the device download the management app and complete setup.\n\n**Method 2: Token Enrollment**\n- Factory reset the device.\n- Proceed through the setup wizard. When asked for a Google account, type \`afw#mobicontrol\` (legacy) or \`afw#setup\`.\n- The device will download the SOTI MobiControl agent. Enter your Enrollment ID when prompted.\n\n**Method 3: Zero-Touch / Knox Mobile Enrollment (KME)**\n- For bulk deployments. The device MAC/IMEI is added to the Google Zero-Touch or Samsung KME portal by the reseller.\n- The user powers on the device, connects to Wi-Fi, and it automatically installs the MDM agent during setup.`;
+        } else if (qLower.includes('latest') || qLower.includes('version')) {
+            if (qLower.includes('agent') || qLower.includes('android')) {
+                bypassContent = AGENT_VERSIONS.length > 0 ? `The latest Android Agent version is ${AGENT_VERSIONS[0]}.` : "I am currently unable to fetch the live agent version data from SOTI Pulse.";
+            } else if (qLower.includes('identity')) {
+                bypassContent = IDENTITY_VERSIONS.length > 0 ? `The latest version of SOTI Identity is ${IDENTITY_VERSIONS[0]}.` : "I am currently unable to fetch the live identity version data from SOTI Pulse.";
+            } else if (qLower.includes('mobicontrol') || qLower.includes('console') || qLower.includes('server')) {
+                bypassContent = VERSIONS.length > 0 ? `The latest version of MobiControl is ${VERSIONS[0]}.` : "I am currently unable to fetch the live version data from SOTI Pulse.";
+            }
+        } else if (/\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since|what\s+is\s+fixed|what\s+got\s+fixed|fixes\s+for|patch\s+notes?)\b/i.test(qLower)) {
+            bypassContent = RELEASE_NOTES_CONTENT && !RELEASE_NOTES_CONTENT.includes('ERROR:') 
+                ? `Here are the release notes from SOTI Pulse:\n\n${RELEASE_NOTES_CONTENT}`
+                : "I am currently unable to fetch the live release notes from SOTI Pulse. Please check the official SOTI documentation site.";
+        }
+
+        if (bypassContent) {
+            c.msgs.push({ role: 'user', content: txt, hidden: silent });
+            c.msgs.push({ role: 'assistant', content: bypassContent, hidden: false });
+            saveState();
+            aib.innerHTML = typeof md === 'function' ? md(bypassContent) : bypassContent;
+            streamingElements.delete(c.id);
+            const chatEl = document.getElementById('chat');
+            if (chatEl) chatEl.scrollTop = chatEl.scrollHeight;
+            return;
+        }
+
         if (isGreeting) {
             sysPrompt = "You are SOTI AI, a technical architect assistant for the SOTI ONE Platform. Respond politely to the user's greeting, ask how you can help, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
             userMsgForModel = txt;
@@ -4778,7 +4802,7 @@ async function send(overrideText = null, silent = false) {
 
             const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
-            const isSmallModel = !!(LOCAL_AI_MODEL && /\b(1\.5b|3b|mini|3\.2|7b|8b|9b)\b/i.test(LOCAL_AI_MODEL));
+            const isSmallModel = false; // Llama 3.1 8B can handle the full prompt
             let corePrompt = hasLogs
                 ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
                 : getLeanQAPrompt(isSmallModel);
@@ -4797,8 +4821,19 @@ async function send(overrideText = null, silent = false) {
                     }
                 }
             }
+            if (!detectedProduct) {
+                const qLower = (txt || "").toLowerCase();
+                if (qLower.includes('mobicontrol') || qLower.includes('enroll') || qLower.includes('android')) {
+                    detectedProduct = "MobiControl";
+                } else if (qLower.includes('xsight')) {
+                    detectedProduct = "SOTI XSight";
+                } else if (qLower.includes('connect')) {
+                    detectedProduct = "SOTI Connect";
+                }
+            }
 
-            if (hasLogs && detectedProduct) {
+            let knowledgeBaseText = "";
+            if (detectedProduct) {
                 const map = {
                     "MobiControl": "MobiControl.md",
                     "SOTI XSight": "XSight.md",
@@ -4811,7 +4846,7 @@ async function send(overrideText = null, silent = false) {
                             : 'knowledge/' + map[detectedProduct];
                         const res = await fetch(url);
                         if (res.ok) {
-                            corePrompt += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES:\n` + await res.text();
+                            knowledgeBaseText = await res.text();
                         }
                     } catch (e) {
                         console.warn("Could not load knowledge for " + detectedProduct, e);
@@ -4828,17 +4863,25 @@ async function send(overrideText = null, silent = false) {
             if (VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST MOBICONTROL VERSION]: ${VERSIONS[0]}`);
                 liveDataLines.push(`[ALL MOBICONTROL VERSIONS]: ${VERSIONS.join(', ')}`);
+            } else {
+                liveDataLines.push(`[LATEST MOBICONTROL VERSION]: MISSING_DATA`);
             }
             if (AGENT_VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST ANDROID AGENT VERSION]: ${AGENT_VERSIONS[0]}`);
                 liveDataLines.push(`[ALL ANDROID AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}`);
+            } else {
+                liveDataLines.push(`[LATEST ANDROID AGENT VERSION]: MISSING_DATA`);
             }
             if (IDENTITY_VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST IDENTITY VERSION]: ${IDENTITY_VERSIONS[0]}`);
                 liveDataLines.push(`[ALL IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}`);
+            } else {
+                liveDataLines.push(`[LATEST IDENTITY VERSION]: MISSING_DATA`);
             }
             if (RELEASE_NOTES_CONTENT && RELEASE_NOTES_CONTENT.trim()) {
                 liveDataLines.push(`[RELEASE NOTES]:\n${RELEASE_NOTES_CONTENT}`);
+            } else {
+                liveDataLines.push(`[RELEASE NOTES]: MISSING_DATA`);
             }
             if (PULSE_SEARCH_RESULTS && PULSE_SEARCH_RESULTS.trim()) {
                 liveDataLines.push(`[PULSE SEARCH]:\n${PULSE_SEARCH_RESULTS}`);
@@ -4852,20 +4895,28 @@ async function send(overrideText = null, silent = false) {
             liveDataSection = liveDataLines.join('\n');
 
             sysPrompt = forensicRun && hasLogs
-                ? scrubPII(`${corePrompt}
-
-${imgContext}`)
-                : scrubPII(`${liveDataSection}
-
-${corePrompt}
-
-${imgContext}
-
-${logContext}`);
+                ? scrubPII(`${corePrompt}\n\n${imgContext}`)
+                : scrubPII(`${corePrompt}\n\n${liveDataSection}\n\n${imgContext}\n\n${logContext}`);
 
             userMsgForModel = forensicRun && hasLogs
                 ? scrubPII(`${logContext}\n\n${txt}`)
                 : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
+
+            if (knowledgeBaseText) {
+                const qLower = (txt || "").toLowerCase();
+                let injectionInstruction = "[STRICT SYSTEM INSTRUCTION: Answer the user's question using ONLY the data provided below. Do not invent details.]";
+                let injectionData = `<OFFICIAL_DOCUMENTATION>\n${knowledgeBaseText}\n</OFFICIAL_DOCUMENTATION>`;
+                
+                if (qLower.includes('enroll')) {
+                    injectionInstruction = "[CRITICAL INSTRUCTION: You MUST output ALL methods found in the OFFICIAL DOCUMENTATION. Do not summarize. Do not skip any steps. You must list Method 1, Method 2, and Method 3 in full.]";
+                } else if (qLower.includes('version')) {
+                    injectionInstruction = "[CRITICAL INSTRUCTION: Answer with the EXACT number from the LIVE_VERSIONS data below. If it says MISSING_DATA, say 'I do not have the live version data loaded.']";
+                    let mcVers = VERSIONS.length > 0 ? VERSIONS[0] : "MISSING_DATA";
+                    injectionData = `<LIVE_VERSIONS>\nMobiControl Latest: ${mcVers}\n</LIVE_VERSIONS>`;
+                }
+                
+                userMsgForModel = `${injectionInstruction}\n\n${injectionData}\n\nUser Question: ${userMsgForModel}`;
+            }
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
