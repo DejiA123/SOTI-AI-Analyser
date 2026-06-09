@@ -2867,7 +2867,7 @@ async function buildLogAnalysisContext(logs) {
     ctx += await buildCrossLogIncidentIndex(logs, { patternMode: false });
     const isLocalAI = !!LOCAL_AI_MODEL;
     const smartLimit = isLocalAI 
-        ? Math.max(20000, Math.floor(80000 / Math.max(1, logs.length)))
+        ? Math.max(3000, Math.floor(12000 / Math.max(1, logs.length)))
         : 200000;
     for (const log of logs) {
         const content = log.content || "";
@@ -4971,9 +4971,9 @@ const OllamaAI = {
                                  /\b(release\s*notes?|changelog)\b/i.test(lastMessage);
             const hasLogs = messages.some(m => m.content && (m.content.includes('[DIAGNOSTIC DATA') || m.content.includes('=== FILE:')));
             
-            // If listing all release notes or doing log analysis, use 8192. Otherwise use 2048 for extremely fast CPU/GPU response.
-            const maxCtxTokens = (isListingAll || hasLogs) ? 8192 : 2048;
-            const numPredict = isListingAll ? 4096 : 800;
+            // If listing all release notes or doing log analysis, use 32768. Otherwise use 8192 for fast response.
+            const maxCtxTokens = (isListingAll || hasLogs) ? 32768 : 8192;
+            const numPredict = isListingAll ? 4096 : 1024;
 
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
             let estimatedTokens = Math.ceil(totalChars / 3.5);
@@ -5173,7 +5173,7 @@ async function send(overrideText = null, silent = false) {
                     logContext += await buildCrossLogIncidentIndex(c.logs, { patternMode: true });
                     const isLocalAI = !!LOCAL_AI_MODEL;
                     const perLogLimit = isLocalAI 
-                        ? Math.max(15000, Math.floor(75000 / Math.max(1, c.logs.length)))
+                        ? Math.max(3000, Math.floor(12000 / Math.max(1, c.logs.length)))
                         : Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
                     for (const l of c.logs) {
                         logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, perLogLimit, l.name, l.lines)}\n=== END: ${l.name} ===`;
@@ -5256,13 +5256,15 @@ async function send(overrideText = null, silent = false) {
             }
             liveDataSection = liveDataLines.join('\n');
 
-            sysPrompt = scrubPII(`${corePrompt}
+            sysPrompt = scrubPII(`${liveDataSection}
+
+${corePrompt}
 
 ${imgContext}
 
 ${logContext}`);
 
-            userMsgForModel = scrubPII(`${liveDataSection}\n\n${txt}`);
+            userMsgForModel = scrubPII(txt);
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
