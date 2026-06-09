@@ -4995,7 +4995,7 @@ const OllamaAI = {
                         if (availableChars > 1000) {
                             messages[0].content = preLogText + sysText.substring(logIndex).slice(0, availableChars - 100) + "\n\n[LOG DATA TRUNCATED TO FIT CONTEXT BUDGET]";
                         } else {
-                            messages[0].content = preLogText.slice(0, Math.max(2000, maxAllowedChars - 100)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
+                            messages[0].content = preLogText.slice(0, Math.max(2000, maxAllowedChars - otherMsgsChars - 100)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
                         }
                     }
                 } else {
@@ -5256,21 +5256,13 @@ async function send(overrideText = null, silent = false) {
             }
             liveDataSection = liveDataLines.join('\n');
 
-            sysPrompt = forensicRun && hasLogs
-                ? scrubPII(`${corePrompt}
-
-${imgContext}`)
-                : scrubPII(`${liveDataSection}
-
-${corePrompt}
+            sysPrompt = scrubPII(`${corePrompt}
 
 ${imgContext}
 
 ${logContext}`);
 
-            userMsgForModel = forensicRun && hasLogs
-                ? scrubPII(`${logContext}\n\n${txt}`)
-                : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
+            userMsgForModel = scrubPII(`${liveDataSection}\n\n${txt}`);
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
@@ -6031,7 +6023,6 @@ $('btnGenerateJira').onclick = async () => {
 
     // Gather pre-parsed log facts and build deep log context
     let parsedLogFacts = "";
-    let logCtx = "No logs attached.";
     let prefilledServerOS = "TBC";
     let prefilledSQLVersion = "TBC";
     let prefilledOSVersionSQL = "TBC";
@@ -6103,7 +6094,6 @@ $('btnGenerateJira').onclick = async () => {
                 }
             }
         }
-        logCtx = await buildLogAnalysisContext(c.logs);
     }
     if (!rawSnippets) {
         rawSnippets = "[No high-signal SQL or MSI logs detected]";
@@ -6262,9 +6252,6 @@ ${parsedLogFacts}
 
 - Conversation History:
 ${chatCtx}
-
-- Attached Logs Analysis Context:
-${logCtx}
 
 ### OFFICIAL SOTI JIRA TEMPLATE (FILL THIS OUT):
 ${JIRA_TEMPLATE}`);
