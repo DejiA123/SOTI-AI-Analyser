@@ -5258,6 +5258,8 @@ async function send(overrideText = null, silent = false) {
 
             sysPrompt = scrubPII(`${liveDataSection}
 
+[CRITICAL INSTRUCTION: You MUST read and retain the [CASE] and [ISSUE SUMMARY] information provided above. Even when analyzing logs, you must cross-reference the logs with the user's reported case notes, and you MUST answer any direct questions the user asks about the case info.]
+
 ${corePrompt}
 
 ${imgContext}
