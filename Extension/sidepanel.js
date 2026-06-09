@@ -6032,6 +6032,10 @@ $('btnGenerateJira').onclick = async () => {
     // Gather pre-parsed log facts and build deep log context
     let parsedLogFacts = "";
     let logCtx = "No logs attached.";
+    let prefilledServerOS = "TBC";
+    let prefilledSQLVersion = "TBC";
+    let prefilledOSVersionSQL = "TBC";
+    let rawSnippets = "";
     if (c.logs.length > 0) {
         parsedLogFacts += "### PRE-PARSED LOG DETAILS:\n";
         for (const log of c.logs) {
@@ -6044,98 +6048,160 @@ $('btnGenerateJira').onclick = async () => {
                 if (log.panelIntel.firstTimestamp) {
                     parsedLogFacts += `  * Log Timeframe: ${log.panelIntel.firstTimestamp} to ${log.panelIntel.lastTimestamp}\n`;
                 }
+                if (log.panelIntel.sqlTarget) {
+                    prefilledSQLVersion = log.panelIntel.sqlTarget;
+                    if (log.panelIntel.azureSql) {
+                        prefilledSQLVersion = `Azure SQL Database (${log.panelIntel.sqlTarget})`;
+                        prefilledOSVersionSQL = "Azure PaaS";
+                    }
+                }
+            }
+
+            await precomputeLogIntel(log);
+            const { prefilteredIndices, timestampCache, intelCache } = log.precomputedIntel;
+            const lines = log.lines || [];
+            
+            const phases = await extractFailurePhases(lines, log);
+            const sqlFacts = await collectDistinctSqlFacts(lines, log);
+            
+            if (phases.length > 0 || sqlFacts.length > 0) {
+                rawSnippets += `\n--- Failure evidence from ${log.name} ---\n`;
+                if (phases.length > 0) {
+                    rawSnippets += `Chronological phases:\n`;
+                    phases.forEach(p => {
+                        rawSnippets += `Line ${p.lineNum} @ ${p.timestamp || 'No Timestamp'}: ${p.title}\n`;
+                        if (p.window && p.window.text) {
+                            rawSnippets += p.window.text.trim().split('\n').slice(0, 10).map(l => "  " + l).join('\n') + "\n";
+                        }
+                    });
+                }
+                if (sqlFacts.length > 0) {
+                    rawSnippets += `Unique SQL Messages:\n`;
+                    sqlFacts.slice(0, 8).forEach(sf => {
+                        rawSnippets += `Line ${sf.lineNum} @ ${sf.timestamp || 'No Timestamp'}: ${sf.text}\n`;
+                    });
+                }
+            } else {
+                // Fallback to top candidates
+                const candidateLines = [];
+                for (let idx = 0; idx < prefilteredIndices.length; idx++) {
+                    const lineIdx = prefilteredIndices[idx];
+                    const intel = intelCache[lineIdx];
+                    if (intel.isForensic && !intel.hasStackFrame) {
+                        candidateLines.push({
+                            lineNum: lineIdx + 1,
+                            text: lines[lineIdx].trim(),
+                            timestamp: timestampCache[lineIdx] || ""
+                        });
+                    }
+                }
+                if (candidateLines.length > 0) {
+                    rawSnippets += `\n--- High-signal events from ${log.name} ---\n`;
+                    candidateLines.slice(0, 8).forEach(cl => {
+                        rawSnippets += `Line ${cl.lineNum} @ ${cl.timestamp}: ${cl.text}\n`;
+                    });
+                }
             }
         }
         logCtx = await buildLogAnalysisContext(c.logs);
     }
+    if (!rawSnippets) {
+        rawSnippets = "[No high-signal SQL or MSI logs detected]";
+    }
+
+    const prefilledAgentVer = agentVer !== 'N/A' ? agentVer : 'TBC';
+    const prefilledSotiVer = sotiVer !== 'N/A' ? sotiVer : 'TBC';
+    const prefilledPlatform = platform !== 'N/A' ? platform : 'TBC';
+    const prefilledLogNames = c.logs.length > 0 ? c.logs.map(l => l.name).join(', ') : 'N/A';
 
     const JIRA_TEMPLATE = `*{color:#de350b}Requirements for the Jira Filing: [https://wiki.soti.net/index.php?title=Artifacts_Required_for_Jira]{color}*
 
 *{color:#de350b}Please fill in all the details.{color}*
 h1. {color:#4c9aff}*Background*{color}
 h3. *Description of Issue:*
- * {color:#172b4d}Enter a comprehensive description of the issue which includes the action, components, and behavior.{color}
+ * [AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]
 
 h3. *Expected Behavior:*
- * Enter the expected outcome of performed actions.
+ * ${expected !== 'N/A' ? expected : '[AI: Generate expected behavior details]'}
 
 h3. *Known Issues:*
- * Please link known Jira tickets, if any.
+ * Please link known Jira tickets, if any (TBC).
 
 h3. *Detailed Description of Business Impact:*
-h3. *Justification of Priority:* (Please refer to [https://jira.soti.net/secure/ShowConstantsHelp.jspa?decorator=popup#PriorityLevels] for priority descriptions. It is mandatory that the Jira priority has a valid justification.)
+ * ${impact !== 'N/A' ? impact : '[AI: Generate business impact summary]'}
+
+h3. *Justification of Priority:*
+ * [AI: Provide a clear justification for why this is ${priority} priority]
+
 h3. *Number of Devices Affected:*
+ * ${affDev !== 'N/A' ? affDev : 'TBC'}
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Environment:*{color}
 
-Which MC Server Version did it work on before?
+Which MC Server Version did it work on before?: TBC
 
-Any recent changes?:
+Any recent changes?: TBC
 
-Server Count and Details:
+Server Count and Details: TBC
 
-Server OS Version:
+Server OS Version: ${prefilledServerOS}
 
-System Requirements verified?
+System Requirements verified?: Yes
 
-SQL Version:
+SQL Version: ${prefilledSQLVersion}
 
-Server OS Version for SQL server:
+Server OS Version for SQL server: ${prefilledOSVersionSQL}
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Device Details*{color}
 
-Affected Platforms (Android/Windows/iOS):
+Affected Platforms (Android/Windows/iOS): ${prefilledPlatform}
 
-Enrollment type (AEDO, COPE, iOS ADE, Windows Modern, Classic etc.):
+Enrollment type (AEDO, COPE, iOS ADE, Windows Modern, Classic etc.): TBC
 
-MobiControl Agent Version:
+MobiControl Agent Version: ${prefilledAgentVer}
 
-Plug-in version:
+Plug-in version: N/A
 
-Which agent version did it work on?
+Which agent version did it work on?: TBC
 
-Any Recent changes:
+Any Recent changes: TBC
 
-Affected Devices Manufacturer:
+Affected Devices Manufacturer: TBC
 
-Affected Model:
+Affected Model: TBC
 
-Affected OS Version:
+Affected OS Version: TBC
 
-Affected OEM Version:
+Affected OEM Version: TBC
 
-Browser Used (If applicable):
+Browser Used (If applicable): N/A
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Other SOTI Apps*{color}
 
-SOTI Surf/Settings Manager/HUB version:
+SOTI Surf/Settings Manager/HUB version: N/A
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Troubleshooting Steps:*{color}
 
 *Workarounds Suggested:*
- * Step1 + Result
- * Step2 + Result
- * So on...
+ * [AI: List workarounds attempted or suggested based on context]
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Issue Reproduction*{color}
 
 Repro Steps: PLEASE OUTLINE THE STEPS IN DETAIL
- # Step 1
- # Step 2
- # So on...
+${repro !== 'N/A' ? repro : ' # Step 1\n # Step 2'}
 
-Is the issue reproducible in-house?
+Is the issue reproducible in-house?: TBC
 
-Repro Environment Details:
+Repro Environment Details: TBC
 
-Results:
+Results: [AI: Describe results of repro attempts if any]
 
-Screenshot and video of the issue:
+Screenshot and video of the issue: TBC
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Log Details*{color}
@@ -6143,39 +6209,38 @@ h1. {color:#4c9aff}*Log Details*{color}
  * If log file >15 MB, share log location under S:\\CustomerData
  * If SFTP is needed, please share link and use Password State to share the credentials
 
-*Detailed Time Stamps and Time zone (device and end-user) of the repro steps:*
+*Detailed Time Stamps and Time zone (device and end-user) of the repro steps:* TBC
 
-DeviceID/Devid:
+DeviceID/Devid: TBC
 
-Name of the log file:
+Name of the log file: ${prefilledLogNames}
 
 Log Analysis:
 {code:java}
-[INSERT RAW LOG SNIPPETS HERE]
+${rawSnippets.trim()}
 {code}
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*L3/SME Engineer*{color}
 
-Name:
+Name: TBC
 
 Analysis:
+[AI: Write a professional, detailed engineering analysis explaining the failure mechanics]
 
-Otherwise, why was L3/SME not consulted:`;
+Otherwise, why was L3/SME not consulted: Consulted SOTI AI Analyser`;
 
-    const systemPrompt = `You are a SOTI Tier 3 Support AI. Your task is to populate the OFFICIAL SOTI JIRA TEMPLATE perfectly using the provided Case Info, Conversation History, Notes, and Log Details.
+    const systemPrompt = `You are a SOTI Tier 3 Support AI. Your task is to refine and fill in the OFFICIAL SOTI JIRA TEMPLATE using the provided Source Data.
 
-### CRITICAL INSTRUCTIONS FOR FILLING FIELDS:
-1. BACKGROUND -> Description of Issue: Write a comprehensive, detailed description of the problem, including the action performed, the components involved, and the behavior observed.
-2. BACKGROUND -> Expected Behavior: Fill this in clearly with the expected outcome.
-3. BACKGROUND -> Business Impact & Justification of Priority: Provide a clear, professional technical justification matching the priority ('High', 'Medium', 'Low') selected by the user.
-4. ENVIRONMENT & DEVICE DETAILS: Carefully extract values for SQL Version, Server OS, Platform OS, Agent Version, AEDO/Classic enrollment type, etc. from the context, notes, and log details. If not found, use "TBC" (To Be Confirmed) or "N/A" instead of leaving them empty.
-5. TROUBLESHOOTING & REPRODUCTION: Fill in the workarounds suggested and the step-by-step reproduction instructions based on the notes, conversation history, and repro steps provided.
-6. LOG DETAILS: In the {code:java} block under 'Log Analysis', extract and insert the actual raw log error lines, SQL exceptions, or installer rollback triggers with their exact timestamps from the attached logs. DO NOT write placeholder text or summaries inside the {code:java} block; insert only the actual raw technical evidence.
-7. L3/SME Engineer -> Analysis: Provide a professional, detailed engineering analysis explaining the failure mechanics.
+### CRITICAL INSTRUCTIONS:
+1. Replace all placeholders (like "[AI: ...]") with intelligent, detailed technical text generated from the notes, case summary, conversation history, and repro steps.
+2. DO NOT modify or remove the pre-filled values in the template (such as SQL Version, Server OS Version, Agent Version, Name of the log file, or the raw log snippets inside the code block) unless you have more specific information to update them with.
+3. For BACKGROUND -> Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
+4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
+5. For Troubleshooting Steps and L3/SME Engineer Analysis: Formulate a highly detailed, professional engineering analysis explaining the likely root cause and mechanics of the failure based on the notes and logs.
 
 ### FORMATTING RULES:
-- OUTPUT ONLY the filled SOTI JIRA template.
+- OUTPUT ONLY the completed SOTI JIRA template.
 - DO NOT include any preamble, introduction, or concluding remarks.
 - PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
 - YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
