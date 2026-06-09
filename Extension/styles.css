@@ -818,12 +818,14 @@ body {
     width: 30%;
     border-radius: 2px;
     position: absolute;
+    left: 0;
+    transform: translateX(-100%);
     animation: progress-slide 2s infinite ease-in-out;
 }
 
 @keyframes progress-slide {
-    0% { left: -30%; }
-    100% { left: 100%; }
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(333.3%); }
 }
 
 @keyframes slideUp {

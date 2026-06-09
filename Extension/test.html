@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script>
+    window.chrome = { runtime: { getURL: (p) => p } };
+</script>
+<script src="sidepanel.js"></script>
+<script>
+    async function test() {
+        try {
+            await searchPulseAndDocs("How do enroll my android device as work managed", [], {});
+            document.body.innerText = "SUCCESS\n\n" + RESEARCHED_ARTICLE_CONTENT.substring(0, 1500);
+        } catch (e) {
+            document.body.innerText = "ERROR\n\n" + e.stack;
+        }
+    }
+    window.onload = test;
+</script>
+</head>
+<body>WAITING</body>
+</html>
