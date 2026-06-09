@@ -1,5 +1,5 @@
 # SOTI AI Analyser - Local AI Auto-Setup
-# Uses official https://ollama.com/install.ps1 then downloads qwen2.5:7b.
+# Uses official https://ollama.com/install.ps1 then downloads llama3.1.
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -148,16 +148,16 @@ function Wait-OllamaApi {
     return $false
 }
 
-function Install-QwenModel {
+function Install-Llama32Model {
     param([string]$OllamaExe)
-    Write-Header "Step 3: Install qwen2.5:7b model (~4.7GB)"
-    Write-Info 'Running: ollama pull qwen2.5:7b - downloads the model for the extension...'
-    & $OllamaExe pull qwen2.5:7b
+    Write-Header "Step 3: Install llama3.1 model (~2GB)"
+    Write-Info 'Running: ollama pull llama3.1 - downloads the model for the extension...'
+    & $OllamaExe pull llama3.1
     if ($LASTEXITCODE -ne 0) {
-        Write-Err "Model download failed. Try manually: ollama pull qwen2.5:7b"
+        Write-Err "Model download failed. Try manually: ollama pull llama3.1"
         return $false
     }
-    Write-Success "qwen2.5:7b is installed and ready for ollama run qwen2.5:7b"
+    Write-Success "llama3.1 is installed and ready for ollama run llama3.1"
     return $true
 }
 
@@ -217,14 +217,14 @@ if (-not (Wait-OllamaApi)) {
     Write-Err "Ollama API not responding to setup checks."
     Write-Info "If http://127.0.0.1:11434 works in your browser, continue manually:"
     Write-Info "  1. In extension Settings set URL to: http://127.0.0.1:11434"
-    Write-Info "  2. Run in PowerShell: ollama pull qwen2.5:7b"
+    Write-Info "  2. Run in PowerShell: ollama pull llama3.1"
     Write-Info 'Corporate proxy/AV often blocks PowerShell HTTP to localhost - use 127.0.0.1 in extension Settings.'
     exit 1
 }
 Write-Success "Ollama API is running."
 
 # --- Step 3: Model ---
-if (-not (Install-QwenModel -OllamaExe $ollamaExe)) {
+if (-not (Install-Llama32Model -OllamaExe $ollamaExe)) {
     exit 1
 }
 

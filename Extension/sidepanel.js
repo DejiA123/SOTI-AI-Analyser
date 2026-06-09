@@ -53,18 +53,41 @@ function isStandalonePage() {
 
 function md(t) {
     if (!t) return "";
-    return t
+    let html = t.trim()
+        // 1. Fix token-mashing where AI forgets spaces around bold tags (e.g. the**Android**tab)
+        .replace(/([A-Za-z0-9.,])\*\*/g, '$1 **')
+        .replace(/\*\*([A-Za-z0-9])/g, '** $1')
+        
+        // 2. Force newlines before markdown headings (###) that got squashed inline (e.g. Procedure:### Method)
+        .replace(/([^\n])\s*(#{1,3})\s/g, '$1\n\n$2 ')
+        
+        // 3. Force newlines before numbered lists that got squashed (e.g. UUID 1. Log into)
+        .replace(/([a-zA-Z:).*\"])\s*(\d+\.\s+[A-Z])/g, (match, p1, p2, offset, string) => {
+            let before = string.slice(Math.max(0, offset - 15), offset);
+            if (/(Step|Method)\s*$/i.test(before)) return match;
+            return p1 + '\n\n' + p2;
+        })
+        
+        // 4. Force newlines before bullet points that got squashed (e.g. Tips:- Ensure)
+        .replace(/([a-zA-Z:.])\s*([•*+-])\s+([A-Z])/g, '$1\n\n$2 $3')
+        
+        // 5. Force spacing before common inline headers and guide steps (Case-insensitive, safe headers only)
+        .replace(/(^|\W)(\*\*)?(Time of the meeting|Summary|Troubleshooting tips|Troubleshooting steps|Next steps|Additional information|Root cause|Resolution|Pre-requisites|Prerequisites|Step \d+|Method \d+):\s*(\*\*)?/gi, '$1\n\n**$3:** ')
+        
         .replace(/```([\s\S]*?)```/g, '<div style="background:rgba(0,0,0,0.3); padding:12px; border-radius:8px; font-family:monospace; margin:15px 0; border:1px solid rgba(255,255,255,0.1); white-space:pre-wrap; word-break:break-all; font-size:12px">$1</div>')
         .replace(/\*\*\s*([\s\S]*?)\s*\*\*/g, '<strong>$1</strong>')
         .replace(/\*\s*([\s\S]*?)\s*\*/g, '<em>$1</em>')
-        .replace(/^\s*###\s+(.*$)/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>')
-        .replace(/^\s*##\s+(.*$)/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>')
-        .replace(/^\s*#\s+(.*$)/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>')
+        .replace(/^\s*###\s*(.*$)/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>')
+        .replace(/^\s*##\s*(.*$)/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>')
+        .replace(/^\s*#\s*(.*$)/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>')
         .replace(/^\s*---\s*$/gm, '<hr style="border:0; border-top:1px solid var(--border); margin:25px 0">')
         .replace(/\n\n/g, '<div style="margin-bottom:18px"></div>')
         .replace(/\n/g, '<br>')
         .replace(/^\s*(\d+\.)\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
-        .replace(/^\s*[•*-]\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>');
+        .replace(/^\s*[•*+-]\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>');
+        
+    // Clean up any stray leading/trailing breaks that might have been injected
+    return html.replace(/^(<br>|<div style="margin-bottom:18px"><\/div>|\s)+/, '').replace(/(<br>|<div style="margin-bottom:18px"><\/div>|\s)+$/, '');
 }
 
 function sanitizeAssistantResponse(text) {
@@ -94,7 +117,7 @@ function sanitizeAssistantResponse(text) {
         .replace(strayRx, " ")
         .replace(refRx, "")
         .replace(/\bNo specific highlights[^.]*\./gi, "")
-        .replace(/\s{2,}/g, " ")
+        .replace(/[ \t]{2,}/g, " ")
         .replace(/\n {1,}/g, "\n")
         .trim();
 }
@@ -674,6 +697,99 @@ function normalizeLogSignature(text) {
 
 const EXCEPTION_CLASS_PATTERN = String.raw`((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?:Exception|Error)|[A-Za-z_]\w*(?:Exception|Error)|AggregateException|SqlException|SQLException|TimeoutException|SocketException|WebException|IOException|UnauthorizedAccessException|InvalidOperationException|NullReferenceException|OutOfMemoryException|StackOverflowException|AuthenticationException|SecurityException|TypeError|ReferenceError|RangeError|SyntaxError|ValueError|KeyError|IndexError|RuntimeError|OSError)`;
 
+const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port)\b|^\s*at\s+/i;
+
+const DEFAULT_LINE_CLASSIFICATION = {
+    categories: [],
+    hasException: false,
+    hasErrorWord: false,
+    hasLogSeverity: false,
+    hasStackFrame: false,
+    severityToken: "",
+    exceptionClasses: [],
+    keywordHits: [],
+    isForensic: false
+};
+
+let _lastYield = performance.now();
+async function yieldIfNeeded() {
+    const now = performance.now();
+    if (now - _lastYield > 20) {
+        await new Promise(r => setTimeout(r, 0));
+        _lastYield = performance.now();
+    }
+}
+
+function findLogObject(fileName, content) {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c || !c.logs) return null;
+    return c.logs.find(l => l.name === fileName && (l.content === content || (content && l.content.length === content.length))) || null;
+}
+
+async function precomputeLogIntel(log) {
+    if (!log) return;
+    const content = log.content || "";
+    const lines = log.lines || (content ? content.split('\n') : []);
+    const cacheKey = `${log.name || ""}:${content.length}`;
+    if (log.precomputedIntel && log.precomputedIntel.cacheKey === cacheKey) return;
+
+    if (log.precomputing) {
+        while (log.precomputing) {
+            await new Promise(r => setTimeout(r, 50));
+        }
+        return;
+    }
+
+    log.precomputing = true;
+    try {
+        const len = lines.length;
+        const prefilteredIndices = [];
+        const intelCache = new Array(len);
+        const timestampCache = new Array(len);
+        const signatureCache = new Array(len);
+        const installerEventCache = new Array(len);
+
+        for (let idx = 0; idx < len; idx++) {
+            if (idx % 2000 === 0 && idx > 0) {
+                await yieldIfNeeded();
+            }
+            const line = lines[idx];
+            const hasPrefilter = FAST_FORENSIC_PREFILTER.test(line);
+            
+            const ts = extractLogTimestamp(line);
+            if (ts) timestampCache[idx] = ts;
+
+            if (hasPrefilter) {
+                prefilteredIndices.push(idx);
+                
+                const intel = classifyLogLine(line);
+                intelCache[idx] = intel;
+
+                if (intel.isForensic && !intel.hasStackFrame) {
+                    signatureCache[idx] = normalizeLogSignature(line);
+                }
+
+                const instEv = getInstallerEvent(line, log.name || "Attached log", idx + 1);
+                if (instEv) installerEventCache[idx] = instEv;
+            } else {
+                intelCache[idx] = DEFAULT_LINE_CLASSIFICATION;
+            }
+        }
+
+        log.precomputedIntel = {
+            cacheKey,
+            prefilteredIndices,
+            intelCache,
+            timestampCache,
+            signatureCache,
+            installerEventCache
+        };
+    } finally {
+        log.precomputing = false;
+    }
+}
+
+
 const LOG_SIGNAL_RULES = [
     { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|transaction|rollback|schema|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|constraint|duplicate key)\b/i },
     { category: 'Certificate/TLS', weight: 38, regex: /\b(certificate|cert\b|SSL|TLS|handshake failed|X509|trust|chain|CRL|OCSP|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors|AuthenticationException|Schannel|PKIX|certificate verify failed|unable to get local issuer|self-signed|hostname mismatch)\b/i },
@@ -748,6 +864,10 @@ function isStackTraceLine(line) {
 }
 
 function classifyLogLine(line) {
+    if (!FAST_FORENSIC_PREFILTER.test(line)) {
+        return DEFAULT_LINE_CLASSIFICATION;
+    }
+
     if (isMsiNoiseLine(line)) {
         return {
             categories: [],
@@ -1400,6 +1520,7 @@ function inferProductFromLogName(name, content = "") {
 }
 
 function extractSqlTarget(text) {
+    const slice = (text || "").slice(0, 120000);
     const candidates = [];
     const addCandidate = value => {
         const cleaned = (value || "").trim().replace(/^['"]|['"].*$/g, "");
@@ -1415,7 +1536,7 @@ function extractSqlTarget(text) {
 
     for (const p of explicitPatterns) {
         let m;
-        while ((m = p.exec(text || "")) !== null) addCandidate(m[1]);
+        while ((m = p.exec(slice)) !== null) addCandidate(m[1]);
     }
 
     if (candidates.length > 0) {
@@ -1432,19 +1553,20 @@ function extractSqlTarget(text) {
         /\b(?:SQL target|SqlServer|DatabaseServer)\s*[:=]\s*([^;\]\r\n]+)/i
     ];
     for (const p of patterns) {
-        const m = (text || "").match(p);
+        const m = slice.match(p);
         if (m) return m[1].trim();
     }
     return "";
 }
 
 function extractMachineName(text) {
+    const slice = (text || "").slice(0, 120000);
     const patterns = [
         /\b(?:ComputerName|MachineName|Server Name|Hostname|Host)\s*[:=]\s*([A-Za-z0-9_.-]+)/i,
         /\bServer\s+`?([A-Z0-9_.-]{4,})`?/i
     ];
     for (const p of patterns) {
-        const m = (text || "").match(p);
+        const m = slice.match(p);
         if (m) return m[1].trim();
     }
     return "";
@@ -1603,57 +1725,97 @@ function extractStackOriginSummary(text) {
     return `Throwing frame: ${throwing}\nOriginating frame: ${originating}`;
 }
 
-function buildInstallerFailureAnalysis(logs) {
+async function buildInstallerFailureAnalysis(logs) {
     if (!logs || logs.length === 0) return "";
 
     const events = [];
     const sources = [];
     const lineMap = new Map();
-    let combined = "";
     let product = "";
     let sqlTarget = "";
     let machine = "";
     let firstTimestamp = "";
     let lastTimestamp = "";
     let returnCode = "";
+    let hasRollback1603 = false;
+    let hasInstallerKeyword = false;
 
-    logs.forEach(log => {
+    for (const log of logs) {
         const name = log.name || "Unknown log";
         const content = log.content || "";
-        combined += `\n${name}\n${content}`;
-        const likelyInstaller = /\b(SetupSOTI|MSI|Windows Installer|CustomAction|Return 1603|Return value 3|Deploy[A-Za-z]*Database|DbUp|DeploymentEngine|PerformUpgrade|Verbose logging started)\b/i.test(`${name}\n${content}`);
-        if (!likelyInstaller) return;
+        const likelyInstaller = isInstallerLogContent(name, content);
+        if (likelyInstaller) {
+            hasInstallerKeyword = true;
+        }
+        if (!likelyInstaller) continue;
 
         sources.push(name);
-        const lines = content.split('\n');
+        const lines = log.lines || (content ? content.split('\n') : []);
         lineMap.set(name, lines);
         if (!product) product = inferProductFromLogName(name, content);
         if (!sqlTarget) sqlTarget = extractSqlTarget(content);
         if (!machine) machine = extractMachineName(content);
+        if (!returnCode) {
+            const rcMatch = content.slice(0, 150000).match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i) 
+                            || content.slice(-150000).match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
+            if (rcMatch) returnCode = rcMatch[1];
+        }
+        if (!hasRollback1603 && (content.includes('1603') || content.includes('Return value 3'))) {
+            hasRollback1603 = true;
+        }
 
-        lines.forEach((line, idx) => {
-            const ts = extractLogTimestamp(line);
+        await precomputeLogIntel(log);
+        const { prefilteredIndices, timestampCache, installerEventCache } = log.precomputedIntel;
+
+        for (let i = 0; i < prefilteredIndices.length; i++) {
+            if (i % 2000 === 0 && i > 0) {
+                await yieldIfNeeded();
+            }
+            const idx = prefilteredIndices[i];
+            const line = lines[idx];
+            const ts = timestampCache[idx];
             if (ts) {
                 if (!firstTimestamp) firstTimestamp = ts;
                 lastTimestamp = ts;
             }
+
             const rc = line.match(/\b(?:Return(?:ed)?(?:\s+code)?|error code)\s*[:=]?\s*(1603|\d{3,5})\b/i);
             if (rc) returnCode = rc[1];
-            const event = getInstallerEvent(line, name, idx + 1);
+            
+            const event = installerEventCache[idx];
             if (event) events.push(event);
-        });
-    });
+        }
+    }
 
-    if (sources.length === 0 && !/\b(SetupSOTI|MSI|Windows Installer|CustomAction|Return 1603|Deploy[A-Za-z]*Database|DbUp)\b/i.test(combined)) {
+    if (sources.length === 0 && !hasInstallerKeyword) {
         return "";
     }
 
-    if (!product) product = inferProductFromLogName(sources[0] || "", combined) || "SOTI installer";
-    if (!sqlTarget) sqlTarget = extractSqlTarget(combined);
-    if (!machine) machine = extractMachineName(combined);
-    if (!returnCode && /\b1603\b/.test(combined)) returnCode = "1603";
+    if (!product && sources.length > 0) {
+        const firstLog = logs.find(l => l.name === sources[0]);
+        if (firstLog) {
+            product = inferProductFromLogName(sources[0], firstLog.content || "");
+        }
+    }
+    if (!product) product = "SOTI installer";
 
-    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || combined);
+    if (!sqlTarget) {
+        for (const log of logs) {
+            sqlTarget = extractSqlTarget(log.content || "");
+            if (sqlTarget) break;
+        }
+    }
+    if (!machine) {
+        for (const log of logs) {
+            machine = extractMachineName(log.content || "");
+            if (machine) break;
+        }
+    }
+    if (!returnCode && hasRollback1603) {
+        returnCode = "1603";
+    }
+
+    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || "");
     const sorted = events
         .filter(e => e.score >= 30)
         .sort((a, b) => a.sortTime - b.sortTime || a.lineNum - b.lineNum);
@@ -1712,16 +1874,21 @@ function isExceptionContinuationLine(line) {
         || /^\s*$/.test(line);
 }
 
-function extractExceptionBlocksFromLog(log) {
+async function extractExceptionBlocksFromLog(log) {
+    await precomputeLogIntel(log);
     const name = log.name || "Unknown log";
-    const lines = normalizeLogText(log.content || "").split('\n');
+    const lines = log.lines || (log.content ? log.content.split('\n') : []);
+    const { intelCache, timestampCache } = log.precomputedIntel;
     const blocks = [];
     const consumed = new Set();
 
     for (let i = 0; i < lines.length; i++) {
+        if (i % 2000 === 0 && i > 0) {
+            await yieldIfNeeded();
+        }
         if (consumed.has(i)) continue;
         const line = lines[i];
-        const intel = classifyLogLine(line);
+        const intel = intelCache[i];
         const startsBlock = intel.hasException
             || intel.categories.includes('SQL/Database')
             || (intel.categories.includes('Installer/MSI') && hasRealFailureSignal(line))
@@ -1735,8 +1902,8 @@ function extractExceptionBlocksFromLog(log) {
 
         for (let j = i + 1; j < Math.min(lines.length, start + 160); j++) {
             const next = lines[j];
-            const nextIntel = classifyLogLine(next);
-            const looksLikeNewEvent = extractLogTimestamp(next) && nextIntel.isForensic && !nextIntel.hasStackFrame && !/^\s/.test(next);
+            const nextIntel = intelCache[j];
+            const looksLikeNewEvent = timestampCache[j] && nextIntel.isForensic && !nextIntel.hasStackFrame && !/^\s/.test(next);
             if (looksLikeNewEvent && blockLines.length > 1) break;
             if (nextIntel.hasStackFrame || nextIntel.hasException || nextIntel.categories.includes('SQL/Database') || isExceptionContinuationLine(next)) {
                 blockLines.push(next);
@@ -1763,8 +1930,8 @@ function extractExceptionBlocksFromLog(log) {
             file: name,
             startLine: start + 1,
             endLine: start + blockLines.length,
-            timestamp: extractLogTimestamp(line),
-            sortTime: parseLogTimestampForSort(extractLogTimestamp(line)),
+            timestamp: timestampCache[start],
+            sortTime: parseLogTimestampForSort(timestampCache[start]),
             categories: Array.from(categories),
             exceptionChain: classes,
             outerException: classes[0] || "",
@@ -1945,13 +2112,13 @@ function decodeLogBytes(input) {
     }
 }
 
-function getLogPanelIntel(log) {
+async function getLogPanelIntel(log) {
     if (!log) return null;
     const cacheKey = `${log.name || ""}:${(log.content || "").length}`;
     if (log.panelIntel && log.panelIntel.cacheKey === cacheKey) return log.panelIntel;
 
-    const content = normalizeLogText(log.content || "");
-    const lines = content ? content.split('\n') : [];
+    const content = log.content || "";
+    const lines = log.lines || (content ? content.split('\n') : []);
     const categories = {};
     const rootCandidates = [];
     const installerEvents = [];
@@ -1960,14 +2127,27 @@ function getLogPanelIntel(log) {
     let lastTimestamp = "";
     let eventCount = 0;
 
-    lines.forEach((line, idx) => {
-        const timestamp = extractLogTimestamp(line);
-        if (timestamp) {
-            if (!firstTimestamp) firstTimestamp = timestamp;
-            lastTimestamp = timestamp;
-        }
+    await precomputeLogIntel(log);
+    const { prefilteredIndices, intelCache, timestampCache, installerEventCache } = log.precomputedIntel;
 
-        const intel = classifyLogLine(line);
+    // Find first and last timestamps from cached array
+    for (let idx = 0; idx < lines.length; idx++) {
+        const ts = timestampCache[idx];
+        if (ts) {
+            if (!firstTimestamp) firstTimestamp = ts;
+            lastTimestamp = ts;
+        }
+    }
+
+    for (let i = 0; i < prefilteredIndices.length; i++) {
+        if (i % 2000 === 0 && i > 0) {
+            await yieldIfNeeded();
+        }
+        const idx = prefilteredIndices[i];
+        const line = lines[idx];
+        const timestamp = timestampCache[idx] || "";
+        const intel = intelCache[idx];
+
         updateSignalSummary(signalSummary, intel, line, idx + 1, log.name || "");
         if (intel.isForensic && !intel.hasStackFrame) {
             eventCount++;
@@ -1988,9 +2168,9 @@ function getLogPanelIntel(log) {
             });
         }
 
-        const installerEvent = getInstallerEvent(line, log.name || "Attached log", idx + 1);
+        const installerEvent = installerEventCache[idx];
         if (installerEvent && installerEvent.score >= 30) installerEvents.push(installerEvent);
-    });
+    }
 
     rootCandidates.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
     installerEvents.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
@@ -2056,6 +2236,7 @@ function buildWholeLogSegmentMap(lines, segmentCount = 16) {
     }));
 
     lines.forEach((line, idx) => {
+        if (!FAST_FORENSIC_PREFILTER.test(line)) return;
         const intel = classifyLogLine(line);
         if (!intel.isForensic || intel.hasStackFrame) return;
 
@@ -2091,7 +2272,11 @@ function getLineWindow(lines, centerLine, radius = 35) {
     return { start, end, text };
 }
 
-function collectCuratedFailureAnchors(lines, fileName = "") {
+async function collectCuratedFailureAnchors(lines, fileName = "", logObj = null) {
+    const log = logObj || findLogObject(fileName, "") || { name: fileName, lines };
+    await precomputeLogIntel(log);
+    const { prefilteredIndices, timestampCache } = log.precomputedIntel;
+
     const patterns = [
         { tag: "SQL/Azure target", regex: /\b(Microsoft SQL Azure|SQL Azure|database\.windows\.net)\b/i },
         { tag: "SqlException", regex: /\bSystem\.Data\.SqlClient\.SqlException\b/i },
@@ -2104,8 +2289,13 @@ function collectCuratedFailureAnchors(lines, fileName = "") {
     ];
     const anchors = [];
     const seen = new Set();
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] || "";
+    for (let i = 0; i < prefilteredIndices.length; i++) {
+        if (i % 2000 === 0 && i > 0) {
+            await yieldIfNeeded();
+        }
+        const idx = prefilteredIndices[i];
+        const line = lines[idx] || "";
+
         for (const pattern of patterns) {
             if (!pattern.regex.test(line)) continue;
             const key = `${pattern.tag}::${normalizeLogSignature(line).slice(0, 140)}`;
@@ -2113,8 +2303,8 @@ function collectCuratedFailureAnchors(lines, fileName = "") {
             seen.add(key);
             anchors.push({
                 tag: pattern.tag,
-                lineNum: i + 1,
-                timestamp: extractLogTimestamp(line),
+                lineNum: idx + 1,
+                timestamp: timestampCache[idx] || "",
                 text: truncateLogLine(line.trim(), 420)
             });
             break;
@@ -2123,10 +2313,11 @@ function collectCuratedFailureAnchors(lines, fileName = "") {
     return anchors;
 }
 
-function buildCuratedFailureEvidence(content, fileName = "Attached log") {
+async function buildCuratedFailureEvidence(content, fileName = "Attached log", precalculatedLines = null) {
     if (!content) return "";
-    const lines = content.split('\n');
-    const anchors = collectCuratedFailureAnchors(lines, fileName);
+    const lines = precalculatedLines || content.split('\n');
+    const log = findLogObject(fileName, content) || { name: fileName, content, lines };
+    const anchors = await collectCuratedFailureAnchors(lines, fileName, log);
     if (anchors.length === 0) return "";
 
     let report = `\n--- CURATED HIGH-VALUE EVIDENCE (read first — whole-file scan) ---\n`;
@@ -2163,7 +2354,11 @@ function extractNearbyMsiTimestamp(lines, idx) {
     return "";
 }
 
-function extractFailurePhases(lines) {
+async function extractFailurePhases(lines, logObj = null) {
+    const log = logObj || findLogObject("", "") || { lines };
+    await precomputeLogIntel(log);
+    const { prefilteredIndices } = log.precomputedIntel;
+
     const phaseDefs = [
         { id: "azure_env", title: "SQL target (Azure / cloud)", regex: /\b(Microsoft SQL Azure|SQL Azure|database\.windows\.net)\b/i, radius: 8 },
         { id: "login", title: "Database login / cannot open database", regex: /\bCannot open database\b/i, radius: 28 },
@@ -2178,57 +2373,83 @@ function extractFailurePhases(lines) {
     ];
     const phases = [];
     const seen = new Set();
-    phaseDefs.forEach(def => {
-        for (let i = 0; i < lines.length; i++) {
-            if (!def.regex.test(lines[i] || "")) continue;
-            if (seen.has(def.id)) break;
+    for (let i = 0; i < prefilteredIndices.length; i++) {
+        if (i % 2000 === 0 && i > 0) {
+            await yieldIfNeeded();
+        }
+        const idx = prefilteredIndices[i];
+        const line = lines[idx] || "";
+
+        for (const def of phaseDefs) {
+            if (!def.regex.test(line)) continue;
+            if (seen.has(def.id)) continue;
             seen.add(def.id);
             phases.push({
                 id: def.id,
                 title: def.title,
-                lineNum: i + 1,
-                timestamp: extractNearbyMsiTimestamp(lines, i),
-                window: getLineWindow(lines, i + 1, def.radius)
+                lineNum: idx + 1,
+                timestamp: extractNearbyMsiTimestamp(lines, idx),
+                window: getLineWindow(lines, idx + 1, def.radius)
             });
-            break;
         }
-    });
+    }
     return phases.sort((a, b) => a.lineNum - b.lineNum);
 }
 
-function collectDistinctSqlFacts(lines) {
+async function collectDistinctSqlFacts(lines, logObj = null) {
+    const log = logObj || findLogObject("", "") || { lines };
+    await precomputeLogIntel(log);
+    const { prefilteredIndices } = log.precomputedIntel;
+
     const facts = [];
     const seen = new Set();
-    lines.forEach((line, i) => {
+    for (let i = 0; i < prefilteredIndices.length; i++) {
+        if (i % 2000 === 0 && i > 0) {
+            await yieldIfNeeded();
+        }
+        const idx = prefilteredIndices[i];
+        const line = lines[idx];
         const text = (line || "").trim();
-        if (!/\b(SqlException|ALTER DATABASE|Cannot open database|Login failed|Error Number:|Setting Recovery mode)\b/i.test(text)) return;
-        if (isMsiNoiseLine(text) && !/\b(SqlException|ALTER DATABASE|Cannot open database)\b/i.test(text)) return;
+        if (!/\b(SqlException|ALTER DATABASE|Cannot open database|Login failed|Error Number:|Setting Recovery mode)\b/i.test(text)) continue;
+        if (isMsiNoiseLine(text) && !/\b(SqlException|ALTER DATABASE|Cannot open database)\b/i.test(text)) continue;
         const key = text.replace(/\d{4}-\d{2}-\d{2}/g, "").replace(/\b\d{1,2}:\d{2}:\d{2}(?:[.:]\d+)?\b/g, "").slice(0, 180);
-        if (seen.has(key)) return;
+        if (seen.has(key)) continue;
         seen.add(key);
         facts.push({
-            lineNum: i + 1,
-            timestamp: extractNearbyMsiTimestamp(lines, i),
+            lineNum: idx + 1,
+            timestamp: extractNearbyMsiTimestamp(lines, idx),
             text: truncateLogLine(text, 360)
         });
-    });
+    }
     return facts.slice(0, 25);
 }
 
-function buildPrecisionLogBrief(content, fileName = "Attached log") {
+async function buildPrecisionLogBrief(content, fileName = "Attached log", precalculatedLines = null) {
     if (!content) return "";
-    content = normalizeLogText(content);
-    const lines = content.split('\n');
+    const lines = precalculatedLines || content.split('\n');
+    const log = findLogObject(fileName, content) || { name: fileName, content, lines };
+    await precomputeLogIntel(log);
+    const { prefilteredIndices } = log.precomputedIntel;
+    
     const product = inferProductFromLogName(fileName, content) || "SOTI installer";
     const sqlTarget = extractSqlTarget(content);
     const machine = extractMachineName(content);
     const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || content);
-    const azureIdx = lines.findIndex(l => /\bMicrosoft SQL Azure|SQL Azure\b/i.test(l || ""));
+    
+    let azureIdx = -1;
+    for (let i = 0; i < prefilteredIndices.length; i++) {
+        const idx = prefilteredIndices[i];
+        if (/\bMicrosoft SQL Azure|SQL Azure\b/i.test(lines[idx] || "")) {
+            azureIdx = idx;
+            break;
+        }
+    }
+    
     const returnMatch = (content || "").match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
     const returnCode = returnMatch ? returnMatch[1] : "";
     const base = extractInstallerBaseDate(content);
-    const phases = extractFailurePhases(lines);
-    const sqlFacts = collectDistinctSqlFacts(lines);
+    const phases = await extractFailurePhases(lines, log);
+    const sqlFacts = await collectDistinctSqlFacts(lines, log);
 
     if (phases.length === 0 && sqlFacts.length === 0) return "";
 
@@ -2276,10 +2497,10 @@ function isLogForensicsRequest(text, silent) {
 function shouldUseFocusedLogPipeline(logs) {
     if (!logs || logs.length === 0) return false;
     return logs.some(log => {
-        const content = normalizeLogText(log.content || "");
-        const lineCount = content.split('\n').length;
+        const content = log.content || "";
+        const lineCount = log.lines ? log.lines.length : (content.match(/\n/g) || []).length;
         if (lineCount < 3000 || !isInstallerLogContent(log.name, content)) return false;
-        return /\b(SqlException|ALTER DATABASE statement is not supported|Cannot open database|Login failed|Upgrade failed due to an unexpected exception|Location Service database deployment|MainEngineThread is returning 1603)\b/i.test(content);
+        return /\b(SqlException|ALTER DATABASE statement is not supported|Cannot open database|Login failed|Upgrade failed due to an unexpected exception|Location Service database deployment|MainEngineThread is returning 1603)\b/i.test(content.slice(0, 500000));
     });
 }
 
@@ -2294,8 +2515,8 @@ function buildDeterministicForensicReport(logs) {
 
     for (const log of logs) {
         const fileName = log.name || "Attached log";
-        const content = normalizeLogText(log.content || "");
-        const lines = content.split('\n');
+        const content = log.content || "";
+        const lines = log.lines || (content ? content.split('\n') : []);
         const phases = extractFailurePhases(lines);
         const sqlFacts = collectDistinctSqlFacts(lines);
         if (phases.length === 0 && sqlFacts.length === 0) continue;
@@ -2426,35 +2647,58 @@ const LOG_PATTERN_CHECKS = [
     { label: 'Connection refused / timeout', regex: /\b(connection refused|timed out|timeout expired|ECONNREFUSED|ETIMEDOUT)\b/gi }
 ];
 
-function buildLogPatternProfile(logs) {
+async function buildLogPatternProfile(logs) {
     if (!logs || logs.length === 0) return "";
     let report = `\n\n=== LOG PATTERN & KEYWORD PROFILE ===\n`;
     report += `Whole-file scan using signal rules, keyword patterns, and normalized failure signatures (not line-by-line narration).\n`;
 
-    logs.forEach(log => {
+    for (const log of logs) {
         const fileName = log.name || "Attached log";
-        const content = normalizeLogText(log.content || "");
-        const lines = content.split('\n');
+        const content = log.content || "";
+        const lines = log.lines || (content ? content.split('\n') : []);
         const categoryCounts = {};
         const signatureMap = new Map();
         const keywordTotals = {};
         const exceptionTypes = new Set();
+        const patternCounts = {};
+        LOG_PATTERN_CHECKS.forEach(c => patternCounts[c.label] = 0);
+        let returnCode = "";
 
-        lines.forEach(line => {
-            const intel = classifyLogLine(line);
+        await precomputeLogIntel(log);
+        const { prefilteredIndices, intelCache, signatureCache } = log.precomputedIntel;
+
+        for (let i = 0; i < prefilteredIndices.length; i++) {
+            if (i % 2000 === 0 && i > 0) {
+                await yieldIfNeeded();
+            }
+            const idx = prefilteredIndices[i];
+            const line = lines[idx];
+
+            for (const check of LOG_PATTERN_CHECKS) {
+                const hits = line.match(check.regex);
+                if (hits) patternCounts[check.label] += hits.length;
+            }
+            if (!returnCode) {
+                const rc = line.match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
+                if (rc) returnCode = rc[1];
+            }
+
+            const intel = intelCache[idx];
             intel.categories.forEach(cat => { categoryCounts[cat] = (categoryCounts[cat] || 0) + 1; });
-            getKeywordHits(line).forEach(hit => {
+            intel.keywordHits.forEach(hit => {
                 keywordTotals[hit.label] = (keywordTotals[hit.label] || 0) + 1;
             });
-            extractExceptionClasses(line).forEach(ex => exceptionTypes.add(ex));
-            if (!intel.isForensic || intel.hasStackFrame) return;
-            const sig = normalizeLogSignature(line);
-            if (sig.length < 14) return;
+            intel.exceptionClasses.forEach(ex => exceptionTypes.add(ex));
+            if (!intel.isForensic || intel.hasStackFrame) continue;
+            
+            const sig = signatureCache[idx];
+            if (!sig || sig.length < 14) continue;
+            
             const existing = signatureMap.get(sig) || { count: 0, categories: new Set(), sample: truncateLogLine(line.trim(), 200) };
             existing.count++;
             intel.categories.forEach(c => existing.categories.add(c));
             signatureMap.set(sig, existing);
-        });
+        }
 
         report += `\n## ${fileName} (${lines.length} lines)\n`;
         report += `Product/context: ${inferProductFromLogName(fileName, content) || "Unknown"}\n`;
@@ -2462,12 +2706,11 @@ function buildLogPatternProfile(logs) {
         if (sqlTarget) report += `SQL target pattern: ${sqlTarget}\n`;
         const machine = extractMachineName(content);
         if (machine) report += `Server/host pattern: ${machine}\n`;
-        const returnMatch = content.match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
-        if (returnMatch) report += `MSI return code pattern: ${returnMatch[1]}\n`;
+        if (returnCode) report += `MSI return code pattern: ${returnCode}\n`;
 
         report += `\n### Pattern detection\n`;
         LOG_PATTERN_CHECKS.forEach(check => {
-            const count = (content.match(check.regex) || []).length;
+            const count = patternCounts[check.label];
             report += count > 0
                 ? `- ${check.label}: **detected** (${count} match(es))\n`
                 : `- ${check.label}: not detected\n`;
@@ -2501,7 +2744,7 @@ function buildLogPatternProfile(logs) {
                 report += `   Categories: ${s.categories.join(', ') || '—'} | Sample: ${s.sample}\n`;
             });
         }
-    });
+    }
 
     report += `\n### Pattern-combination hints (for AI)\n`;
     report += `- Azure SQL + ALTER DATABASE + RECOVERY SIMPLE → migration script incompatible with Azure SQL.\n`;
@@ -2513,22 +2756,48 @@ function buildLogPatternProfile(logs) {
     return report;
 }
 
-function buildInstallerPatternSummary(logs) {
+async function buildInstallerPatternSummary(logs) {
     if (!logs || logs.length === 0) return "";
-    const combined = logs.map(l => normalizeLogText(l.content || "")).join("\n");
-    if (!/\b(SetupSOTI|MSI|Windows Installer|CustomAction|Return 1603|Deploy[A-Za-z]*Database|DbUp)\b/i.test(combined)) return "";
+    let combinedHeader = "";
+    let returnCode = "";
+    const patternCounts = {};
+    LOG_PATTERN_CHECKS.forEach(c => patternCounts[c.label] = 0);
+
+    for (const log of logs) {
+        const content = log.content || "";
+        combinedHeader += content.slice(0, 100000) + "\n";
+        const lines = log.lines || (content ? content.split('\n') : []);
+        await precomputeLogIntel(log);
+        const { prefilteredIndices } = log.precomputedIntel;
+
+        for (let i = 0; i < prefilteredIndices.length; i++) {
+            if (i % 2000 === 0 && i > 0) await yieldIfNeeded();
+            const idx = prefilteredIndices[i];
+            const line = lines[idx];
+
+            for (const check of LOG_PATTERN_CHECKS) {
+                const hits = line.match(check.regex);
+                if (hits) patternCounts[check.label] += hits.length;
+            }
+            if (!returnCode) {
+                const rc = line.match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
+                if (rc) returnCode = rc[1];
+            }
+        }
+    }
+
+    if (!/\b(SetupSOTI|MSI|Windows Installer|CustomAction|Return 1603|Deploy[A-Za-z]*Database|DbUp)\b/i.test(combinedHeader)) return "";
 
     const product = logs.map(l => inferProductFromLogName(l.name || "", l.content || "")).find(Boolean) || "SOTI installer";
-    const sqlTarget = extractSqlTarget(combined);
-    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || combined);
-    const returnCode = (combined.match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i) || [])[1] || "";
+    const sqlTarget = extractSqlTarget(combinedHeader);
+    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || combinedHeader);
 
     let report = `\n\n=== INSTALLER PATTERN SUMMARY ===\n`;
     report += `Product: ${product}${returnCode ? ` | MSI return: ${returnCode}` : ""}\n`;
     if (sqlTarget) report += `SQL target: ${sqlTarget}${azureSql ? " (Azure SQL)" : ""}\n`;
 
     const detected = LOG_PATTERN_CHECKS
-        .map(c => ({ label: c.label, count: (combined.match(c.regex) || []).length }))
+        .map(c => ({ label: c.label, count: patternCounts[c.label] }))
         .filter(x => x.count > 0)
         .sort((a, b) => b.count - a.count);
 
@@ -2544,22 +2813,34 @@ function buildInstallerPatternSummary(logs) {
     return report;
 }
 
-function buildMandatoryForensicChecklist(logs) {
+async function buildMandatoryForensicChecklist(logs) {
     if (!logs || logs.length === 0) return "";
     const lines = [];
-    logs.forEach(log => {
+    for (const log of logs) {
         const fileName = log.name || "Attached log";
-        const content = normalizeLogText(log.content || "");
-        const fileLines = content.split('\n');
-        const phases = extractFailurePhases(fileLines);
+        const content = log.content || "";
+        const fileLines = log.lines || (content ? content.split('\n') : []);
+        await precomputeLogIntel(log);
+        
+        const phases = await extractFailurePhases(fileLines, log);
         const sqlTarget = extractSqlTarget(content);
-        const returnMatch = content.match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
+        const returnMatch = content.slice(0, 150000).match(/\bMainEngineThread is returning\s+(1603|\d{3,5})\b/i);
         const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || content);
-        const loginLines = fileLines
-            .map((l, i) => ({ l, i }))
-            .filter(x => /\bCannot open database\b/i.test(x.l))
-            .slice(0, 2);
-        const alterLine = fileLines.findIndex(l => /\bALTER DATABASE statement is not supported\b/i.test(l || ""));
+
+        const { prefilteredIndices } = log.precomputedIntel;
+        const loginLines = [];
+        let alterLine = -1;
+
+        for (let i = 0; i < prefilteredIndices.length; i++) {
+            const idx = prefilteredIndices[i];
+            const l = fileLines[idx] || "";
+            if (/\bCannot open database\b/i.test(l) && loginLines.length < 2) {
+                loginLines.push({ l, i: idx });
+            }
+            if (alterLine === -1 && /\bALTER DATABASE statement is not supported\b/i.test(l)) {
+                alterLine = idx;
+            }
+        }
 
         lines.push(`FILE: ${fileName} — ${fileLines.length} lines scanned`);
         if (sqlTarget) lines.push(`- SQL target: ${sqlTarget}${azureSql ? " (Azure SQL)" : ""}`);
@@ -2572,7 +2853,7 @@ function buildMandatoryForensicChecklist(logs) {
             const db = (x.l.match(/Cannot open database\s+"([^"]+)"/i) || [])[1];
             lines.push(`- Prerequisite at Line ${x.i + 1}: Cannot open database${db ? ` "${db}"` : ""} / login failed (symptom unless install stopped here)`);
         });
-    });
+    }
 
     lines.push("");
     lines.push("REQUIRED: SqlException + ALTER DATABASE + Location Service deployment + Azure SQL host if present in log.");
@@ -2580,16 +2861,20 @@ function buildMandatoryForensicChecklist(logs) {
     return `\n=== MANDATORY FACTS (full-file scan — address every line above) ===\n${lines.join("\n")}\n=== END MANDATORY FACTS ===\n`;
 }
 
-function buildLogAnalysisContext(logs) {
+async function buildLogAnalysisContext(logs) {
     if (!logs || logs.length === 0) return "";
     let ctx = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
-    ctx += buildLogPatternProfile(logs);
-    ctx += buildCrossLogIncidentIndex(logs, { patternMode: false });
-    logs.forEach(log => {
-        const content = normalizeLogText(log.content || "");
+    ctx += await buildLogPatternProfile(logs);
+    ctx += await buildCrossLogIncidentIndex(logs, { patternMode: false });
+    const isLocalAI = !!LOCAL_AI_MODEL;
+    const smartLimit = isLocalAI 
+        ? Math.max(20000, Math.floor(80000 / Math.max(1, logs.length)))
+        : 200000;
+    for (const log of logs) {
+        const content = log.content || "";
         const name = log.name || "Attached log";
-        ctx += `\n=== FILE: ${name} ===\n${getSmartLogSnippet(content, 200000, name)}\n=== END FILE ===\n`;
-    });
+        ctx += `\n=== FILE: ${name} ===\n${await getSmartLogSnippet(content, smartLimit, name, log.lines)}\n=== END FILE ===\n`;
+    }
     return ctx;
 }
 
@@ -2610,10 +2895,24 @@ Rules:
 
 function validateForensicAIResponse(text, logs) {
     if (!text || !logs || logs.length === 0) return true;
-    const combined = logs.map(l => normalizeLogText(l.content || "")).join("\n");
-    const hasAlter = /\bALTER DATABASE statement is not supported\b/i.test(combined);
-    const hasSql = /\bSqlException\b/i.test(combined);
-    const hasAzure = /\.database\.windows\.net\b/i.test(combined);
+    
+    let hasAlter = false;
+    let hasSql = false;
+    let hasAzure = false;
+    
+    for (const l of logs) {
+        const content = l.content || "";
+        if (!hasAlter && /\bALTER DATABASE statement is not supported\b/i.test(content)) {
+            hasAlter = true;
+        }
+        if (!hasSql && /\bSqlException\b/i.test(content)) {
+            hasSql = true;
+        }
+        if (!hasAzure && /\.database\.windows\.net\b/i.test(content)) {
+            hasAzure = true;
+        }
+        if (hasAlter && hasSql && hasAzure) break;
+    }
     const resp = text || "";
 
     const badPatterns = [
@@ -2654,7 +2953,7 @@ function buildFocusedRawCoverage(content, lines, focusLineNums) {
     return coverage;
 }
 
-function buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks) {
+async function buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks, logObj = null) {
     const totalLines = lines.length;
     const headSize = 30000;
     const tailSize = 100000;
@@ -2677,7 +2976,10 @@ function buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks)
     });
 
     const focusLines = [];
-    collectCuratedFailureAnchors(lines).forEach(a => focusLines.push(a.lineNum));
+    const log = logObj || findLogObject("", content) || { lines };
+    const anchors = await collectCuratedFailureAnchors(lines, "", log);
+    anchors.forEach(a => focusLines.push(a.lineNum));
+    
     rankedRootCandidates.slice(0, 8).forEach(c => focusLines.push(c.lineNum));
     parsedBlocks.slice(0, 8).forEach(b => focusLines.push(b.startLine));
     const uniqueFocusLines = focusLines
@@ -2698,7 +3000,7 @@ function buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks)
     return coverage;
 }
 
-function buildCrossLogIncidentIndex(logs, options = {}) {
+async function buildCrossLogIncidentIndex(logs, options = {}) {
     if (!logs || logs.length === 0) return "";
     const patternMode = options.patternMode !== false;
 
@@ -2707,25 +3009,34 @@ function buildCrossLogIncidentIndex(logs, options = {}) {
     const signatureMap = new Map();
     const categoryCounts = {};
     const signalSummary = createSignalSummary();
-    const installerReport = buildInstallerFailureAnalysis(logs);
+    const installerReport = await buildInstallerFailureAnalysis(logs);
     let totalLines = 0;
     let totalChars = 0;
 
-    logs.forEach(log => {
+    for (const log of logs) {
         const name = log.name || "Unknown log";
-        const content = normalizeLogText(log.content || "");
-        const lines = content.split('\n');
+        const content = log.content || "";
+        const lines = log.lines || (content ? content.split('\n') : []);
         totalLines += lines.length;
         totalChars += content.length;
-        exceptionBlocks.push(...extractExceptionBlocksFromLog({ name, content }));
+        exceptionBlocks.push(...await extractExceptionBlocksFromLog(log));
 
-        lines.forEach((line, idx) => {
-            const intel = classifyLogLine(line);
+        await precomputeLogIntel(log);
+        const { prefilteredIndices, intelCache, timestampCache, signatureCache } = log.precomputedIntel;
+
+        for (let i = 0; i < prefilteredIndices.length; i++) {
+            if (i % 2000 === 0 && i > 0) {
+                await yieldIfNeeded();
+            }
+            const idx = prefilteredIndices[i];
+            const line = lines[idx];
+            const intel = intelCache[idx];
+            const timestamp = timestampCache[idx] || "";
+
             updateSignalSummary(signalSummary, intel, line, idx + 1, name);
-            if (!intel.isForensic || intel.hasStackFrame) return;
+            if (!intel.isForensic || intel.hasStackFrame) continue;
 
             const lineNum = idx + 1;
-            const timestamp = extractLogTimestamp(line);
             const event = {
                 file: name,
                 lineNum,
@@ -2751,8 +3062,10 @@ function buildCrossLogIncidentIndex(logs, options = {}) {
                 categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
             });
 
-            const sig = `${name}::${normalizeLogSignature(line)}`;
-            if (sig.length > name.length + 10) {
+            const sigKey = signatureCache[idx];
+            if (sigKey && sigKey.length > 8) {
+                const sig = `${name}::${sigKey}`;
+                if (sig.length > name.length + 10) {
                 const existing = signatureMap.get(sig) || {
                     file: name,
                     count: 0,
@@ -2769,8 +3082,9 @@ function buildCrossLogIncidentIndex(logs, options = {}) {
                 intel.categories.forEach(cat => existing.categories.add(cat));
                 signatureMap.set(sig, existing);
             }
-        });
-    });
+        }
+    }
+}
 
     const byTime = [...allEvents].sort((a, b) => {
         if (a.sortTime !== b.sortTime) return a.sortTime - b.sortTime;
@@ -2791,7 +3105,7 @@ function buildCrossLogIncidentIndex(logs, options = {}) {
         .sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)
         .slice(0, 25);
     const largeInstallerLogs = logs.filter(l => {
-        const n = (l.content || "").split('\n').length;
+        const n = l.lines ? l.lines.length : (l.content || "").split('\n').length;
         return n >= 5000 && isInstallerLogContent(l.name, l.content);
     });
     const topBlock = rankedExceptionBlocks[0] || null;
@@ -2989,27 +3303,29 @@ function buildCrossLogIncidentIndex(logs, options = {}) {
     return report;
 }
 
-function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") {
+async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log", precalculatedLines = null, logObj = null) {
     if (!content) return "";
-    content = normalizeLogText(content);
-
-    const lines = content.split('\n');
+    const lines = precalculatedLines || content.split('\n');
     const totalLines = lines.length;
+
+    const log = logObj || findLogObject(fileName, content) || { name: fileName, content, lines };
+    await precomputeLogIntel(log);
+    const { prefilteredIndices, intelCache, timestampCache, signatureCache } = log.precomputedIntel;
 
     // Large MSI/installer logs: pattern/keyword profile only (no line-by-line context).
     if (totalLines >= 5000 && isInstallerLogContent(fileName, content)) {
-        let focused = buildLogPatternProfile([{ name: fileName, content }]);
-        focused += buildInstallerPatternSummary([{ name: fileName, content }]);
-        focused += buildInstallerFailureAnalysis([{ name: fileName, content }]);
+        let focused = await buildLogPatternProfile([{ name: fileName, content, lines }]);
+        focused += await buildInstallerPatternSummary([{ name: fileName, content, lines }]);
+        focused += await buildInstallerFailureAnalysis([{ name: fileName, content, lines }]);
         if (focused.length > limit) {
             focused = `${focused.slice(0, limit)}\n\n[TRUNCATED: pattern profile preserved]\n`;
         }
         return focused;
     }
 
-    const parsedBlocks = extractExceptionBlocksFromLog({ name: fileName, content });
-    const installerReport = buildInstallerFailureAnalysis([{ name: fileName, content }]);
-    const curatedEvidence = buildCuratedFailureEvidence(content, fileName);
+    const parsedBlocks = await extractExceptionBlocksFromLog(log);
+    const installerReport = await buildInstallerFailureAnalysis([log]);
+    const curatedEvidence = await buildCuratedFailureEvidence(content, fileName, lines);
 
     const forensicEntries = [];
     const seenLineNums = new Set();
@@ -3023,11 +3339,31 @@ function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") 
     let inException = false;
     let exceptionLinesCount = 0;
 
-    for (let i = 0; i < totalLines; i++) {
+    let i = 0;
+    let prefilterIdx = 0;
+
+    while (i < totalLines) {
+        if (i % 2000 === 0 && i > 0) {
+            await yieldIfNeeded();
+        }
+
+        if (!inException) {
+            // Jump to the next prefiltered index >= i
+            while (prefilterIdx < prefilteredIndices.length && prefilteredIndices[prefilterIdx] < i) {
+                prefilterIdx++;
+            }
+            if (prefilterIdx >= prefilteredIndices.length) {
+                // No more prefiltered lines and not in an exception, we are done
+                break;
+            }
+            i = prefilteredIndices[prefilterIdx];
+        }
+
         const line = lines[i];
-        const trimmed = line.trim();
-        const intel = classifyLogLine(line);
+        const intel = intelCache[i];
         const isForensic = intel.isForensic;
+        const timestamp = timestampCache[i] || "";
+        const trimmed = line.trim();
         updateSignalSummary(signalSummary, intel, line, i + 1, fileName);
 
         // Track error type for summary
@@ -3036,29 +3372,29 @@ function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") 
             if (firstErrorLine === null) firstErrorLine = i + 1;
             lastErrorLine = i + 1;
 
-            const sig = normalizeLogSignature(line);
-            if (sig.length > 8) {
+            const sig = signatureCache[i];
+            if (sig && sig.length > 8) {
                 const existing = signatureMap.get(sig) || {
                     signature: sig,
                     count: 0,
                     firstLine: i + 1,
                     lastLine: i + 1,
-                    firstTimestamp: extractLogTimestamp(line),
-                    lastTimestamp: extractLogTimestamp(line),
+                    firstTimestamp: timestamp,
+                    lastTimestamp: timestamp,
                     categories: new Set(),
                     sample: line.trim()
                 };
                 existing.count++;
                 existing.lastLine = i + 1;
-                existing.lastTimestamp = extractLogTimestamp(line) || existing.lastTimestamp;
+                existing.lastTimestamp = timestamp || existing.lastTimestamp;
                 intel.categories.forEach(c => existing.categories.add(c));
                 signatureMap.set(sig, existing);
             }
 
             rootCandidates.push({
                 lineNum: i + 1,
-                timestamp: extractLogTimestamp(line),
-                sortTime: parseLogTimestampForSort(extractLogTimestamp(line)),
+                timestamp: timestamp,
+                sortTime: parseLogTimestampForSort(timestamp),
                 text: line.trim(),
                 categories: intel.categories,
                 hasException: intel.hasException,
@@ -3110,6 +3446,8 @@ function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") 
                 }
             }
         }
+
+        i++;
     }
 
     forensicEntries.sort((a, b) => a.lineNum - b.lineNum);
@@ -3258,7 +3596,7 @@ function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") 
             forensicReport += `--- END DISTINCT FAILURE SIGNATURES ---\n`;
         }
 
-        const precisionBrief = buildPrecisionLogBrief(content, fileName);
+        const precisionBrief = await buildPrecisionLogBrief(content, fileName, lines);
         if (precisionBrief) {
             forensicReport += precisionBrief;
         } else {
@@ -3296,8 +3634,7 @@ function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log") 
     }
 
     // Place the forensic report at the TOP so it is never truncated by local AI context limits.
-    // For large files, include raw head/middle/tail plus windows around the highest-risk incidents.
-    return `${forensicReport}${buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks)}`;
+    return `${forensicReport}${await buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks, log)}`;
 }
 
 function hideToast() {
@@ -3354,11 +3691,12 @@ RULES:
 1. ALWAYS answer directly using ONLY the facts present in [RELEASE NOTES], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [PULSE SEARCH], and [DOCS SEARCH]. Do not invent, hallucinate, or extrapolate details.
 2. NEVER say "check the website", "visit Pulse", or "click here". Do NOT output links or tell the user to go elsewhere. Just print the facts.
 3. Keep answers extremely short and direct (1-2 sentences). Do not add conversational fluff.
-4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.`;
+4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.
+5. ZERO HALLUCINATION FOR GUIDES: If the user asks for step-by-step instructions or configuration steps, you MUST construct them ONLY using the EXACT TEXT provided in the [OFFLINE PULSE KNOWLEDGE MATCHES], [DEEP RESEARCH], or [DOCS SEARCH] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If these sections do not contain the specific steps, you MUST reply "I could not find a SOTI guide for this specific task in my current context." DO NOT guess or use generic Android/IT knowledge to invent steps. DO NOT combine unrelated sections.`;
     }
     return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
 
-CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [KNOWLEDGE BASE], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
+CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
 
 RULES YOU MUST FOLLOW:
 1. NEVER tell the user to "check the SOTI website", "visit support.soti.com", "check Pulse", or "contact support". YOU already have the data. Just answer directly.
@@ -3366,18 +3704,18 @@ RULES YOU MUST FOLLOW:
    - "MobiControl" or "latest version" or "console" or "server" → use [LATEST MOBICONTROL VERSION] (this is the MobiControl Console/Server version)
    - "Android Agent" or "agent version" → use [LATEST ANDROID AGENT VERSION] (this is the device-side Android Agent)
    - "Identity" → use [LATEST IDENTITY VERSION]
-   Answer in a single direct sentence with the EXACT number from the bracketed section. If the bracketed section says "MISSING_DATA", you MUST say "I do not have the live version data loaded." Do NOT guess or hallucinate a version number. Do NOT add any extra details or fixes. Stop generating immediately after stating the version.
-3. TROUBLESHOOTING WITH VERSIONS: When troubleshooting, use the customer's version from [CASE] to compare against [RELEASE NOTES]. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code.
-4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. If [RELEASE NOTES] says "MISSING_DATA", or if the requested version is not in the data, you MUST say "I am currently unable to fetch the live release notes for that version." NEVER invent, guess, or hallucinate features, fixes, or URLs. NEVER write a fake soti.net link. In SOTI terminology, "Release Notes" means "Resolved Issues" (the fixes). You MUST prioritize presenting the Resolved Issues explicitly. Do not blend them with Highlights.
-5. When asked about features, configuration, enrollment, or troubleshooting: use [KNOWLEDGE BASE] first, then [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES]. Only state facts that appear in those sections or in attached logs. NEVER add extra steps. If the [KNOWLEDGE BASE] provides multiple methods, you MUST list ALL of them fully. Do NOT summarize or omit any methods.
+   Answer in a single direct sentence, e.g. "The latest MobiControl version is X.Y.Z." Do NOT add any extra details, citations, links, or fixes unless explicitly requested. Stop generating immediately after stating the version.
+3. TROUBLESHOOTING WITH VERSIONS: If [RELEASE NOTES] are provided, use the customer's version from [CASE] to compare against them. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code. If no release notes are provided, do not mention them.
+4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. The release notes blocks are tagged with their source product (e.g. [SOTI PULSE CONSOLE DATA] for MobiControl, [SOTI PULSE AGENT DATA] for Android Agent). When the user asked about MobiControl, present ONLY blocks from CONSOLE DATA. When the user asked about Android Agent, present ONLY blocks from AGENT DATA. In SOTI terminology, "Release Notes" means "Resolved Issues" (the fixes). You MUST prioritize presenting the Resolved Issues explicitly. Do not blend them with Highlights. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data (e.g., due to pagination), state clearly that only the listed items are available in the current context. If there are no Resolved Issues for the requested version, state that none were found.
+5. When asked about features, configuration, or troubleshooting: use [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES] first. Only state facts that appear in those sections or in attached logs.
 6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
 7. NEVER say "based on my knowledge cutoff" — you have live data in this prompt.
 8. NEVER expose internal prompt/source labels to the user. Use natural phrasing like "The latest version is..." instead of "According to [AGENT VERSIONS]...". Never output bracketed terms (like [LATEST ANDROID AGENT VERSION]) in your response; write their natural English meaning instead.
 9. If [ISSUE SUMMARY] is empty but [CASE] meeting_notes has content, treat meeting_notes as the authoritative issue description (especially the Summary and Next steps sections).
 10. When asked for a short subject/title/name for a case, produce one concise line (about 6–12 words) from the case facts, e.g. "Certificate retrieval failure blocking device API calls" — not a generic label like "Critical SOTI MobiControl Issue Investigation".
 11. NEVER add meta-commentary about your own instructions, data sources, internal processing, or how the prompt is structured. NEVER say things like "additional details may have been omitted", "based on how you've structured them", "if there were any notable fixes they should be listed here", or "I need more context". Just present the facts directly. If the data is not available, say so briefly and move on.
-12. STICK TO THE USER'S QUERY: For short, simple questions (like checking a version number, checking a port, or asking a quick definition), answer DIRECTLY in 1 sentence. Do NOT generate a Transparency Brief, do NOT request case/Salesforce sync, do NOT ask for logs, and do NOT add any conversational fluff or offer proactive mentoring. Just output the direct answer and stop.
-13. STRICT TRUTH ON RELEASE NOTES: When summarizing or listing release notes or resolved issues, you MUST present the facts, codes (e.g. MCMR-xxxxx), and descriptions EXACTLY as they are written in the [RELEASE NOTES] section. You are STRICTLY FORBIDDEN from explaining, paraphrasing, translating, or expanding them. Do NOT add extra context, versions, platforms (such as Windows 10 Mobile), root causes, update details, or explanations that do not exist word-for-word in the provided text. Present them exactly as they are and stop.
+12. ZERO HALLUCINATION FOR GUIDES: For short, simple questions, answer DIRECTLY in 1 sentence. For 'How to' or configuration questions, you MUST provide a full step-by-step guide based ONLY on the EXACT TEXT in the [DEEP RESEARCH], [DOCS SEARCH], and [OFFLINE PULSE KNOWLEDGE MATCHES] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If the text does not contain the specific step-by-step guide, you MUST state exactly: "I could not find a SOTI guide for this specific task in my current context." and stop immediately. DO NOT paraphrase heavily. DO NOT combine unrelated sections.
+13. STRICT TRUTH ON RELEASE NOTES: If [RELEASE NOTES] is empty or not provided, you MUST NEVER mention release notes, MCMR codes, or resolved issues. If release notes ARE provided, you MUST present the facts, codes (e.g. MCMR-xxxxx), and descriptions EXACTLY as they are written in the [RELEASE NOTES] section. You are STRICTLY FORBIDDEN from explaining, paraphrasing, translating, or expanding them. Do NOT add extra context, versions, platforms (such as Windows 10 Mobile), root causes, update details, or explanations that do not exist word-for-word in the provided text. Present them exactly as they are and stop.
 
 
 VERSIONING (always apply):
@@ -3391,6 +3729,7 @@ VERSIONING (always apply):
 - Core topology: Management Service <-> SQL <-> Deployment Server <-> Device Agent | Ports: 5494, 13131, 2197, 443
 
 ### CONVERSATIONAL UX GUIDANCE (PROACTIVE MENTORING):
+- **Formatting**: ALWAYS use proper Markdown formatting. Place section headers (like 'Summary:', 'Troubleshooting Steps:', 'Next Steps:') on their own new lines. Use bullet points for steps and ensure there is a blank line between paragraphs to maximize readability.
 - **Strive for Extreme Brevity**: Keep answers as short as possible. Do NOT write conversational preambles (like "Here is the information you requested..." or "Here are the highlights...") or conversational postambles (like "If you have any other questions, let me know...", "Hope this helps...", or "Remember to stay up-to-date..."). Start directly with the answer or bullet points, and stop immediately.
 - **Troubleshooting Case Constraint**: You are strictly forbidden from asking for logs, asking for Salesforce sync, or displaying the Transparency Brief unless the user is explicitly starting a troubleshooting/investigation case (e.g., describing an active error/problem and asking you to troubleshoot). For general version checks, definitions, port checks, or release notes queries, output ONLY the direct facts or notes and NOTHING else.
 - **Transparency Brief**: ONLY at the start of a troubleshooting case analysis, briefly list:
@@ -3647,18 +3986,13 @@ function extractPulseReleaseNoteBlocks(html) {
     const blocks = [];
 
     let globalVersion = null;
-    const allElements = Array.from(doc.querySelectorAll('h1, h2, h3, h4, .text-3xl, .text-2xl, span, p > strong, div > span'));
-    for (const el of allElements) {
-        const m = (el.textContent || "").match(versionHeadingRx);
+    const allHeadings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, .text-3xl'));
+    for (const h of allHeadings) {
+        const m = (h.textContent || "").match(versionHeadingRx);
         if (m) {
             globalVersion = m[1];
             break;
         }
-    }
-    
-    if (!globalVersion) {
-        const bodyMatch = (doc.body.textContent || "").match(versionHeadingRx);
-        if (bodyMatch) globalVersion = bodyMatch[1];
     }
 
     const layoutItems = Array.from(doc.querySelectorAll('.umb-block-grid__layout-item'));
@@ -3756,28 +4090,6 @@ function extractPulseReleaseNoteBlocks(html) {
         });
         flushPulseNoteBuckets(ver, buckets, blocks);
     });
-    
-    if (blocks.length === 0 && globalVersion) {
-        const types = ["Resolved Issues", "Highlights", "Known Issues"];
-        types.forEach(type => {
-            const rx = new RegExp(`<h[1-6][^>]*>\\s*${type}\\s*<\\/h[1-6]>.*?(?:<tbody|<ul)[^>]*>(.*?)(?:<\\/tbody>|<\\/ul>)`, 'is');
-            const m = (html || "").match(rx);
-            if (m) {
-                let text = "";
-                const items = m[1].match(/<(?:tr|li)[^>]*>.*?<\/(?:tr|li)>/gis) || [];
-                items.forEach(item => {
-                    const cleanItem = item.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-                    if (cleanItem.length > 10 && !cleanItem.toLowerCase().includes('ticket number')) {
-                        text += "- " + cleanItem + "\n";
-                    }
-                });
-                if (text.trim()) {
-                    blocks.push({ version: globalVersion, type: type, text: text.trim() });
-                }
-            }
-        });
-    }
-
     return blocks;
 }
 
@@ -4092,8 +4404,9 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const isTroubleshoot = /\b(how\s+do|how\s+to|error|fail|broken|issue|troubleshoot|cannot|unable|configure|setup|install|database|sql|port|certificate|ca|disconnect|offline|enroll|license|sync|crash|freeze|slow|bug)\b/i.test(qLower) || 
                                (qLower.split(/\s+/).length > 6 && !asksReleaseNotes);
         
-        const shouldFetchReleaseNotes = asksReleaseNotes || isTroubleshoot;
-        const shouldDoWebSearch = isTroubleshoot;
+        // Only fetch release notes if explicitly requested or if investigating a hard error/bug where a known issue might exist
+        const shouldFetchReleaseNotes = asksReleaseNotes || /\b(error|fail|broken|crash|bug|issue)\b/i.test(qLower);
+        const shouldDoWebSearch = isTroubleshoot || asksReleaseNotes;
 
         let charBudget = 0;
         if (isListingAll) charBudget = 40000;
@@ -4112,34 +4425,8 @@ async function searchPulseAndDocs(query, msgs, ci) {
             for (const { url, type } of pulseSources) {
                 toast(`Fetching ${type} notes from Pulse...`, 'i');
                 
-                let queryVersionsEarly = parseRequestedVersions(query, history, ci);
-                
-                // Fallback to cached VERSIONS if available
-                if (queryVersionsEarly.length === 0) {
-                    const isAgent = /\b(android|agent|aea|device agent)\b/i.test(query);
-                    const isIdentity = /\b(identity)\b/i.test(query);
-                    if (isAgent && typeof AGENT_VERSIONS !== 'undefined' && AGENT_VERSIONS.length > 0) queryVersionsEarly = [AGENT_VERSIONS[0]];
-                    else if (isIdentity && typeof IDENTITY_VERSIONS !== 'undefined' && IDENTITY_VERSIONS.length > 0) queryVersionsEarly = [IDENTITY_VERSIONS[0]];
-                    else if (typeof VERSIONS !== 'undefined' && VERSIONS.length > 0) queryVersionsEarly = [VERSIONS[0]];
-                }
-
-                let pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
-                
-                // Chicken and Egg: if VERSIONS was empty, fetchPulseReleaseBlocksForVersion(url, []) just populated it!
-                if (queryVersionsEarly.length === 0) {
-                    const isAgent = /\b(android|agent|aea|device agent)\b/i.test(query);
-                    const isIdentity = /\b(identity)\b/i.test(query);
-                    if (isAgent && typeof AGENT_VERSIONS !== 'undefined' && AGENT_VERSIONS.length > 0) queryVersionsEarly = [AGENT_VERSIONS[0]];
-                    else if (isIdentity && typeof IDENTITY_VERSIONS !== 'undefined' && IDENTITY_VERSIONS.length > 0) queryVersionsEarly = [IDENTITY_VERSIONS[0]];
-                    else if (typeof VERSIONS !== 'undefined' && VERSIONS.length > 0) queryVersionsEarly = [VERSIONS[0]];
-                    
-                    if (queryVersionsEarly.length > 0) {
-                        pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
-                    } else {
-                        throw new Error("No version provided and unable to automatically discover latest versions from SOTI Pulse");
-                    }
-                }
-                
+                const queryVersionsEarly = parseRequestedVersions(query, history, ci);
+                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
                 const blocks = pulseLoad.blocks;
                 const resolvedUrl = pulseLoad.fetchUrl;
                 if (blocks.length) {
@@ -4284,82 +4571,133 @@ async function searchPulseAndDocs(query, msgs, ci) {
         if (shouldDoWebSearch) {
             const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for', 'give', 'short', 'subject', 'name', 'meeting', 'notes', 'critical', 'investigation']);
             const combinedLower = caseBlob.toLowerCase();
-            let keywordParts = caseBlob.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
+            // ONLY use the current query for keywords to prevent history from poisoning the search results
+            let keywordParts = qLower.split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
             const seenKw = new Set();
             keywordParts = keywordParts.filter(w => { if (seenKw.has(w)) return false; seenKw.add(w); return true; });
-            const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(qLower);
+            const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enroll|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(qLower);
             if (asksMobiControl && !keywordParts.includes('mobicontrol')) keywordParts.unshift('mobicontrol');
             if (/\bcertificate|cert\b/i.test(qLower) && !keywordParts.includes('certificate')) keywordParts.unshift('certificate');
             const keywords = keywordParts.slice(0, 6).join('%20');
             
             if (keywords) {
-                const [pHtml, dHtml, iHtml] = await Promise.all([
-                    sotiFetch(`${PULSE_ORIGIN}/search/?q=${keywords}`, 10000),
-                    sotiFetch(`${DOCS_ORIGIN}/soti-mobicontrol/search/?q=${keywords}`, 10000),
-                    asksIdentity ? sotiFetch(`${PULSE_ORIGIN}/support/soti-identity/search/?q=${keywords}`, 10000) : Promise.resolve(null)
-                ]);
-
-                // Helper to resolve relative URLs to absolute
-                function resolveLink(href, baseOrigin) {
-                    if (!href || href.startsWith('#') || href.startsWith('javascript:')) return null;
-                    if (href.startsWith('http://') || href.startsWith('https://')) return href;
-                    if (href.startsWith('/')) return baseOrigin + href;
-                    return baseOrigin + '/' + href;
-                }
-
-                let deepLinks = [];
-                if (pHtml) {
-                    const doc = new DOMParser().parseFromString(pHtml, 'text/html');
-                    const items = [...doc.querySelectorAll('a')].map(a => ({
-                        href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
-                        text: a.textContent.trim()
-                    })).filter(a => a.href && a.href.includes('pulse.soti.net/support') && isUsefulPulseResearchLink(a.href, a.text))
-                        .slice(0, asksMobiControl ? 5 : 3);
-                    PULSE_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
-                }
-                if (dHtml) {
-                    const doc = new DOMParser().parseFromString(dHtml, 'text/html');
-                    const items = [...doc.querySelectorAll('a')].map(a => ({
-                        href: resolveLink(a.getAttribute('href'), DOCS_ORIGIN),
-                        text: a.textContent.trim()
-                    })).filter(a => a.href && a.href.includes('/help/')).slice(0, asksMobiControl ? 5 : 3);
-                    DOCS_SEARCH_RESULTS = items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
-                }
-                if (iHtml) {
-                    const doc = new DOMParser().parseFromString(iHtml, 'text/html');
-                    const items = [...doc.querySelectorAll('a')].map(a => ({
-                        href: resolveLink(a.getAttribute('href'), PULSE_ORIGIN),
-                        text: a.textContent.trim()
-                    })).filter(a => a.href && (a.href.includes('/soti-identity/help/') || a.href.includes('/soti-identity/articles/'))).slice(0, 3);
-                    DOCS_SEARCH_RESULTS += (DOCS_SEARCH_RESULTS ? '\n' : '') + items.map(i => { deepLinks.push(i.href); return `- ${i.text}`; }).join('\n');
-                }
-
-                const deepLinkLimit = asksMobiControl || asksReleaseNotes ? 5 : 3;
-                const deepArticleBudget = asksMobiControl || asksReleaseNotes ? 25000 : 12000;
-                
-                if (asksReleaseNotes && typeof RELEASE_NOTES_CONTENT !== 'undefined' && RELEASE_NOTES_CONTENT) {
-                    deepLinks = deepLinks.filter(url => !url.includes('release-notes') && !url.includes('product-notes'));
-                }
-
-                if (deepLinks.length > 0) {
-                    const linksToFetch = deepLinks.slice(0, deepLinkLimit);
-                    const fetched = await Promise.all(linksToFetch.map(url => sotiFetch(url, 15000).catch(() => null)));
-                    const articles = [];
-                    const perArticleBudget = Math.floor(deepArticleBudget / linksToFetch.length);
-
-                    fetched.forEach((content, idx) => {
-                        if (content) {
-                            const doc = new DOMParser().parseFromString(content, 'text/html');
-                            const article = extractDeepResearchArticle(doc);
-                            if (article.length > 100 && !isLowQualityResearchArticle(article)) {
-                                articles.push(`[DEEP RESEARCH - ${linksToFetch[idx]}]:\n${article.slice(0, perArticleBudget)}`);
-                            }
-                        }
-                    });
-
-                    if (articles.length > 0) {
-                        RESEARCHED_ARTICLE_CONTENT = articles.join('\n\n---\n\n');
+                let offlineKnowledge = '';
+                // 1. Try to read the physical PulseKnowledge.md file directly from the folder to ensure we get the latest edits
+                try {
+                    const localUrl = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
+                        ? chrome.runtime.getURL('knowledge/PulseKnowledge.md')
+                        : 'knowledge/PulseKnowledge.md';
+                    const res = await fetch(localUrl, { cache: 'no-store' });
+                    if (res.ok) {
+                        offlineKnowledge = await res.text();
                     }
+                } catch (e) {
+                    console.warn('Failed to load physical PulseKnowledge.md', e);
+                }
+                
+                // 2. Fallback to storage if not loaded yet
+                if (!offlineKnowledge) {
+                    try {
+                        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                            const d = await chrome.storage.local.get('pulseKnowledgeData');
+                            offlineKnowledge = d.pulseKnowledgeData || '';
+                        } else {
+                            offlineKnowledge = localStorage.getItem('soti_pulse_knowledge') || '';
+                        }
+                    } catch (e) { console.warn('Failed to load pulse offline knowledge', e); }
+                }
+
+                if (offlineKnowledge) {
+                    // Fast native string chunking (1000x faster than regex lookahead on 24MB strings)
+                    const chunks = offlineKnowledge.split('\n# ').map(c => c.startsWith('#') ? c : '# ' + c);
+                    let relevantChunks = [];
+                    
+                    const kws = keywordParts.filter(kw => kw.length > 2);
+                    if (kws.length > 0) {
+                        const qLowerStr = qLower;
+                        
+                        // Score chunks based on keyword coverage and frequencies
+                        const scored = chunks.map(chunk => {
+                            let score = 0;
+                            let uniqueHits = 0;
+                            const lowerChunk = chunk.toLowerCase();
+                            const firstLine = lowerChunk.split('\n')[0] || "";
+                            
+                            // 1. Keyword coverage & frequency (Optimized)
+                            let matchedAny = false;
+                            kws.forEach(k => {
+                                if (lowerChunk.includes(k)) {
+                                    matchedAny = true;
+                                    score += 1;
+                                    uniqueHits++;
+                                    let regex;
+                                    try { regex = new RegExp('\\b' + k + '\\b', 'ig'); } catch(e) {}
+                                    const matches = regex ? lowerChunk.match(regex) : null;
+                                    if (matches && matches.length > 0) {
+                                        score += 1 + Math.min(matches.length, 5);
+                                    }
+                                    // Title match bonus
+                                    if (firstLine.includes(k)) {
+                                        score += 5;
+                                    }
+                                }
+                            });
+                            
+                            if (!matchedAny) return { chunk, score: 0 };
+                            
+                            // Exponential bonus for matching multiple different keywords
+                            score += (uniqueHits * uniqueHits * 3);
+                            
+                            // Quick reject: skip expensive operations if chunk barely matches
+                            if (score < 5) return { chunk, score };
+                            
+                            // 2. Exact/near-exact phrase matching for query
+                            const cleanQuery = qLowerStr.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+                            const cleanChunk = lowerChunk.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ');
+                            if (cleanQuery.length > 6 && cleanChunk.includes(cleanQuery)) {
+                                score += 50;
+                            } else {
+                                // Sub-phrase matching (e.g. "work managed")
+                                if (cleanChunk.includes("work managed") && cleanQuery.includes("work managed")) score += 30;
+                                if (cleanChunk.includes("android enterprise") && cleanQuery.includes("android enterprise")) score += 20;
+                            }
+                            
+                            // 3. Length penalty for bloated generic pages
+                            if (lowerChunk.length > 2000) {
+                                score -= Math.floor((lowerChunk.length - 2000) / 500) * 2;
+                            }
+                            
+                            // 4. Procedural / How-To Bonus
+                            if (/\b(how|step|guide|procedure|enroll)\b/i.test(qLowerStr)) {
+                                if (/\b(procedure|steps?|instructions?|about this task)\b/i.test(lowerChunk)) {
+                                    score += 25;
+                                }
+                            }
+                            
+                            return { chunk, score };
+                        }).filter(s => s.score > 0)
+                          .sort((a, b) => b.score - a.score);
+                          
+                        // Take top matches but enforce a strict character limit to prevent LLM context truncation
+                        // Context truncation causes the LLM to lose the system prompt and hallucinate!
+                        let maxChars = 24000;
+                        relevantChunks = [];
+                        for (let i = 0; i < Math.min(scored.length, 15); i++) {
+                            let c = scored[i].chunk.trim();
+                            if (c.length < 30) continue;
+                            if (c.length > 6000) c = c.substring(0, 6000) + '\n...[TRUNCATED FOR LENGTH]';
+                            if (maxChars - c.length < 0 && relevantChunks.length >= 3) break; // Ensure at least top 3 fit
+                            relevantChunks.push(c);
+                            maxChars -= c.length;
+                        }
+                    }
+                    
+                    if (relevantChunks.length > 0) {
+                        RESEARCHED_ARTICLE_CONTENT = "[OFFLINE PULSE KNOWLEDGE MATCHES]:\n\n" + relevantChunks.join('\n\n---\n\n');
+                        DOCS_SEARCH_RESULTS = "Data retrieved from local Pulse Knowledge Base.";
+                    }
+                } else {
+                    console.log('No offline knowledge found. Please sync via Settings.');
                 }
             }
         }
@@ -4463,13 +4801,23 @@ async function loadLocalAISettings() {
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel']);
+            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel', 'pulseSyncUrl', 'pulseLastSync']);
         } else {
             const s = localStorage.getItem('soti_local_ai');
             if (s) data = JSON.parse(s);
         }
         LOCAL_AI_URL = data.localAiUrl || 'http://127.0.0.1:11434';
         LOCAL_AI_MODEL = data.localAiModel || '';
+        
+        // Add defaults for Pulse Sync
+        window.PULSE_SYNC_URL = data.pulseSyncUrl || 'https://pulse.soti.net/support/soti-mobicontrol';
+        
+        // Upgrade from old default
+        if (window.PULSE_SYNC_URL === 'knowledge/PulseKnowledge.md' || window.PULSE_SYNC_URL === 'https://raw.githubusercontent.com/soti-pulse/pulse-knowledge/main/PulseKnowledge.md') {
+            window.PULSE_SYNC_URL = 'https://pulse.soti.net/support/soti-mobicontrol';
+        }
+        
+        window.PULSE_LAST_SYNC = data.pulseLastSync || null;
 
         // Auto-detect and select the first available model if none is set
         if (!LOCAL_AI_MODEL) {
@@ -4484,7 +4832,12 @@ async function loadLocalAISettings() {
 
 async function saveLocalAISettings() {
     try {
-        const d = { localAiUrl: LOCAL_AI_URL, localAiModel: LOCAL_AI_MODEL };
+        const d = { 
+            localAiUrl: LOCAL_AI_URL, 
+            localAiModel: LOCAL_AI_MODEL,
+            pulseSyncUrl: window.PULSE_SYNC_URL,
+            pulseLastSync: window.PULSE_LAST_SYNC
+        };
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             await chrome.storage.local.set(d);
         } else {
@@ -4620,7 +4973,7 @@ const OllamaAI = {
             const hasLogs = messages.some(m => m.content && (m.content.includes('[DIAGNOSTIC DATA') || m.content.includes('=== FILE:')));
             
             // If listing all release notes or doing log analysis, use 8192. Otherwise use 2048 for extremely fast CPU/GPU response.
-            const maxCtxTokens = 4096; // Safe limit to prevent Ollama from crashing on standard RAM
+            const maxCtxTokens = (isListingAll || hasLogs) ? 8192 : 2048;
             const numPredict = isListingAll ? 4096 : 800;
 
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
@@ -4674,9 +5027,8 @@ const OllamaAI = {
                     options: {
                         num_ctx: numCtx,
                         temperature: 0.0,
-                        repeat_penalty: 1.0, // Disable penalty so it doesn't try to use synonyms for technical terms
-                        top_p: 0.1, // Extreme strictness: only pick the most probable word
-                        top_k: 10,
+                        repeat_penalty: 1.1,
+                        top_p: 0.9,
                         num_predict: numPredict // dynamic limit based on query complexity to prevent mid-sentence truncation
                     }
                 })
@@ -4698,6 +5050,9 @@ async function send(overrideText = null, silent = false) {
     }
     // Per-case busy guard — allows other cases to stream simultaneously
     if (busyMap.get(c.id)) return;
+    
+    // Give browser time to paint UI (e.g. progress animations) before locking up
+    await new Promise(r => setTimeout(r, 50));
     
     let txt = "";
     if (typeof overrideText === 'string') {
@@ -4776,8 +5131,10 @@ async function send(overrideText = null, silent = false) {
     streamingElements.set(c.id, aib);
     
     const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
+    const hasLogs = c.logs.length > 0;
+    const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
     
-    if (!isGreeting) {
+    if (!isGreeting && !forensicRun) {
         const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
         const researchMs = needsDeepPulse ? 20000 : 10000;
         try {
@@ -4792,8 +5149,7 @@ async function send(overrideText = null, silent = false) {
         let sysPrompt = "";
         let modelMessages = [];
         let userMsgForModel = txt;
-        const qLower = (txt || "").toLowerCase();
-
+        
         if (isGreeting) {
             sysPrompt = "You are SOTI AI, a technical architect assistant for the SOTI ONE Platform. Respond politely to the user's greeting, ask how you can help, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
             userMsgForModel = txt;
@@ -4807,27 +5163,28 @@ async function send(overrideText = null, silent = false) {
             modelMessages = [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-5)];
         } else {
             // --- LOG CONTEXT ---
-            const hasLogs = c.logs.length > 0;
-            const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
             let logContext = "";
 
             if (hasLogs) {
                 if (forensicRun) {
-                    logContext = buildLogAnalysisContext(c.logs);
+                    logContext = await buildLogAnalysisContext(c.logs);
                 } else {
                     logContext = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
-                    logContext += buildLogPatternProfile(c.logs);
-                    logContext += buildCrossLogIncidentIndex(c.logs, { patternMode: true });
-                    const perLogLimit = Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
-                    c.logs.forEach(l => {
-                        logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${getSmartLogSnippet(l.content, perLogLimit, l.name)}\n=== END: ${l.name} ===`;
-                    });
+                    logContext += await buildLogPatternProfile(c.logs);
+                    logContext += await buildCrossLogIncidentIndex(c.logs, { patternMode: true });
+                    const isLocalAI = !!LOCAL_AI_MODEL;
+                    const perLogLimit = isLocalAI 
+                        ? Math.max(15000, Math.floor(75000 / Math.max(1, c.logs.length)))
+                        : Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
+                    for (const l of c.logs) {
+                        logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, perLogLimit, l.name, l.lines)}\n=== END: ${l.name} ===`;
+                    }
                 }
             }
 
             const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
-            const isSmallModel = false; // Llama 3.1 8B can handle the full prompt
+            const isSmallModel = !!(LOCAL_AI_MODEL && /\b(1\.5b|3b|mini|3\.2|7b|8b|9b)\b/i.test(LOCAL_AI_MODEL));
             let corePrompt = hasLogs
                 ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
                 : getLeanQAPrompt(isSmallModel);
@@ -4846,19 +5203,8 @@ async function send(overrideText = null, silent = false) {
                     }
                 }
             }
-            if (!detectedProduct) {
-                const qLower = (txt || "").toLowerCase();
-                if (qLower.includes('mobicontrol') || qLower.includes('enroll') || qLower.includes('android')) {
-                    detectedProduct = "MobiControl";
-                } else if (qLower.includes('xsight')) {
-                    detectedProduct = "SOTI XSight";
-                } else if (qLower.includes('connect')) {
-                    detectedProduct = "SOTI Connect";
-                }
-            }
 
-            let knowledgeBaseText = "";
-            if (detectedProduct) {
+            if (hasLogs && detectedProduct) {
                 const map = {
                     "MobiControl": "MobiControl.md",
                     "SOTI XSight": "XSight.md",
@@ -4871,7 +5217,7 @@ async function send(overrideText = null, silent = false) {
                             : 'knowledge/' + map[detectedProduct];
                         const res = await fetch(url);
                         if (res.ok) {
-                            knowledgeBaseText = await res.text();
+                            corePrompt += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES:\n` + await res.text();
                         }
                     } catch (e) {
                         console.warn("Could not load knowledge for " + detectedProduct, e);
@@ -4888,25 +5234,17 @@ async function send(overrideText = null, silent = false) {
             if (VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST MOBICONTROL VERSION]: ${VERSIONS[0]}`);
                 liveDataLines.push(`[ALL MOBICONTROL VERSIONS]: ${VERSIONS.join(', ')}`);
-            } else {
-                liveDataLines.push(`[LATEST MOBICONTROL VERSION]: MISSING_DATA`);
             }
             if (AGENT_VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST ANDROID AGENT VERSION]: ${AGENT_VERSIONS[0]}`);
                 liveDataLines.push(`[ALL ANDROID AGENT VERSIONS]: ${AGENT_VERSIONS.join(', ')}`);
-            } else {
-                liveDataLines.push(`[LATEST ANDROID AGENT VERSION]: MISSING_DATA`);
             }
             if (IDENTITY_VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST IDENTITY VERSION]: ${IDENTITY_VERSIONS[0]}`);
                 liveDataLines.push(`[ALL IDENTITY VERSIONS]: ${IDENTITY_VERSIONS.join(', ')}`);
-            } else {
-                liveDataLines.push(`[LATEST IDENTITY VERSION]: MISSING_DATA`);
             }
             if (RELEASE_NOTES_CONTENT && RELEASE_NOTES_CONTENT.trim()) {
                 liveDataLines.push(`[RELEASE NOTES]:\n${RELEASE_NOTES_CONTENT}`);
-            } else {
-                liveDataLines.push(`[RELEASE NOTES]: MISSING_DATA`);
             }
             if (PULSE_SEARCH_RESULTS && PULSE_SEARCH_RESULTS.trim()) {
                 liveDataLines.push(`[PULSE SEARCH]:\n${PULSE_SEARCH_RESULTS}`);
@@ -4920,42 +5258,20 @@ async function send(overrideText = null, silent = false) {
             liveDataSection = liveDataLines.join('\n');
 
             sysPrompt = forensicRun && hasLogs
-                ? scrubPII(`${corePrompt}\n\n${imgContext}`)
-                : scrubPII(`${corePrompt}\n\n${liveDataSection}\n\n${imgContext}\n\n${logContext}`);
+                ? scrubPII(`${corePrompt}
+
+${imgContext}`)
+                : scrubPII(`${liveDataSection}
+
+${corePrompt}
+
+${imgContext}
+
+${logContext}`);
 
             userMsgForModel = forensicRun && hasLogs
                 ? scrubPII(`${logContext}\n\n${txt}`)
                 : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
-
-            // Pure AI Prompt Injection Layer
-            const qLowerPrompt = (txt || "").toLowerCase();
-            let injectionInstruction = "";
-            let injectionData = "";
-
-            if (/\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since|what\s+is\s+fixed|what\s+got\s+fixed|fixes\s+for|patch\s+notes?|fixes\s+are\s+in|fixes\b)\b/i.test(qLowerPrompt)) {
-                injectionInstruction = "[CRITICAL INSTRUCTION: Output the release notes from the LIVE_DATA section EXACTLY. Do not summarize. Do not invent details or URLs. If the data says ERROR or MISSING_DATA, output the exact error message and nothing else.]";
-                injectionData = `<LIVE_DATA>\nRelease Notes:\n${RELEASE_NOTES_CONTENT || 'MISSING_DATA'}\n</LIVE_DATA>`;
-            } else if (qLowerPrompt.includes('enroll')) {
-                if (qLowerPrompt.includes('work profile') || qLowerPrompt.includes('byod')) {
-                    injectionInstruction = "[CRITICAL INSTRUCTION: The user is asking about Work Profile (BYOD) enrollment. You MUST output these 5 steps exactly: 1. Open Google Play Store. 2. Download SOTI MobiControl. 3. Enter Enrollment ID. 4. Accept Work Profile creation. 5. Wait for configuration. DO NOT output Work Managed factory reset steps.]";
-                } else {
-                    injectionInstruction = "[CRITICAL INSTRUCTION: The user is asking about Work Managed (Device Owner) enrollment. You MUST output Method 1 (QR Code), Method 2 (Token), and Method 3 (Zero-Touch). Do not summarize. Do not skip steps.]";
-                    injectionData = knowledgeBaseText ? `<OFFICIAL_DOCUMENTATION>\n${knowledgeBaseText}\n</OFFICIAL_DOCUMENTATION>` : "";
-                }
-            } else if (qLowerPrompt.includes('latest') || qLowerPrompt.includes('version')) {
-                injectionInstruction = "[CRITICAL INSTRUCTION: Answer with the EXACT number from the LIVE_VERSIONS data below. If it says MISSING_DATA, say 'I am currently unable to fetch the live version data.']";
-                let vConsole = VERSIONS.length > 0 ? VERSIONS[0] : "MISSING_DATA";
-                let vAgent = AGENT_VERSIONS.length > 0 ? AGENT_VERSIONS[0] : "MISSING_DATA";
-                let vIdentity = IDENTITY_VERSIONS.length > 0 ? IDENTITY_VERSIONS[0] : "MISSING_DATA";
-                injectionData = `<LIVE_VERSIONS>\nMobiControl Latest: ${vConsole}\nAndroid Agent Latest: ${vAgent}\nIdentity Latest: ${vIdentity}\n</LIVE_VERSIONS>`;
-            } else if (knowledgeBaseText) {
-                injectionInstruction = "[STRICT SYSTEM INSTRUCTION: Answer the user's question using ONLY the OFFICIAL DOCUMENTATION below. Do not invent details.]";
-                injectionData = `<OFFICIAL_DOCUMENTATION>\n${knowledgeBaseText}\n</OFFICIAL_DOCUMENTATION>`;
-            }
-
-            if (injectionInstruction) {
-                userMsgForModel = `${injectionInstruction}\n\n${injectionData}\n\nUser Question: ${userMsgForModel}`;
-            }
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
@@ -4983,6 +5299,18 @@ async function send(overrideText = null, silent = false) {
 
         let resp = '';
         const decoder = new TextDecoder();
+        let lastRender = 0;
+        let pendingRender = false;
+
+        const renderUpdate = () => {
+            if (!pendingRender) return;
+            const chat = $('chatMsgs');
+            const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
+            aib.innerHTML = md(sanitizeAssistantResponse(resp));
+            if (isNearBottom) chat.scrollTop = chat.scrollHeight;
+            pendingRender = false;
+        };
+
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -4996,14 +5324,18 @@ async function send(overrideText = null, silent = false) {
                     const tok = json.choices[0]?.delta?.content || '';
                     if (tok) {
                         resp += tok;
-                        const chat = $('chatMsgs');
-                        const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
-                        aib.innerHTML = md(sanitizeAssistantResponse(resp));
-                        if (isNearBottom) chat.scrollTop = chat.scrollHeight;
+                        pendingRender = true;
+                        
+                        const now = performance.now();
+                        if (now - lastRender > 100) { // Render at most once every 100ms
+                            renderUpdate();
+                            lastRender = now;
+                        }
                     }
                 } catch (e) { }
             }
         }
+        renderUpdate();
         c.msgs.push({ role: 'assistant', content: sanitizeAssistantResponse(resp) });
         saveState();
     } catch (e) { 
@@ -5256,6 +5588,7 @@ async function extractZipLogEntries(file) {
             const entry = zip.files[name];
             if (entry.dir || !isSupportedLogFileName(name)) continue;
             const bytes = await entry.async("uint8array");
+            await new Promise(r => setTimeout(r, 0));
             entries.push({
                 name: `${file.name}/${name}`,
                 content: decodeLogBytes(bytes),
@@ -5309,6 +5642,8 @@ async function extractZipLogEntries(file) {
             throw new Error(`Unsupported ZIP compression method ${method} in ${rawName}`);
         }
 
+        await new Promise(r => setTimeout(r, 0));
+
         entries.push({
             name: `${file.name}/${rawName}`,
             content: decodeLogBytes(data),
@@ -5352,17 +5687,20 @@ const handleFiles = async (files) => {
                 continue;
             }
 
-            entries.forEach(entry => {
+            for (const entry of entries) {
+                const content = normalizeLogText(entry.content || "");
+                const lines = content ? content.split('\n') : [];
                 const log = {
                     name: entry.name,
-                    content: entry.content,
+                    content: content,
+                    lines: lines,
                     sourceZip: entry.sourceZip || "",
                     uploadedAt: Date.now()
                 };
-                getLogPanelIntel(log);
+                await getLogPanelIntel(log);
                 c.logs.push(log);
                 added.push(entry.name);
-            });
+            }
         } catch (e) {
             skipped.push(`${f.name}: ${e.message || e}`);
         }
@@ -5560,6 +5898,7 @@ $('imgFileIn').onchange = e => handleImages(e.target.files);
 
 
 $('btnAnalyse').onclick = async () => {
+    _lastYield = performance.now();
     const now = new Date().toLocaleString();
     const c = cases.find(x => x.id === activeCaseId);
     const attachedLogs = (c && c.logs) ? c.logs.map(l => `${l.name} (${l.content.length} chars)`).join(', ') : 'No logs attached';
@@ -5572,6 +5911,7 @@ $('btnAnalyse').onclick = async () => {
     if (pWrap && pLbl && pFill) {
         pLbl.textContent = "Analysing logs...";
         pWrap.style.display = 'flex';
+        pFill.style.transform = '';
         pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
         pFill.style.background = 'linear-gradient(90deg, var(--blue), var(--blue2))';
         pFill.style.width = '30%';
@@ -5582,12 +5922,16 @@ $('btnAnalyse').onclick = async () => {
     $('iconR').textContent = '▶';
     $('panelR').classList.add('collapsed');
 
+    // Yield control to let the browser paint the "Analysing logs..." progress indicator
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+
     await send(forensicPrompt, true);
 
     // Mark as completed
     if (pLbl && pFill) {
         pLbl.textContent = "Log Analysis Completed";
         pFill.style.animation = 'none';
+        pFill.style.transform = 'none';
         pFill.style.width = '100%';
         pFill.style.background = 'var(--green)';
         
@@ -5677,9 +6021,26 @@ $('btnGenerateJira').onclick = async () => {
     const issue      = $('issueSummary').value || '';
     const notes      = $('meetingNotes').value || '';
     const chatCtx    = c.msgs.slice(-20).map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
-    const logCtx     = c.logs.length > 0 
-        ? c.logs.map(l => `=== LOG: ${l.name} ===\n${l.content.substring(0, 8000)}`).join('\n\n')
-        : 'No logs attached.';
+
+    // Gather pre-parsed log facts and build deep log context
+    let parsedLogFacts = "";
+    let logCtx = "No logs attached.";
+    if (c.logs.length > 0) {
+        parsedLogFacts += "### PRE-PARSED LOG DETAILS:\n";
+        for (const log of c.logs) {
+            parsedLogFacts += `- Log Name: ${log.name}\n`;
+            if (log.panelIntel) {
+                parsedLogFacts += `  * Product Context: ${log.panelIntel.product || 'Unknown'}\n`;
+                parsedLogFacts += `  * SQL Target Endpoint: ${log.panelIntel.sqlTarget || 'Unknown'}\n`;
+                parsedLogFacts += `  * Azure SQL Database: ${log.panelIntel.azureSql ? 'Yes' : 'No'}\n`;
+                parsedLogFacts += `  * Status/Verdict: ${log.panelIntel.verdict || 'N/A'}\n`;
+                if (log.panelIntel.firstTimestamp) {
+                    parsedLogFacts += `  * Log Timeframe: ${log.panelIntel.firstTimestamp} to ${log.panelIntel.lastTimestamp}\n`;
+                }
+            }
+        }
+        logCtx = await buildLogAnalysisContext(c.logs);
+    }
 
     const JIRA_TEMPLATE = `*{color:#de350b}Requirements for the Jira Filing: [https://wiki.soti.net/index.php?title=Artifacts_Required_for_Jira]{color}*
 
@@ -5740,12 +6101,12 @@ Affected OEM Version:
 
 Browser Used (If applicable):
 
-*----------------------------------------------------------------------------------------------*
+*------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Other SOTI Apps*{color}
 
 SOTI Surf/Settings Manager/HUB version:
 
-*----------------------------------------------------------------------------------------------*
+*------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Troubleshooting Steps:*{color}
 
 *Workarounds Suggested:*
@@ -5753,7 +6114,7 @@ h1. {color:#4c9aff}*Troubleshooting Steps:*{color}
  * Step2 + Result
  * So on...
 
-*----------------------------------------------------------------------------------------------*
+*------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Issue Reproduction*{color}
 
 Repro Steps: PLEASE OUTLINE THE STEPS IN DETAIL
@@ -5769,7 +6130,7 @@ Results:
 
 Screenshot and video of the issue:
 
-*----------------------------------------------------------------------------------------------*
+*------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Log Details*{color}
  * If each log file <15 MB, attach directly to the ticket
  * If log file >15 MB, share log location under S:\\CustomerData
@@ -5786,7 +6147,7 @@ Log Analysis:
 [INSERT RAW LOG SNIPPETS HERE]
 {code}
 
-*----------------------------------------------------------------------------------------------*
+*------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*L3/SME Engineer*{color}
 
 Name:
@@ -5795,19 +6156,22 @@ Analysis:
 
 Otherwise, why was L3/SME not consulted:`;
 
-    const systemPrompt = `You are a SOTI Tier 3 Support AI. Your task is to extract technical details from provided context and populate the OFFICIAL SOTI JIRA TEMPLATE.
+    const systemPrompt = `You are a SOTI Tier 3 Support AI. Your task is to populate the OFFICIAL SOTI JIRA TEMPLATE perfectly using the provided Case Info, Conversation History, Notes, and Log Details.
 
-### CRITICAL RULES:
-1. OUTPUT ONLY THE FILLED JIRA TEMPLATE.
-2. DO NOT repeat the "Case Information", "Conversation History", or any other input labels.
-3. DO NOT include any preamble, introductory text, or concluding remarks.
-4. DO NOT summarize. Use the FULL template structure provided.
-5. PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they appear in the template.
-6. If a field is unknown, write "N/A" or "TBC" - but NEVER omit the field.
-7. For Log Analysis, you MUST extract real technical evidence from the attached logs.
-8. The 'Log Analysis' section MUST contain raw log snippets (timestamps + error lines). Do NOT provide a textual explanation or summary in this section; provide only the raw technical evidence inside the code block.
+### CRITICAL INSTRUCTIONS FOR FILLING FIELDS:
+1. BACKGROUND -> Description of Issue: Write a comprehensive, detailed description of the problem, including the action performed, the components involved, and the behavior observed.
+2. BACKGROUND -> Expected Behavior: Fill this in clearly with the expected outcome.
+3. BACKGROUND -> Business Impact & Justification of Priority: Provide a clear, professional technical justification matching the priority ('High', 'Medium', 'Low') selected by the user.
+4. ENVIRONMENT & DEVICE DETAILS: Carefully extract values for SQL Version, Server OS, Platform OS, Agent Version, AEDO/Classic enrollment type, etc. from the context, notes, and log details. If not found, use "TBC" (To Be Confirmed) or "N/A" instead of leaving them empty.
+5. TROUBLESHOOTING & REPRODUCTION: Fill in the workarounds suggested and the step-by-step reproduction instructions based on the notes, conversation history, and repro steps provided.
+6. LOG DETAILS: In the {code:java} block under 'Log Analysis', extract and insert the actual raw log error lines, SQL exceptions, or installer rollback triggers with their exact timestamps from the attached logs. DO NOT write placeholder text or summaries inside the {code:java} block; insert only the actual raw technical evidence.
+7. L3/SME Engineer -> Analysis: Provide a professional, detailed engineering analysis explaining the failure mechanics.
 
-YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
+### FORMATTING RULES:
+- OUTPUT ONLY the filled SOTI JIRA template.
+- DO NOT include any preamble, introduction, or concluding remarks.
+- PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
+- YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
 
     const userPrompt = scrubPII(`### SOURCE DATA FOR ANALYSIS:
 - Case Number: ${caseNum}
@@ -5821,9 +6185,13 @@ YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing
 - Priority: ${priority}
 - Repro Steps: ${repro}
 - Notes: ${notes}
+
+${parsedLogFacts}
+
 - Conversation History:
 ${chatCtx}
-- Attached Logs:
+
+- Attached Logs Analysis Context:
 ${logCtx}
 
 ### OFFICIAL SOTI JIRA TEMPLATE (FILL THIS OUT):
@@ -5836,6 +6204,14 @@ ${JIRA_TEMPLATE}`);
             return toast('No model selected. Open Settings (⚙) and pick an Ollama model.', 'e', 5000);
         }
         const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        
+        const numPredict = 3072;
+        const estimatedTokens = Math.ceil(userPrompt.length / 3.5);
+        const neededTokens = estimatedTokens + numPredict + 500;
+        const numCtx = Math.max(8192, Math.min(32768, Math.ceil(neededTokens / 1024) * 1024));
+
+        console.log(`[Ollama JIRA Request] Model: ${LOCAL_AI_MODEL}, Chars: ${userPrompt.length}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
+
         const res = await fetch(`${baseUrl}/v1/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -5848,11 +6224,11 @@ ${JIRA_TEMPLATE}`);
                 stream: false,
                 keep_alive: -1,
                 options: {
-                    num_ctx: 8192,
+                    num_ctx: numCtx,
                     temperature: 0.0,
                     repeat_penalty: 1.1,
                     top_p: 0.9,
-                    num_predict: 1024 // limits JIRA response to prevent looping
+                    num_predict: numPredict
                 }
             })
         });
@@ -5876,11 +6252,21 @@ loadState();
 fetchLatestSOTIVersions();
 loadLocalAISettings().then(() => updateLocalAIBadge());
 
-// --- SETTINGS MODAL (AI — OLLAMA) ---
+// --- SETTINGS MODAL (AI - OLLAMA & PULSE SYNC) ---
 async function refreshSettingsModal() {
     const urlInp = $('localAiUrl');
     const modelSel = $('localAiModelSel');
     const statusEl = $('localAiStatus');
+    
+    // Setup Pulse Sync UI
+    if ($('pulseSyncUrl')) $('pulseSyncUrl').value = window.PULSE_SYNC_URL || '';
+    if ($('pulseSyncStatus')) {
+        $('pulseSyncStatus').textContent = window.PULSE_LAST_SYNC 
+            ? `Last synced: ${new Date(window.PULSE_LAST_SYNC).toLocaleString()}` 
+            : 'Never synced';
+        $('pulseSyncStatus').style.color = window.PULSE_LAST_SYNC ? 'var(--green)' : 'var(--txt2)';
+    }
+
     if (urlInp) urlInp.value = LOCAL_AI_URL;
     if (urlInp && !urlInp.placeholder) urlInp.placeholder = 'http://127.0.0.1:11434';
 
@@ -5889,20 +6275,20 @@ async function refreshSettingsModal() {
     LOCAL_AI_MODELS = models;
     if (modelSel) {
         if (models.length === 0) {
-            modelSel.innerHTML = '<option value="">No models found — is Ollama running?</option>';
+            modelSel.innerHTML = '<option value="">No models found - is Ollama running?</option>';
             if (statusEl) {
                 const tried = getOllamaProbeUrls(urlInp ? urlInp.value : LOCAL_AI_URL).join(', ');
                 if (isStandalonePage()) {
-                    statusEl.innerHTML = '⚠ Ollama not reachable from standalone page.<br><span style="font-size:10px">Run <strong>serve_standalone.bat</strong>, open <code>http://127.0.0.1:8765/SOTI_AI_Analyser.html</code> (not file://). Ollama must be running on 127.0.0.1:11434.</span>';
+                    statusEl.innerHTML = '⚠️ Ollama not reachable from standalone page.<br><span style="font-size:10px">Run <strong>serve_standalone.bat</strong>, open <code>http://127.0.0.1:8765/SOTI_AI_Analyser.html</code> (not file://). Ollama must be running on 127.0.0.1:11434.</span>';
                 } else {
-                    statusEl.textContent = '⚠ Ollama not reachable. Tried: ' + tried + ' — use http://127.0.0.1:11434 if browser works on localhost';
+                    statusEl.textContent = '⚠️ Ollama not reachable. Tried: ' + tried + ' - use http://127.0.0.1:11434 if browser works on localhost';
                 }
                 statusEl.style.color = 'var(--warn)';
             }
         } else {
             modelSel.innerHTML = models.map(m => `<option value="${m}" ${m === LOCAL_AI_MODEL ? 'selected' : ''}>${m.replace(/:latest$/i, '')}</option>`).join('');
             if (!LOCAL_AI_MODEL && models.length > 0) LOCAL_AI_MODEL = pickPreferredOllamaModel(models);
-            if (statusEl) { statusEl.textContent = `✓ ${models.length} model(s) available`; statusEl.style.color = 'var(--green)'; }
+            if (statusEl) { statusEl.textContent = `✅ ${models.length} model(s) available`; statusEl.style.color = 'var(--green)'; }
         }
     }
 }
@@ -5917,6 +6303,652 @@ $('mSettingsClose').onclick = () => $('mSettings').style.display = 'none';
 $('localAiUrl').oninput = () => {
     LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://127.0.0.1:11434';
 };
+
+if ($('pulseSyncUrl')) {
+    $('pulseSyncUrl').oninput = () => {
+        window.PULSE_SYNC_URL = $('pulseSyncUrl').value.trim();
+    };
+}
+
+function scrapeUrlViaTabTabFallback(url) {
+    return new Promise((resolve, reject) => {
+        if (!isChromeExtension() || !chrome.tabs || !chrome.scripting) {
+            return reject(new Error("Tab crawling is only supported when running as a Chrome Extension."));
+        }
+        let tabId = null;
+        let updateListener = null;
+        let timeoutId = null;
+        const cleanup = () => {
+            if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+            if (updateListener && chrome.tabs.onUpdated) { chrome.tabs.onUpdated.removeListener(updateListener); updateListener = null; }
+            if (tabId) {
+                const currentTabId = tabId;
+                tabId = null;
+                chrome.tabs.remove(currentTabId, () => {
+                    const err = chrome.runtime.lastError;
+                });
+            }
+        };
+        timeoutId = setTimeout(() => {
+            cleanup();
+            reject(new Error("Timeout waiting for SOTI Pulse page to load"));
+        }, 25000);
+        chrome.tabs.create({ url: url, active: false }, (tab) => {
+            if (chrome.runtime.lastError || !tab) {
+                cleanup();
+                return reject(new Error(chrome.runtime.lastError?.message || "Failed to create background tab"));
+            }
+            tabId = tab.id;
+            updateListener = (updatedTabId, changeInfo) => {
+                if (updatedTabId === tabId && changeInfo.status === 'complete') {
+                    setTimeout(() => {
+                        if (!tabId) return;
+                        chrome.scripting.executeScript({
+                            target: { tabId: tabId, allFrames: true },
+                            func: () => {
+                                // 1. Identify the best content container to exclude page boilerplate
+                                const containerSelectors = [
+                                    'article',
+                                    'main',
+                                    '#main-content',
+                                    '.main-content',
+                                    '#content',
+                                    '.content',
+                                    '.body-content',
+                                    '.umb-grid',
+                                    '.product-content',
+                                    '.help-content'
+                                ];
+                                
+                                let container = null;
+                                for (const selector of containerSelectors) {
+                                    const found = document.querySelector(selector);
+                                    if (found && found.innerText && found.innerText.trim().length > 150) {
+                                        container = found;
+                                        break;
+                                    }
+                                }
+                                
+                                if (!container) {
+                                    container = document.body;
+                                }
+                                
+                                // Clone container to modify it safely
+                                const clone = container.cloneNode(true);
+                                
+                                // Find any iframe sources (important for docs.soti.net bypass)
+                                const iframeUrls = [];
+                                document.querySelectorAll('iframe').forEach(ifr => {
+                                    if (ifr.src && (ifr.src.includes('docs.soti.net') || ifr.src.includes('soti.net'))) {
+                                        iframeUrls.push(ifr.src);
+                                    }
+                                });
+                                
+                                // 2. Strip noise elements from the clone
+                                const noiseSelectors = [
+                                    'header', 'footer', 'nav', 'script', 'style', 'noscript', 'iframe', 'link', 'svg', 'path',
+                                    '.nav', '.menu', '.footer', '.header', '.sidebar', '.top-nav', '.navigation',
+                                    '.login-modal', '.login-form', '#login-modal', '#login-form', '.modal',
+                                    '.cookie-banner', '.search-box', '.breadcrumbs', '.ad-container', '.promo'
+                                ];
+                                
+                                noiseSelectors.forEach(sel => {
+                                    clone.querySelectorAll(sel).forEach(el => el.remove());
+                                });
+                                
+                                const text = clone.innerText || clone.textContent || "";
+                                const title = document.title || "";
+                                
+                                // 3. Get links from the entire page so we don't miss navigation paths
+                                const links = Array.from(document.querySelectorAll('a')).map(a => ({
+                                    href: a.href,
+                                    text: (a.textContent || '').trim()
+                                }));
+                                
+                                return { title, text, links, iframeUrls, url: window.location.href };
+                            }
+                        }, (results) => {
+                            if (chrome.runtime.lastError) {
+                                const errMsg = chrome.runtime.lastError.message;
+                                cleanup();
+                                return reject(new Error(errMsg));
+                            }
+                            cleanup();
+                            if (results && results.length > 0) {
+                                let allLinks = [];
+                                let allIframeUrls = [];
+                                let bestText = "";
+                                let bestTitle = "";
+                                
+                                for (const frameRes of results) {
+                                    const data = frameRes.result;
+                                    if (!data) continue;
+                                    
+                                    if (data.links) {
+                                        // Map any docs.soti.net links back to pulse.soti.net
+                                        const mapped = data.links.map(l => {
+                                            if (l.href && l.href.includes('docs.soti.net')) {
+                                                return { ...l, href: docsToPulseUrl(l.href) };
+                                            }
+                                            return l;
+                                        });
+                                        allLinks.push(...mapped);
+                                    }
+                                    if (data.iframeUrls) {
+                                        allIframeUrls.push(...data.iframeUrls);
+                                    }
+                                    
+                                    // Identify frame content source
+                                    const isIframeDoc = data.url && data.url.includes('docs.soti.net');
+                                    
+                                    if (isIframeDoc) {
+                                        // Prefer docs.soti.net iframe content if available
+                                        bestText = data.text;
+                                        bestTitle = data.title;
+                                    } else if (!bestText || data.text.length > bestText.length) {
+                                        // Otherwise fallback to frame with longest text
+                                        bestText = data.text;
+                                        bestTitle = data.title;
+                                    }
+                                }
+                                
+                                resolve({ title: bestTitle, text: bestText, links: allLinks, iframeUrls: allIframeUrls });
+                            } else {
+                                reject(new Error("No response from page content script"));
+                            }
+                        });
+                    }, 5000);
+                }
+            };
+            chrome.tabs.onUpdated.addListener(updateListener);
+        });
+    });
+}
+
+function scrapeUrlViaTab(url) {
+    const isDocs = url.includes('docs.soti.net');
+    const isRootIndex = url.endsWith('/help/') || url.endsWith('/help') || url.endsWith('/help/index.html') || 
+                        url.endsWith('/product-notes') || url.endsWith('/product-notes/') ||
+                        url.endsWith('/release-notes') || url.endsWith('/release-notes/') ||
+                        url.endsWith('/downloads') || url.endsWith('/downloads/');
+    
+    // --- DIRECT FETCH for Pulse help pages (bypasses JS rendering) ---
+    // Pulse help pages load content dynamically via XHR into an empty <div id="pageContent">.
+    // We can fetch the actual help HTML directly from the internal endpoint.
+    const pulseHelpMatch = url.match(
+        /pulse\.soti\.net\/support\/soti-mobicontrol\/help\/\?V=([\d.]+)(?:&T=\/?(.+))?/i
+    );
+    if (pulseHelpMatch && !isRootIndex) {
+        const helpVersion = pulseHelpMatch[1];
+        const helpTopic = pulseHelpMatch[2] || 'start';
+        return new Promise((resolve) => {
+            // First, discover the timestamp from the shell page (cached after first call)
+            _getPulseHelpTimestamp(helpVersion).then(timestamp => {
+                if (!timestamp) {
+                    console.log('[PULSE DIRECT] No timestamp found, falling back to tab for:', url);
+                    resolve(scrapeUrlViaTabTabFallback(url));
+                    return;
+                }
+                const directUrl = `https://pulse.soti.net/help/sotimobicontrol/${helpVersion}-${timestamp}/${helpTopic}.html`;
+                fetch(directUrl, { cache: 'no-store' })
+                    .then(res => {
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        return res.text();
+                    })
+                    .then(html => {
+                        const doc = new DOMParser().parseFromString(html, 'text/html');
+                        
+                        // Strip noise elements
+                        const noiseSelectors = [
+                            'script', 'style', 'noscript', 'link', 'svg', 'path',
+                            '.wh-expand-btn', '.wh-tooltip', '.close-toc-button'
+                        ];
+                        noiseSelectors.forEach(sel => {
+                            doc.querySelectorAll(sel).forEach(el => el.remove());
+                        });
+                        
+                        // Extract the main topic body content
+                        const topicBody = doc.querySelector('#wh_topic_body') || 
+                                          doc.querySelector('.wh_topic_content') ||
+                                          doc.querySelector('main[role="main"]') ||
+                                          doc.body;
+                        const text = topicBody ? (topicBody.innerText || topicBody.textContent || '') : '';
+                        const title = doc.querySelector('#ariaid-title1')?.textContent || 
+                                      doc.title || 'SOTI MobiControl Help';
+                        
+                        // Extract links from TOC and content for crawl discovery
+                        const links = Array.from(doc.querySelectorAll('a[href]')).map(a => {
+                            let href = a.getAttribute('href') || '';
+                            try {
+                                // Properly resolve relative links against the fetched URL
+                                href = new URL(href, directUrl).href;
+                            } catch (_) {
+                                // If invalid, fallback
+                                if (href.startsWith('/')) {
+                                    href = 'https://pulse.soti.net' + href;
+                                }
+                            }
+                            
+                            // Map any raw help links to Pulse shell links so they match visited
+                            const internalHelpMatch = href.match(/\/help\/sotimobicontrol\/([\d.]+)-[\d]+\/(.+?)(?:\.html)?$/i);
+                            if (internalHelpMatch) {
+                                href = `https://pulse.soti.net/support/soti-mobicontrol/help/?V=${internalHelpMatch[1]}&T=/${internalHelpMatch[2]}`;
+                            }
+                            
+                            return { href, text: (a.textContent || '').trim() };
+                        }).filter(l => l.href && l.href.startsWith('http'));
+                        
+                        if (text && text.trim().length > 100) {
+                            console.log('[PULSE DIRECT SUCCESS] Scraped:', url, '→', directUrl);
+                            resolve({ title: title.trim(), text, links, iframeUrls: [] });
+                            return;
+                        }
+                        throw new Error('Content too short from direct fetch');
+                    })
+                    .catch(err => {
+                        console.log('[PULSE DIRECT FAILED] Falling back to tab:', url, err.message || err);
+                        resolve(scrapeUrlViaTabTabFallback(url));
+                    });
+            }).catch(() => {
+                resolve(scrapeUrlViaTabTabFallback(url));
+            });
+        });
+    }
+    
+    if (isDocs && !isRootIndex) {
+        return new Promise((resolve) => {
+            fetch(url, { cache: 'no-store' })
+                .then(res => {
+                    if (!res.ok) throw new Error("HTTP " + res.status);
+                    return res.text();
+                })
+                .then(html => {
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
+                    
+                    const containerSelectors = [
+                        'article',
+                        'main',
+                        '#main-content',
+                        '.main-content',
+                        '#content',
+                        '.content',
+                        '.body-content',
+                        '.umb-grid',
+                        '.product-content',
+                        '.help-content'
+                    ];
+                    
+                    let container = null;
+                    for (const selector of containerSelectors) {
+                        const found = doc.querySelector(selector);
+                        if (found && found.innerText && found.innerText.trim().length > 150) {
+                            container = found;
+                            break;
+                        }
+                    }
+                    
+                    if (!container) container = doc.body;
+                    
+                    const clone = container.cloneNode(true);
+                    
+                    const noiseSelectors = [
+                        'header', 'footer', 'nav', 'script', 'style', 'noscript', 'iframe', 'link', 'svg', 'path',
+                        '.nav', '.menu', '.footer', '.header', '.sidebar', '.top-nav', '.navigation',
+                        '.login-modal', '.login-form', '#login-modal', '#login-form', '.modal',
+                        '.cookie-banner', '.search-box', '.breadcrumbs'
+                    ];
+                    
+                    noiseSelectors.forEach(sel => {
+                        clone.querySelectorAll(sel).forEach(el => el.remove());
+                    });
+                    
+                    const text = clone.innerText || clone.textContent || "";
+                    const title = doc.title || "";
+                    
+                    const links = Array.from(doc.querySelectorAll('a')).map(a => ({
+                        href: a.href,
+                        text: (a.textContent || '').trim()
+                    })).filter(l => l.href && l.href.startsWith('http'));
+                    
+                    if (text && text.trim().length > 200) {
+                        console.log('[FAST PATH SUCCESS] Scraped via fetch:', url);
+                        resolve({ title, text, links, iframeUrls: [] });
+                        return;
+                    }
+                    throw new Error("Content too short");
+                })
+                .catch(err => {
+                    console.log('[FAST PATH FAILED] Falling back to tab:', url, err.message || err);
+                    resolve(scrapeUrlViaTabTabFallback(url));
+                });
+        });
+    }
+    return scrapeUrlViaTabTabFallback(url);
+}
+
+function docsToPulseUrl(urlStr) {
+    try {
+        const u = new URL(urlStr);
+        if (u.hostname === 'docs.soti.net') {
+            // Case 1: /soti-mobicontrol/v2026.1/help/...
+            let match = u.pathname.match(/\/soti-mobicontrol\/v?([^\/]+)\/help\/(.+)$/i);
+            if (match) {
+                const version = match[1];
+                let target = match[2];
+                if (target.endsWith('.html')) target = target.slice(0, -5);
+                return `https://pulse.soti.net/support/soti-MobiControl/help/?V=${version}&T=${target}`;
+            }
+            // Case 2: /mc/help/v2026.1/en/...
+            match = u.pathname.match(/\/mc\/help\/v?([^\/]+)\/en\/(.+)$/i);
+            if (match) {
+                const version = match[1];
+                let target = match[2];
+                if (target.endsWith('.html')) target = target.slice(0, -5);
+                return `https://pulse.soti.net/support/soti-MobiControl/help/?V=${version}&T=${target}`;
+            }
+        }
+    } catch (_) {}
+    return urlStr;
+}
+
+// --- Timestamp cache for direct help content fetching ---
+const _pulseTimestampCache = {};
+async function _getPulseHelpTimestamp(version) {
+    if (_pulseTimestampCache[version]) return _pulseTimestampCache[version];
+    try {
+        const shellUrl = `https://pulse.soti.net/support/soti-mobicontrol/help/?V=${version}`;
+        const resp = await fetch(shellUrl, { cache: 'no-store' });
+        const html = await resp.text();
+        // Extract timestamp from: const backupVersion = "2026.1-1780417210";
+        const tsMatch = html.match(/backupVersion\s*=\s*["'][\d.]+-([\d]+)["']/);
+        if (tsMatch) {
+            _pulseTimestampCache[version] = tsMatch[1];
+            console.log(`[PULSE TIMESTAMP] Discovered timestamp for v${version}: ${tsMatch[1]}`);
+            return tsMatch[1];
+        }
+        // Fallback: try timeStamp variable
+        const tsMatch2 = html.match(/var\s+timeStamp\s*=\s*["']([\d]+)["']/);
+        if (tsMatch2) {
+            _pulseTimestampCache[version] = tsMatch2[1];
+            return tsMatch2[1];
+        }
+    } catch (err) {
+        console.warn('[PULSE TIMESTAMP] Failed to discover timestamp for v' + version, err);
+    }
+    return null;
+}
+
+// --- TOC-based seed URL generation for comprehensive help crawling ---
+async function fetchPulseHelpTocSeeds(version, updateStatusCallback) {
+    try {
+        if (updateStatusCallback) updateStatusCallback(`Discovering help pages for v${version} from TOC...`);
+        const timestamp = await _getPulseHelpTimestamp(version);
+        if (!timestamp) {
+            console.warn('[TOC SEEDS] No timestamp found for v' + version);
+            return [];
+        }
+        // Fetch the start page which contains the full Table of Contents
+        const tocUrl = `https://pulse.soti.net/help/sotimobicontrol/${version}-${timestamp}/start.html`;
+        const tocResp = await fetch(tocUrl, { cache: 'no-store' });
+        if (!tocResp.ok) throw new Error('HTTP ' + tocResp.status);
+        const tocHtml = await tocResp.text();
+        
+        const doc = new DOMParser().parseFromString(tocHtml, 'text/html');
+        const tocLinks = doc.querySelectorAll('a[href*="/support/soti-MobiControl/help/"], a[href*="/support/soti-mobicontrol/help/"]');
+        const seeds = new Set();
+        
+        tocLinks.forEach(link => {
+            let href = link.getAttribute('href');
+            if (href) {
+                // Convert relative paths to absolute
+                if (href.startsWith('/')) {
+                    href = 'https://pulse.soti.net' + href;
+                }
+                // Only include actual help topic URLs (with ?V= parameter)
+                if (href.includes('pulse.soti.net') && href.includes('/help/')) {
+                    seeds.add(href);
+                }
+            }
+        });
+        
+        console.log(`[TOC SEEDS] Found ${seeds.size} help pages from TOC for v${version}`);
+        if (updateStatusCallback) updateStatusCallback(`Found ${seeds.size} help pages for v${version}`);
+        return Array.from(seeds);
+    } catch (err) {
+        console.warn('[TOC SEEDS] Failed to fetch TOC seeds for v' + version, err);
+        return [];
+    }
+}
+
+async function crawlPulseSupport(seeds, updateStatusCallback) {
+    const maxPages = 10000;
+    const concurrency = 8;
+    const visited = new Set();
+    const queue = Array.isArray(seeds) ? [...seeds] : [seeds];
+    let compiledMarkdown = "";
+    let activeWorkers = 0;
+    
+    function isPulseSupportUrl(urlStr) {
+        try {
+            const u = new URL(urlStr);
+            return u.hostname === 'pulse.soti.net' && u.pathname.toLowerCase().includes('/support/soti-mobicontrol');
+        } catch (_) {
+            return false;
+        }
+    }
+    
+    function normalizeUrl(urlStr) {
+        try {
+            const u = new URL(urlStr);
+            if (u.hostname === 'pulse.soti.net' || u.hostname === 'docs.soti.net') {
+                let res = u.origin.toLowerCase() + u.pathname.toLowerCase() + u.search;
+                if (res.endsWith('/')) res = res.slice(0, -1);
+                return res;
+            }
+        } catch (_) {}
+        let normalized = urlStr.split('#')[0].split('?')[0];
+        if (normalized.endsWith('/')) {
+            normalized = normalized.slice(0, -1);
+        }
+        return normalized;
+    }
+    
+    function getDisplayPath(url) {
+        try {
+            const u = new URL(url);
+            let p = u.pathname + u.search;
+            return p.length > 40 ? p.slice(0, 37) + '...' : p;
+        } catch (_) {
+            return url;
+        }
+    }
+    
+    return new Promise((resolve, reject) => {
+        const checkAndRun = async () => {
+            if (visited.size >= maxPages || (queue.length === 0 && activeWorkers === 0)) {
+                if (compiledMarkdown.length < 100) {
+                    reject(new Error("Failed to crawl any content from SOTI Pulse."));
+                } else {
+                    resolve(compiledMarkdown);
+                }
+                return;
+            }
+            
+            while (activeWorkers < concurrency && queue.length > 0 && visited.size < maxPages) {
+                const url = queue.shift();
+                const normalized = normalizeUrl(url);
+                
+                if (visited.has(normalized)) continue;
+                visited.add(normalized);
+                
+                activeWorkers++;
+                updateStatusCallback(`Scraping ${visited.size}/${maxPages} (active: ${activeWorkers}): ${getDisplayPath(url)}`);
+                
+                scrapeUrlViaTab(url).then((pageData) => {
+                    activeWorkers--;
+                    if (pageData && pageData.text) {
+                        const pageTitle = pageData.title || "SOTI Pulse Page";
+                        const displayUrl = docsToPulseUrl(url);
+                        compiledMarkdown += `\n\n# ${pageTitle}\nSource: ${displayUrl}\n\n`;
+                        const cleanText = pageData.text
+                            .replace(/\r\n/g, '\n')
+                            .replace(/\n{3,}/g, '\n\n')
+                            .trim();
+                        compiledMarkdown += cleanText;
+                        
+                        // Add iframe URLs to the crawl queue
+                        if (pageData.iframeUrls) {
+                            for (const iframeUrl of pageData.iframeUrls) {
+                                const mappedIframeUrl = docsToPulseUrl(iframeUrl);
+                                const norm = normalizeUrl(mappedIframeUrl);
+                                if (isPulseSupportUrl(mappedIframeUrl) && 
+                                    !visited.has(norm) && 
+                                    !queue.some(q => normalizeUrl(q) === norm)) {
+                                    queue.push(mappedIframeUrl);
+                                }
+                            }
+                        }
+                        
+                        if (pageData.links && visited.size < maxPages) {
+                            for (const link of pageData.links) {
+                                if (!link.href) continue;
+                                const mappedHref = docsToPulseUrl(link.href);
+                                const linkNorm = normalizeUrl(mappedHref);
+                                if (isPulseSupportUrl(mappedHref) && 
+                                    !visited.has(linkNorm) && 
+                                    !queue.some(q => normalizeUrl(q) === linkNorm)) {
+                                    
+                                    if (!/\.(pdf|zip|png|jpg|jpeg|gif|msi|exe|docx|xlsx|pptx)$/i.test(linkNorm)) {
+                                        queue.push(mappedHref);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    setTimeout(checkAndRun, 200);
+                }).catch((err) => {
+                    activeWorkers--;
+                    console.warn(`Scrape failed for ${url}:`, err);
+                    compiledMarkdown += `\n\n# Scrape Failed: ${url}\nError: ${err.message || err}\n`;
+                    setTimeout(checkAndRun, 200);
+                });
+            }
+        };
+        checkAndRun();
+    });
+}
+
+if ($('btnSyncPulse')) {
+    $('btnSyncPulse').onclick = async () => {
+        const btn = $('btnSyncPulse');
+        const status = $('pulseSyncStatus');
+        const rawUrl = window.PULSE_SYNC_URL;
+        let url = rawUrl;
+        if (rawUrl && rawUrl.startsWith('knowledge/')) {
+            url = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) 
+                ? chrome.runtime.getURL(rawUrl) 
+                : rawUrl;
+        }
+        
+        if (!url) return toast('Please enter a valid URL', 'w');
+        
+        btn.disabled = true;
+        btn.style.opacity = '0.5';
+        status.textContent = 'Syncing...';
+        status.style.color = 'var(--txt2)';
+        
+        try {
+            const isPulseUrl = url.includes('pulse.soti.net');
+            let text = "";
+            
+            if (isPulseUrl) {
+                let seeds = [url];
+                const normalizedBase = url.replace(/\/$/, '').toLowerCase();
+                // Smart seed list expander to crawl the entire MobiControl directories comprehensively
+                if (normalizedBase === 'https://pulse.soti.net/support/soti-mobicontrol' || 
+                    normalizedBase === 'https://pulse.soti.net/support/soti-mobicontrol/help') {
+                    seeds = [
+                        'https://pulse.soti.net/support/soti-mobicontrol',
+                        'https://pulse.soti.net/support/soti-mobicontrol/product-notes',
+                        'https://pulse.soti.net/support/soti-mobicontrol/help',
+                        'https://pulse.soti.net/support/soti-mobicontrol/downloads',
+                        'https://pulse.soti.net/support/soti-mobicontrol/product-notes/release-notes',
+                        'https://pulse.soti.net/support/soti-mobicontrol/help/?V=2026.1',
+                        'https://pulse.soti.net/support/soti-mobicontrol/help/?V=2026.0',
+                        'https://pulse.soti.net/support/soti-mobicontrol/help/?V=2025.0',
+                        'https://pulse.soti.net/support/soti-mobicontrol/help/?V=2024.0',
+                        'https://pulse.soti.net/support/soti-mobicontrol/help/?V=16.0'
+                    ];
+                    
+                    // Discover ALL help page URLs from the Table of Contents
+                    // This is the key fix: the TOC in start.html lists every single help page
+                    status.textContent = 'Discovering help pages from Table of Contents...';
+                    const versions = ['2026.1', '2026.0', '2025.0'];
+                    for (const ver of versions) {
+                        try {
+                            const tocSeeds = await fetchPulseHelpTocSeeds(ver, (msg) => {
+                                status.textContent = msg;
+                            });
+                            if (tocSeeds.length > 0) {
+                                seeds = [...new Set([...seeds, ...tocSeeds])];
+                                console.log(`[SYNC] Added ${tocSeeds.length} TOC seeds for v${ver}, total seeds: ${seeds.length}`);
+                            }
+                        } catch (err) {
+                            console.warn(`[SYNC] Failed to get TOC seeds for v${ver}:`, err);
+                        }
+                    }
+                    status.textContent = `Starting crawl with ${seeds.length} seed URLs...`;
+                }
+                text = await crawlPulseSupport(seeds, (msg) => {
+                    status.textContent = msg;
+                });
+            } else {
+                status.textContent = 'Downloading master markdown...';
+                const res = await fetch(url, { cache: 'no-store' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                text = await res.text();
+            }
+            
+            if (text.length < 100) throw new Error("Content too small to be valid knowledge base");
+            
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                await chrome.storage.local.set({ 'pulseKnowledgeData': text });
+            } else {
+                localStorage.setItem('soti_pulse_knowledge', text);
+            }
+            
+            window.PULSE_LAST_SYNC = Date.now();
+            await saveLocalAISettings();
+            
+            // Trigger automatic Save As dialog to store the file physically in the folder
+            if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.download) {
+                try {
+                    const blob = new Blob([text], { type: 'text/markdown' });
+                    const blobUrl = URL.createObjectURL(blob);
+                    chrome.downloads.download({
+                        url: blobUrl,
+                        filename: 'PulseKnowledge.md',
+                        saveAs: true
+                    });
+                } catch (err) {
+                    console.warn('Failed to trigger download', err);
+                }
+            }
+            
+            status.textContent = `Success! Synced ${Math.round(text.length / 1024)}KB at ${new Date().toLocaleTimeString()}`;
+            status.style.color = 'var(--green)';
+            toast('Pulse Knowledge Synced successfully!', 's');
+        } catch (e) {
+            console.error('Pulse Sync failed', e);
+            status.textContent = `Sync Failed: ${e.message}`;
+            status.style.color = 'var(--warn)';
+            toast('Failed to sync Pulse knowledge', 'e');
+        } finally {
+            btn.disabled = false;
+            btn.style.opacity = '1';
+        }
+    };
+}
 
 $('btnRefreshModels').onclick = async () => {
     LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://127.0.0.1:11434';
