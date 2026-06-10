@@ -5135,8 +5135,8 @@ async function send(overrideText = null, silent = false) {
     const hasLogs = c.logs.length > 0;
     const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
     
-    if (!isGreeting && !forensicRun) {
-        const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+    const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+    if (!isGreeting && !forensicRun && (!hasLogs || needsDeepPulse)) {
         const researchMs = needsDeepPulse ? 20000 : 10000;
         try {
             await Promise.race([
@@ -5260,7 +5260,7 @@ async function send(overrideText = null, silent = false) {
 
             sysPrompt = scrubPII(`${liveDataSection}
 
-[CRITICAL INSTRUCTION: You MUST read and retain the [CASE] and [ISSUE SUMMARY] information provided above. Even when analyzing logs, you must cross-reference the logs with the user's reported case notes, and you MUST answer any direct questions the user asks about the case info.]
+[CRITICAL INSTRUCTION: You MUST read and retain the [CASE] and [ISSUE SUMMARY] information provided above. Even when analyzing logs, you must cross-reference the logs with the user's reported case notes, and you MUST answer any direct questions the user asks about the case info. If the user asks for a summary of the case, you MUST summarize ONLY the [CASE], [ISSUE SUMMARY], and logs. NEVER summarize [DEEP RESEARCH] or [DOCS SEARCH] as the case summary, as those are external articles, not the case itself.]
 
 ${corePrompt}
 
