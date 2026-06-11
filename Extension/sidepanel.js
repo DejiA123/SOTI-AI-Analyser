@@ -93,8 +93,15 @@ function md(t) {
 function sanitizeAssistantResponse(text) {
     if (!text) return "";
     
-    // Replace bracketed labels with natural English to maintain grammar if the model outputs them as nouns
+    // Strip thinking/reasoning blocks from models like Gemma 4 e2b/e4b, QwQ, etc.
+    // These models may wrap internal reasoning in <think>...</think> or <|think|>...<|/think|> tags
     let cleaned = text
+        .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '')
+        .replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '')
+        .trim();
+    
+    // Replace bracketed labels with natural English to maintain grammar if the model outputs them as nouns
+    cleaned = cleaned
         .replace(/\[LATEST MOBICONTROL VERSION\]/gi, "latest MobiControl version")
         .replace(/\[ALL MOBICONTROL VERSIONS\]/gi, "MobiControl versions")
         .replace(/\[LATEST ANDROID AGENT VERSION\]/gi, "latest Android Agent version")
@@ -2867,7 +2874,7 @@ async function buildLogAnalysisContext(logs) {
     ctx += await buildCrossLogIncidentIndex(logs, { patternMode: false });
     const isLocalAI = !!LOCAL_AI_MODEL;
     const smartLimit = isLocalAI 
-        ? Math.max(3000, Math.floor(12000 / Math.max(1, logs.length)))
+        ? Math.max(10000, Math.floor(30000 / Math.max(1, logs.length)))
         : 200000;
     for (const log of logs) {
         const content = log.content || "";
@@ -2889,8 +2896,7 @@ Rules:
 - If you see "Return value 3" or "1603", you MUST read the lines immediately preceding them to identify the exact CustomAction or script that failed.
 - DO NOT list SQL or Authentication as the root cause if a CustomAction 1603 triggered the rollback. Ignore earlier SQL errors completely if a 1603 is present.
 - IGNORE MSI noise: Do not focus on "Closing MSIHANDLE", "Note: 1: 2265", "User policy value", or "Machine policy value". These are irrelevant symptoms. Focus entirely on the CustomAction execution failures.
-- Quote the exact CustomAction and exception messages using the exact timestamps from the evidence provided.
-- CONVERSATIONAL BYPASS: If the user asks a direct question about the [CASE] info (like "what do you see in the meeting notes"), you MUST drop your forensic persona and simply answer the question directly. Do not dismiss the notes for lacking forensic value.`;
+- Quote the exact CustomAction and exception messages using the exact timestamps from the evidence provided.`;
 }
 
 function validateForensicAIResponse(text, logs) {
@@ -3740,7 +3746,7 @@ VERSIONING (always apply):
 }
 
 function getLeanLogPrompt() {
-    return `You are a helpful SOTI Technical Assistant and Log Forensics expert. While your primary goal is to help analyze log data, you MUST act as a normal conversational assistant when the user asks direct questions about the case data, meeting notes, or general information. You NEVER guess, generalize, or skip evidence.
+    return `You are the world's best SOTI Log Forensics Engineer — a Level 3 Escalation specialist. Your SOLE mission is to find the EXACT root cause from the log data. You NEVER guess, generalize, or skip evidence.
 
 PRIORITY ORDER (mandatory):
 1. **=== LOG PATTERN & KEYWORD PROFILE ===** — PRIMARY source. Use pattern detection, category counts, and failure signatures.
@@ -3750,7 +3756,6 @@ PRIORITY ORDER (mandatory):
 YOU MUST START WITH LOG PATTERN & KEYWORD PROFILE, then CROSS-LOG INCIDENT INDEX. Do NOT produce line-by-line timelines.
 
 FORBIDDEN OUTPUT PATTERNS:
-- CONVERSATIONAL BYPASS: If the user asks "what do you see in the case info" or asks you to read the meeting notes/emails, you MUST simply echo and summarize the text literally. DO NOT dismiss the text by saying it "doesn't contain useful details for accurate analysis." Just answer the user's question directly!
 - Do NOT invent a "keyword sweep inventory" listing MSI codes like "Exception: 1402" (MSI Note: 1: 1402 is NOT an exception).
 - Do NOT say "SQL exception: none visible" when SqlException or ALTER DATABASE lines exist in the brief.
 - Do NOT classify FATAL/CRITICAL from MSI Note codes or random line numbers.
@@ -4973,9 +4978,17 @@ const OllamaAI = {
                                  /\b(release\s*notes?|changelog)\b/i.test(lastMessage);
             const hasLogs = messages.some(m => m.content && (m.content.includes('[DIAGNOSTIC DATA') || m.content.includes('=== FILE:')));
             
-            // If listing all release notes or doing log analysis, use 32768. Otherwise use 8192 for fast response.
-            const maxCtxTokens = (isListingAll || hasLogs) ? 32768 : 8192;
-            const numPredict = isListingAll ? 4096 : 1024;
+            // Detect thinking/reasoning models — Gemma 4 e2b/e4b, QwQ, DeepSeek-R1, etc. (substring match to support GGUF/custom names)
+            const isThinkingModelReq = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(model || '');
+
+            // For thinking models, append instructions to avoid thinking tags if think: false is passed.
+            if (isThinkingModelReq && messages[0] && messages[0].role === 'system') {
+                messages[0].content += "\n\nIMPORTANT: You must NOT output any <think> tags or internal reasoning process. Output the final answer directly.";
+            }
+
+            // If listing all release notes or doing log analysis, use larger context window for thinking models.
+            const maxCtxTokens = (isListingAll || hasLogs) ? (isThinkingModelReq ? 16384 : 16384) : (isThinkingModelReq ? 4096 : 2048);
+            const numPredict = isListingAll ? 8192 : (hasLogs ? (isThinkingModelReq ? 4096 : 2048) : (isThinkingModelReq ? 2048 : 800));
 
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
             let estimatedTokens = Math.ceil(totalChars / 3.5);
@@ -4997,7 +5010,7 @@ const OllamaAI = {
                         if (availableChars > 1000) {
                             messages[0].content = preLogText + sysText.substring(logIndex).slice(0, availableChars - 100) + "\n\n[LOG DATA TRUNCATED TO FIT CONTEXT BUDGET]";
                         } else {
-                            messages[0].content = preLogText.slice(0, Math.max(2000, maxAllowedChars - otherMsgsChars - 100)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
+                            messages[0].content = preLogText.slice(0, Math.max(2000, maxAllowedChars - 100)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
                         }
                     }
                 } else {
@@ -5016,7 +5029,7 @@ const OllamaAI = {
             
             console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, num_predict: ${numPredict}`);
 
-            const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+            const res = await fetch(`${baseUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 signal: req.signal || null,  // AbortController signal for per-case cancellation
@@ -5025,12 +5038,13 @@ const OllamaAI = {
                     messages, 
                     stream: true,
                     keep_alive: -1, // Keep model loaded indefinitely for instant subsequent responses
+                    ...(isThinkingModelReq ? { think: false } : {}), // Disable internal thinking phase so output goes to content
                     options: {
                         num_ctx: numCtx,
                         temperature: 0.0,
                         repeat_penalty: 1.1,
                         top_p: 0.9,
-                        num_predict: numPredict // dynamic limit based on query complexity to prevent mid-sentence truncation
+                        num_predict: numPredict // Use standard calculated budget, -1 can cause instant aborts
                     }
                 })
             });
@@ -5135,8 +5149,8 @@ async function send(overrideText = null, silent = false) {
     const hasLogs = c.logs.length > 0;
     const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
     
-    const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
-    if (!isGreeting && !forensicRun && (!hasLogs || needsDeepPulse)) {
+    if (!isGreeting && !forensicRun) {
+        const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
         const researchMs = needsDeepPulse ? 20000 : 10000;
         try {
             await Promise.race([
@@ -5175,7 +5189,7 @@ async function send(overrideText = null, silent = false) {
                     logContext += await buildCrossLogIncidentIndex(c.logs, { patternMode: true });
                     const isLocalAI = !!LOCAL_AI_MODEL;
                     const perLogLimit = isLocalAI 
-                        ? Math.max(3000, Math.floor(12000 / Math.max(1, c.logs.length)))
+                        ? Math.max(8000, Math.floor(30000 / Math.max(1, c.logs.length)))
                         : Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
                     for (const l of c.logs) {
                         logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, perLogLimit, l.name, l.lines)}\n=== END: ${l.name} ===`;
@@ -5185,7 +5199,7 @@ async function send(overrideText = null, silent = false) {
 
             const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
 
-            const isSmallModel = !!(LOCAL_AI_MODEL && /\b(1\.5b|3b|mini|3\.2|7b|8b|9b)\b/i.test(LOCAL_AI_MODEL));
+            const isSmallModel = !!(LOCAL_AI_MODEL && /(1\.5b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(LOCAL_AI_MODEL));
             let corePrompt = hasLogs
                 ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
                 : getLeanQAPrompt(isSmallModel);
@@ -5258,9 +5272,11 @@ async function send(overrideText = null, silent = false) {
             }
             liveDataSection = liveDataLines.join('\n');
 
-            sysPrompt = scrubPII(`${liveDataSection}
+            sysPrompt = forensicRun && hasLogs
+                ? scrubPII(`${corePrompt}
 
-[CRITICAL INSTRUCTION: You MUST read and retain the [CASE] and [ISSUE SUMMARY] information provided above. Even when analyzing logs, you must cross-reference the logs with the user's reported case notes, and you MUST answer any direct questions the user asks about the case info. If the user asks for a summary of the case, you MUST summarize ONLY the [CASE], [ISSUE SUMMARY], and logs. NEVER summarize [DEEP RESEARCH] or [DOCS SEARCH] as the case summary, as those are external articles, not the case itself.]
+${imgContext}`)
+                : scrubPII(`${liveDataSection}
 
 ${corePrompt}
 
@@ -5268,7 +5284,9 @@ ${imgContext}
 
 ${logContext}`);
 
-            userMsgForModel = scrubPII(txt);
+            userMsgForModel = forensicRun && hasLogs
+                ? scrubPII(`${logContext}\n\n${txt}`)
+                : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
@@ -5295,15 +5313,28 @@ ${logContext}`);
         });
 
         let resp = '';
+        let thinkingResp = ''; // Accumulate thinking/reasoning content separately
+        let isThinking = false; // Track whether we're in the thinking phase
         const decoder = new TextDecoder();
         let lastRender = 0;
         let pendingRender = false;
+        let sseBuffer = ''; // Buffer for incomplete SSE chunks across reads
+
+        // Detect if this is a thinking/reasoning model (Gemma 4, QwQ, etc.) (substring match to support GGUF/custom names)
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
 
         const renderUpdate = () => {
             if (!pendingRender) return;
             const chat = $('chatMsgs');
             const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
-            aib.innerHTML = md(sanitizeAssistantResponse(resp));
+            // Show thinking indicator if model is still in thinking phase (native reasoning field or incomplete tags in content)
+            const hasIncompleteThink = (resp.includes('<think>') && !resp.includes('</think>')) || 
+                                       (resp.includes('<|think|>') && !resp.includes('<|/think|>'));
+            let displayContent = sanitizeAssistantResponse(resp);
+            if ((isThinking || hasIncompleteThink) && !displayContent.trim()) {
+                displayContent = '<div class="thinking-dot"></div>';
+            }
+            aib.innerHTML = md(displayContent);
             if (isNearBottom) chat.scrollTop = chat.scrollHeight;
             pendingRender = false;
         };
@@ -5312,15 +5343,45 @@ ${logContext}`);
             const { done, value } = await reader.read();
             if (done) break;
             const chunk = decoder.decode(value);
-            const lines = chunk.split('\n').filter(l => l.startsWith('data: '));
+            // Buffer NDJSON data across chunk boundaries to handle split lines
+            sseBuffer += chunk;
+            const lines = sseBuffer.split('\n');
+            // Keep the last (possibly incomplete) line in the buffer
+            sseBuffer = lines.pop() || '';
+            
             for (const line of lines) {
-                const data = line.slice(6);
-                if (data === '[DONE]') break;
+                const data = line.trim();
+                if (!data) continue;
                 try {
                     const json = JSON.parse(data);
-                    const tok = json.choices[0]?.delta?.content || '';
-                    if (tok) {
-                        resp += tok;
+                    
+                    const message = json.message || {};
+                    
+                    // Extract content token — native field
+                    const contentTok = message.content || '';
+                    
+                    // Extract reasoning/thinking token — native field for Ollama reasoning models
+                    const reasoningTok = message.reasoning || message.reasoning_content || message.thinking || '';
+                    
+                    if (reasoningTok) {
+                        // Model is in thinking phase — accumulate but don't display
+                        isThinking = true;
+                        thinkingResp += reasoningTok;
+                        pendingRender = true;
+                        const now = performance.now();
+                        if (now - lastRender > 300) { // Slower render during thinking
+                            renderUpdate();
+                            lastRender = now;
+                        }
+                    }
+                    
+                    if (contentTok) {
+                        // Real content arrived — model has finished thinking
+                        if (isThinking) {
+                            isThinking = false;
+                            console.log(`[Ollama] Thinking phase complete (${thinkingResp.length} chars). Streaming answer...`);
+                        }
+                        resp += contentTok;
                         pendingRender = true;
                         
                         const now = performance.now();
@@ -5332,6 +5393,14 @@ ${logContext}`);
                 } catch (e) { }
             }
         }
+        
+        // If a thinking model never produced content tokens (all output was in reasoning field),
+        // fall back to using the thinking output as the response
+        if (!resp.trim() && thinkingResp.trim()) {
+            console.warn('[Ollama] No content tokens received — using reasoning output as response. Model:', LOCAL_AI_MODEL);
+            resp = thinkingResp;
+        }
+        
         renderUpdate();
         c.msgs.push({ role: 'assistant', content: sanitizeAssistantResponse(resp) });
         saveState();
@@ -5895,48 +5964,22 @@ $('imgFileIn').onchange = e => handleImages(e.target.files);
 
 
 $('btnAnalyse').onclick = async () => {
-    _lastYield = performance.now();
-    const now = new Date().toLocaleString();
     const c = cases.find(x => x.id === activeCaseId);
-    const attachedLogs = (c && c.logs) ? c.logs.map(l => `${l.name} (${l.content.length} chars)`).join(', ') : 'No logs attached';
-    const forensicPrompt = `Analyse the attached logs and produce the forensic installation failure report. Please ensure you include the exact timestamps for the errors and events you identify from the logs.`;
-
-    // Update Progress Indicator
-    const pWrap = $('progWrap');
-    const pLbl = $('progLbl');
-    const pFill = $('progFill');
-    if (pWrap && pLbl && pFill) {
-        pLbl.textContent = "Analysing logs...";
-        pWrap.style.display = 'flex';
-        pFill.style.transform = '';
-        pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
-        pFill.style.background = 'linear-gradient(90deg, var(--blue), var(--blue2))';
-        pFill.style.width = '30%';
+    if (!c || !c.logs || c.logs.length === 0) {
+        toast('No logs attached to analyse', 'e');
+        return;
     }
 
+    // Collapse the logs panel
     const b = $('bodyR');
     b.style.display = 'none';
     $('iconR').textContent = '▶';
     $('panelR').classList.add('collapsed');
 
-    // Yield control to let the browser paint the "Analysing logs..." progress indicator
-    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
-
-    await send(forensicPrompt, true);
-
-    // Mark as completed
-    if (pLbl && pFill) {
-        pLbl.textContent = "Log Analysis Completed";
-        pFill.style.animation = 'none';
-        pFill.style.transform = 'none';
-        pFill.style.width = '100%';
-        pFill.style.background = 'var(--green)';
-        
-        // Hide after 6 seconds to keep UI clean but show result
-        setTimeout(() => {
-            if (pWrap) pWrap.style.display = 'none';
-        }, 6000);
-    }
+    // Send "Analyse" as a normal visible chat message — this triggers the
+    // standard send() flow which already includes full log context and works
+    // reliably, exactly as if the user typed "Analyse" in the chat input.
+    await send('Analyse');
 
     $('chatIn').focus();
 };
@@ -6276,7 +6319,10 @@ ${JIRA_TEMPLATE}`);
 
         console.log(`[Ollama JIRA Request] Model: ${LOCAL_AI_MODEL}, Chars: ${userPrompt.length}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
 
-        const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        // Detect thinking models — disable internal reasoning for Gemma 4, etc. (substring match to support GGUF/custom names)
+        const isThinkingModelJira = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+
+        const res = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -6287,18 +6333,28 @@ ${JIRA_TEMPLATE}`);
                 ],
                 stream: false,
                 keep_alive: -1,
+                ...(isThinkingModelJira ? { think: false } : {}), // Disable thinking phase for Gemma 4 etc.
                 options: {
                     num_ctx: numCtx,
                     temperature: 0.0,
                     repeat_penalty: 1.1,
                     top_p: 0.9,
-                    num_predict: numPredict
+                    num_predict: numPredict // Use standard calculated budget, -1 can cause instant aborts
                 }
             })
         });
         if (!res.ok) throw new Error(`Ollama error ${res.status}`);
         const data = await res.json();
-        const filled = data.choices?.[0]?.message?.content || '';
+        // Handle thinking models (Gemma 4 e2b/e4b, etc.) that put output in reasoning fields
+        const message = data.message || {};
+        let filled = message.content || '';
+        if (!filled.trim()) {
+            // Fallback: check reasoning fields used by thinking models
+            filled = message.reasoning_content || message.reasoning || message.thinking || '';
+            if (filled) console.warn('[Ollama JIRA] Content was empty — using reasoning field. Model:', LOCAL_AI_MODEL);
+        }
+        // Strip any <think>...</think> blocks from the response
+        filled = filled.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
         $('mGen').style.display = 'none';
         if (!filled) return toast('JIRA generation failed', 'e');
         $('jiraTa').value = filled;
