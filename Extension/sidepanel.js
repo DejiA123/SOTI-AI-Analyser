@@ -2495,8 +2495,7 @@ async function buildPrecisionLogBrief(content, fileName = "Attached log", precal
     return md;
 }
 
-function isLogForensicsRequest(text, silent) {
-    if (silent) return true;
+function isLogForensicsRequest(text) {
     return /\b(forensic|root\s*cause|analy[sz]e\s+(?:the\s+)?logs?|log\s+analysis|investigate\s+(?:the\s+)?logs?)\b/i.test(text || "");
 }
 
@@ -5147,7 +5146,7 @@ async function send(overrideText = null, silent = false) {
     
     const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
     const hasLogs = c.logs.length > 0;
-    const forensicRun = hasLogs && isLogForensicsRequest(txt, silent);
+    const forensicRun = hasLogs && isLogForensicsRequest(txt);
     
     if (!isGreeting && !forensicRun) {
         const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
@@ -5970,16 +5969,45 @@ $('btnAnalyse').onclick = async () => {
         return;
     }
 
+    // Update Progress Indicator
+    const pWrap = $('progWrap');
+    const pLbl = $('progLbl');
+    const pFill = $('progFill');
+    if (pWrap && pLbl && pFill) {
+        pLbl.textContent = "Analysing logs...";
+        pWrap.style.display = 'flex';
+        pFill.style.transform = '';
+        pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
+        pFill.style.background = 'linear-gradient(90deg, var(--blue), var(--blue2))';
+        pFill.style.width = '30%';
+    }
+
     // Collapse the logs panel
     const b = $('bodyR');
     b.style.display = 'none';
     $('iconR').textContent = '▶';
     $('panelR').classList.add('collapsed');
 
-    // Send "Analyse" as a normal visible chat message — this triggers the
-    // standard send() flow which already includes full log context and works
-    // reliably, exactly as if the user typed "Analyse" in the chat input.
-    await send('Analyse');
+    // Yield control to let the browser paint the "Analysing logs..." progress indicator
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+
+    // Send "Analyse" as a silent chat message - this triggers the
+    // standard send() flow but hides the user prompt from the UI.
+    await send('Analyse', true);
+
+    // Mark as completed
+    if (pLbl && pFill) {
+        pLbl.textContent = "Log Analysis Completed";
+        pFill.style.animation = 'none';
+        pFill.style.transform = 'none';
+        pFill.style.width = '100%';
+        pFill.style.background = 'var(--green)';
+        
+        // Hide after 6 seconds to keep UI clean but show result
+        setTimeout(() => {
+            if (pWrap) pWrap.style.display = 'none';
+        }, 6000);
+    }
 
     $('chatIn').focus();
 };
