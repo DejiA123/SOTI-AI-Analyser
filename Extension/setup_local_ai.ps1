@@ -1,5 +1,5 @@
 # SOTI AI Analyser - Local AI Auto-Setup
-# Uses official https://ollama.com/install.ps1 then downloads llama3.1.
+# Uses official https://ollama.com/install.ps1 then downloads gemma4:e2b.
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -148,16 +148,16 @@ function Wait-OllamaApi {
     return $false
 }
 
-function Install-Llama32Model {
+function Install-AIModel {
     param([string]$OllamaExe)
-    Write-Header "Step 3: Install llama3.1 model (~2GB)"
-    Write-Info 'Running: ollama pull llama3.1 - downloads the model for the extension...'
-    & $OllamaExe pull llama3.1
+    Write-Header "Step 3: Install gemma4:e2b model"
+    Write-Info 'Running: ollama pull gemma4:e2b - downloads the model for the extension...'
+    & $OllamaExe pull gemma4:e2b
     if ($LASTEXITCODE -ne 0) {
-        Write-Err "Model download failed. Try manually: ollama pull llama3.1"
+        Write-Err "Model download failed. Try manually: ollama pull gemma4:e2b"
         return $false
     }
-    Write-Success "llama3.1 is installed and ready for ollama run llama3.1"
+    Write-Success "gemma4:e2b is installed and ready for ollama run gemma4:e2b"
     return $true
 }
 
@@ -217,14 +217,14 @@ if (-not (Wait-OllamaApi)) {
     Write-Err "Ollama API not responding to setup checks."
     Write-Info "If http://127.0.0.1:11434 works in your browser, continue manually:"
     Write-Info "  1. In extension Settings set URL to: http://127.0.0.1:11434"
-    Write-Info "  2. Run in PowerShell: ollama pull llama3.1"
+    Write-Info "  2. Run in PowerShell: ollama pull gemma4:e2b"
     Write-Info 'Corporate proxy/AV often blocks PowerShell HTTP to localhost - use 127.0.0.1 in extension Settings.'
     exit 1
 }
 Write-Success "Ollama API is running."
 
 # --- Step 3: Model ---
-if (-not (Install-Llama32Model -OllamaExe $ollamaExe)) {
+if (-not (Install-AIModel -OllamaExe $ollamaExe)) {
     exit 1
 }
 
