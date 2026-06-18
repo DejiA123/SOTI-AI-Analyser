@@ -1,3 +1,25 @@
+/* ============================================================================
+ * SOTI AI Analyser — Salesforce Content Script
+ * ============================================================================
+ * A "content script" is JavaScript that Chrome injects INTO another web page —
+ * here, Salesforce (see manifest.json "content_scripts"). Its job: read the open
+ * case's fields off the Salesforce page and send them to our side panel, so the
+ * engineer doesn't have to retype the case number, product, version, etc.
+ *
+ * Why scrape the page instead of using the Salesforce API? The API needs OAuth,
+ * admin setup, and credentials; scraping the already-open page needs none of that.
+ * The trade-off: if Salesforce changes its HTML, the selectors below may need
+ * updating. (Full rationale in PROJECT_OVERVIEW.md §5.8.)
+ *
+ * The tricky parts, and the helpers that handle them:
+ *   • Salesforce hides fields inside "Shadow DOM" (isolated DOM sub-trees) →
+ *     findInShadows() / findElementByIdInShadows() walk into those sub-trees.
+ *   • Background tabs are moved off-screen, not removed → isVisible() filters them.
+ *   • Field text is jammed together with button labels
+ *     (e.g. "Acme CorpOpen Preview Edit") → cleanFieldValue() strips the noise.
+ *   • scrapeSalesforce() ties it together; the onMessage listener at the bottom
+ *     responds when the side panel asks for a scrape.
+ * ============================================================================ */
 // SOTI AI Analyser - Salesforce Content Script (v2)
 console.log('SOTI AI Analyser: Salesforce Content Script Loaded');
 

@@ -1,3 +1,41 @@
+/* ============================================================================
+ * SOTI AI Analyser — Sidepanel Engine (the whole application brain)
+ * ============================================================================
+ * This single file runs the entire side panel: the UI, the case/state store, the
+ * log-analysis pipeline, the local-AI engine, the prompts, the offline knowledge
+ * search, and the self-learning loop. There is no framework and no build step —
+ * it is plain JavaScript that talks directly to the DOM and to Ollama over HTTP.
+ *
+ * READ THIS FIRST: a full plain-English explanation of how everything works and
+ * WHY it was built this way lives in  PROJECT_OVERVIEW.md  (same folder).
+ *
+ * ----------------------------------------------------------------------------
+ * MAP OF THIS FILE (search for these function names to jump around)
+ * ----------------------------------------------------------------------------
+ *  • State / cases ...... getDefaultCase, saveState, loadState, switchCase
+ *  • UI plumbing ........ md (markdown→HTML), renderTabs, toast, addMsg
+ *  • Log Intelligence ... getLogPanelIntel, classifyLogLine, scoreRootCauseCandidate,
+ *                         buildCrossLogIncidentIndex, getSmartLogSnippet, buildFileManifest
+ *  • Prompt budgeting ... getModelContextLength, getSessionCtx, computeSnippetBudget,
+ *                         allocatePerFileBudgets, buildCaseContextForPrompt
+ *  • AI engine .......... OllamaAI.completions.create  (sizes num_ctx, trims, streams)
+ *  • Personas/prompts ... TIER3_IDENTITY, getLeanLogPrompt, getCompactLogPrompt,
+ *                         getConversationalPrompt, getLeanQAPrompt
+ *  • Intent routing ..... isLogForensicsRequest, wantsLogAnalysis
+ *  • Offline RAG ........ PulseKB (ensureIndex + search), searchPulseAndDocs
+ *  • Self-learning ...... saveLearnedInsight, matchLearnedInsights, attachFeedbackUI
+ *  • THE HEART .......... send()  — assembles the prompt and talks to the AI
+ *
+ * KEY IDEAS (the non-obvious design choices, explained in full in the overview):
+ *  1. Logs are PRE-ANALYSED in code (Log Intelligence) before the AI sees them, so a
+ *     small CPU model gets a short high-signal brief instead of a raw 50,000-line dump.
+ *  2. num_ctx is FIXED per model (getSessionCtx) — Ollama reloads the model whenever
+ *     num_ctx changes, which is very slow on a CPU, so we keep it constant + warm.
+ *  3. The log section is BUDGETED against everything else and placed early in the prompt
+ *     so a big Case Info panel can never push the logs out of the context window.
+ *  4. The request's intent (analyse vs. just answer) is detected per message, so
+ *     "what's the case number?" gets a direct answer, not a forensic report.
+ * ============================================================================ */
 /* SOTI AI Analyser - Elite Sidepanel Engine */
 const $ = id => document.getElementById(id);
 let cases = []; // { id, name, msgs, logs, ci }
@@ -94,10 +132,14 @@ function sanitizeAssistantResponse(text) {
     if (!text) return "";
     
     // Strip thinking/reasoning blocks from models like Gemma 4 e2b/e4b, QwQ, etc.
-    // These models may wrap internal reasoning in <think>...</think> or <|think|>...<|/think|> tags
+    // These models may wrap internal reasoning in <think>...</think> or <|think|>...<|/think|> tags.
+    // IMPORTANT: only remove WELL-FORMED (closed) blocks. The old version stripped to end-of-string
+    // on an unclosed tag, which nuked the entire answer to blank when a model emitted a stray/unclosed
+    // <think>. Any leftover lone markers are removed but their inner text is kept.
     let cleaned = text
-        .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '')
-        .replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .replace(/<\|think\|>[\s\S]*?<\|\/?think\|>/gi, '')
+        .replace(/<\/?\|?think\|?>/gi, '')
         .trim();
     
     // Replace bracketed labels with natural English to maintain grammar if the model outputs them as nouns
@@ -205,6 +247,11 @@ async function saveState() {
     try {
         if (!syncActiveCaseCiFromForm()) return;
 
+        // Stamp the active case as "touched now" so the 7-day inactivity retention clock
+        // resets whenever the user works on it (saveState runs on edits, attaches, sends).
+        const _activeCase = cases.find(x => x.id === activeCaseId);
+        if (_activeCase) _activeCase.updatedAt = Date.now();
+
         // Write a lightweight quick-cache to sessionStorage for instant UI on next open.
         // This is synchronous and extremely fast — it only stores tab names and the last 20 msgs.
         try {
@@ -305,17 +352,30 @@ async function loadState() {
                 }
                 if (!c.imgs) c.imgs = [];
                 if (!c.createdAt) c.createdAt = Date.now(); // Backfill for older cases
+                // Migration: older versions stored full log dumps inside chat messages,
+                // which crowded newly added logs out of the model's context. Strip them.
+                if (Array.isArray(c.msgs)) {
+                    c.msgs.forEach(m => {
+                        if (m && typeof m.content === 'string' && m.content.includes('=== FILE:')) {
+                            m.content = m.content.replace(/=== FILE:[\s\S]*?=== END[^\n]*\n?/g, '[log snippet removed — logs are attached to the case]\n');
+                        }
+                    });
+                }
             });
 
-            // DATA RETENTION: Auto-purge cases older than 30 days
-            const RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+            // DATA RETENTION: auto-purge cases (and their stored logs) after 7 days of
+            // INACTIVITY. Sensitive customer logs shouldn't sit on disk longer than needed.
+            // Keyed on last activity (updatedAt/lastSentAt), not creation time, so a case you
+            // keep working on survives and only genuinely idle cases are cleared.
+            const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days of inactivity
             const now = Date.now();
             const before = cases.length;
-            cases = cases.filter(c => (now - (c.createdAt || now)) < RETENTION_MS);
+            const lastTouch = c => c.updatedAt || c.lastSentAt || c.createdAt || now;
+            cases = cases.filter(c => (now - lastTouch(c)) < RETENTION_MS);
             const purged = before - cases.length;
             if (purged > 0) {
-                console.warn(`[Security] Data retention: purged ${purged} case(s) older than 30 days.`);
-                toast(`${purged} old case(s) auto-cleared (30-day retention policy)`, 'w', 5000);
+                console.warn(`[Security] Data retention: purged ${purged} case(s) idle for over 7 days.`);
+                toast(`${purged} idle case(s) auto-cleared (7-day retention policy)`, 'w', 5000);
                 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
                     chrome.storage.local.set({ cases });
                 }
@@ -2499,6 +2559,21 @@ function isLogForensicsRequest(text) {
     return /\b(forensic|root\s*cause|analy[sz]e\s+(?:the\s+)?logs?|log\s+analysis|investigate\s+(?:the\s+)?logs?)\b/i.test(text || "");
 }
 
+// Does the user actually want a LOG ANALYSIS, or are they asking a normal question?
+// When logs are attached we must NOT force the forensic report format onto every message —
+// "what's the case number?" / "summarize this case" deserve a direct, conversational answer.
+function wantsLogAnalysis(text, silent) {
+    const t = (text || "").trim().toLowerCase();
+    if (!t) return true;                          // empty → default to analysis
+    if (silent && t === 'analyse') return true;   // the "Analyse Now" button
+    // Clear case/metadata questions → conversational, never a log report.
+    if (/\bcase\s*(number|no\.?|#|id|info|summary|details?|notes?)\b/.test(t)) return false;
+    if (/\bsummar(y|ise|ize)\b/.test(t) && /\bcase\b/.test(t)) return false;
+    if (/\bwhat do you see\b/.test(t)) return false;
+    // Explicit analysis intent.
+    return /\b(analy[sz]e|analysis|root\s*cause|diagnos\w*|investigat\w*|troubleshoot\w*|forensic|what'?s\s+wrong|what\s+happened|why\s+(is|did|does|are|was|were)|find\s+the\s+(issue|problem|error|cause|root)|the\s+(error|issue|problem|failure|exception|crash))\b/.test(t);
+}
+
 function shouldUseFocusedLogPipeline(logs) {
     if (!logs || logs.length === 0) return false;
     return logs.some(log => {
@@ -2866,27 +2941,147 @@ async function buildMandatoryForensicChecklist(logs) {
     return `\n=== MANDATORY FACTS (full-file scan — address every line above) ===\n${lines.join("\n")}\n=== END MANDATORY FACTS ===\n`;
 }
 
-async function buildLogAnalysisContext(logs) {
+// One line per attached file so the model always knows every file that exists,
+// even if a file's snippet had to be trimmed to fit the context window.
+async function buildFileManifest(logs, lastSentAt = 0) {
     if (!logs || logs.length === 0) return "";
-    let ctx = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
-    ctx += await buildLogPatternProfile(logs);
-    ctx += await buildCrossLogIncidentIndex(logs, { patternMode: false });
-    const isLocalAI = !!LOCAL_AI_MODEL;
-    const smartLimit = isLocalAI 
-        ? Math.max(10000, Math.floor(30000 / Math.max(1, logs.length)))
-        : 200000;
+    const rows = [];
+    const newFiles = [];
+    for (let i = 0; i < logs.length; i++) {
+        const log = logs[i];
+        const isNew = lastSentAt && log.uploadedAt && log.uploadedAt > lastSentAt;
+        if (isNew) newFiles.push(log.name);
+        let detail = "";
+        try {
+            const intel = await getLogPanelIntel(log);
+            if (intel) {
+                const signals = [intel.topCategory, intel.topException].filter(Boolean).join(', ');
+                detail = ` — ${intel.lineCount.toLocaleString()} lines` +
+                         (intel.product ? ` | Product: ${intel.product}` : "") +
+                         (signals ? ` | Top signals: ${signals}` : " | No error signals detected");
+            }
+        } catch (e) {
+            detail = ` — ${(log.lines || []).length.toLocaleString()} lines`;
+        }
+        rows.push(`${i + 1}. ${log.name}${detail}${isNew ? '  [NEW — ADDED SINCE LAST MESSAGE]' : ''}`);
+    }
+    let manifest = "";
+    if (newFiles.length > 0) {
+        manifest += `\n[NEW FILES ADDED SINCE LAST MESSAGE: ${newFiles.join(', ')} — prioritize acknowledging and analysing these]\n`;
+    }
+    manifest += `\n=== ATTACHED FILE MANIFEST (${logs.length} file${logs.length === 1 ? '' : 's'}) ===\n` +
+                rows.join('\n') +
+                `\nRULE: Every file listed above EXISTS and MUST be acknowledged in your analysis. If a file's snippet was truncated, state that instead of ignoring the file.\n` +
+                `=== END FILE MANIFEST ===\n`;
+    return manifest;
+}
+
+// The number of CHARS the model's context window can hold for the prompt (excluding the
+// reserved output budget). Single source of truth for sizing the whole prompt.
+async function getPromptCharBudget() {
+    if (!LOCAL_AI_MODEL) return Math.floor(650000 * 2.5); // cloud path (legacy generous budget)
+    const { hardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
+    const small = isSmallLocalModel();
+    // 'auto': small/CPU models target an 8K context (fast prefill); larger models 32K.
+    // An explicit Context Size setting is honoured as the target directly.
+    const target = (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto')
+        ? hardMax
+        : (small ? Math.min(8192, hardMax) : Math.min(32768, hardMax));
+    const numPredict = small ? 1280 : 4096;
+    const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token
+    return Math.floor((target - numPredict - 800) * CHARS_PER_TOKEN);
+}
+
+// Char budget left for LOG SNIPPETS after everything else (system prompt, case data,
+// manifest/profile/incident, history) is accounted for. This is what stops the case
+// info / email chain from pushing the logs out of the context window.
+async function computeSnippetBudget(numFiles, overheadChars = 0) {
+    if (!LOCAL_AI_MODEL) return 650000;
+    const small = isSmallLocalModel();
+    const total = await getPromptCharBudget();
+    const budget = total - Math.max(0, overheadChars);
+    // Floor keeps every file represented even when overhead is large; allocatePerFileBudgets
+    // splits evenly if the budget can't meet the floor (the manifest still names them all),
+    // and completions.create trims the secondary case/research data — never the logs.
+    const floor = (small ? 1000 : 3000) * Math.max(1, numFiles);
+    return Math.max(floor, budget);
+}
+
+// Compact the case object for the prompt. Large/GPU models get the full case; small/CPU
+// models keep the high-value fields but cap the bulky free-text (email chain, meeting
+// notes) so the actual log evidence still fits the small context window.
+function buildCaseContextForPrompt(ci, small) {
+    if (!ci) return {};
+    if (!small) return ci;
+    const out = {};
+    for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'issue_summary']) {
+        if (ci[k]) out[k] = ci[k];
+    }
+    for (const k of ['meeting_notes', 'email_chain']) {
+        const v = ci[k];
+        if (typeof v === 'string' && v.trim()) {
+            out[k] = v.length > 1500 ? v.slice(0, 1500) + ' …[trimmed for context budget]' : v;
+        }
+    }
+    return out;
+}
+
+// Fair-share allocation: small files take only what they need and donate the surplus
+// to larger files. Every file is guaranteed a minimum slice so none ever vanishes.
+function allocatePerFileBudgets(logs, totalBudget, minPerFile = 4000) {
+    const budgets = new Map();
+    const n = logs.length;
+    if (!n) return budgets;
+    // If the budget can't give every file the minimum, split it evenly — the FILE
+    // MANIFEST + incident index still ensure every file is acknowledged and summarized.
+    if (totalBudget < n * minPerFile) {
+        const even = Math.max(800, Math.floor(totalBudget / n));
+        for (const l of logs) budgets.set(l, even);
+        return budgets;
+    }
+    let pool = totalBudget;
+    const share = Math.floor(pool / n);
+    const large = [];
+    for (const l of logs) {
+        const need = (l.content || "").length + 200; // +200 head/tail markers slack
+        if (need <= share) {
+            budgets.set(l, need);
+            pool -= need;
+        } else {
+            large.push(l);
+        }
+    }
+    const totalNeed = large.reduce((a, l) => a + (l.content || "").length, 0) || 1;
+    for (const l of large) {
+        budgets.set(l, Math.max(minPerFile, Math.floor(pool * ((l.content || "").length / totalNeed))));
+    }
+    return budgets;
+}
+
+async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 0) {
+    if (!logs || logs.length === 0) return "";
+    // Header (manifest + profile + incident) is always included; snippets are budgeted
+    // against everything else so the logs never get pushed out of the context window.
+    let header = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
+    header += await buildFileManifest(logs, lastSentAt);
+    header += await buildLogPatternProfile(logs);
+    header += await buildCrossLogIncidentIndex(logs, { patternMode: false });
+    const snippetBudget = await computeSnippetBudget(logs.length, externalOverhead + header.length);
+    const budgets = allocatePerFileBudgets(logs, snippetBudget, isSmallLocalModel() ? 1500 : 4000);
+    let ctx = header;
     for (const log of logs) {
         const content = log.content || "";
         const name = log.name || "Attached log";
-        ctx += `\n=== FILE: ${name} ===\n${await getSmartLogSnippet(content, smartLimit, name, log.lines)}\n=== END FILE ===\n`;
+        const limit = budgets.get(log) || 10000;
+        ctx += `\n=== FILE: ${name} ===\n${await getSmartLogSnippet(content, limit, name, log.lines)}\n=== END FILE ===\n`;
     }
     return ctx;
 }
 
 function getLogForensicsSystemPrompt() {
-    return `You are a SUPER INTELLIGENT, expert SOTI log forensics analyzer. 
+    return `${TIER3_IDENTITY}
 
-Your goal is to provide a highly accurate, definitive, and professional Forensic Installation Failure Report.
+You are operating in FORENSIC REPORT mode. Your goal is to provide a highly accurate, definitive, and professional Forensic Installation Failure Report.
 Do not write like a robot. Synthesize the context gracefully to point out the exact root cause of the failure.
 
 Rules:
@@ -3688,9 +3883,12 @@ function scrubPII(s) {
     return s;
 }
 
+// Shared Tier-3 identity used by every prompt mode — the AI's core persona.
+const TIER3_IDENTITY = `You are the SOTI Tier-3 AI Analyser — a senior escalation engineer for the entire SOTI ONE Suite with expert-level command of SOTI MobiControl (UEM: Management/Deployment Server architecture, SQL backend, device enrollment, profiles, packages, agents for Android/iOS/Windows/macOS/Linux/Zebra), SOTI Connect (IoT & printer management, MQTT broker, device rules), SOTI XSight (advanced diagnostics, live remote support, operational intelligence dashboards), and SOTI Identity (SSO/IdP, SAML, user management). You analyse with forensic precision, cite exact evidence, and never guess.`;
+
 function getLeanQAPrompt(isSmall = false) {
     if (isSmall) {
-        return `You are SOTI AI, a Senior SOTI Technical Architect. Use the provided LIVE DATA to answer.
+        return `${TIER3_IDENTITY} Use the provided LIVE DATA to answer.
 
 RULES:
 1. ALWAYS answer directly using ONLY the facts present in [RELEASE NOTES], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [PULSE SEARCH], and [DOCS SEARCH]. Do not invent, hallucinate, or extrapolate details.
@@ -3699,7 +3897,7 @@ RULES:
 4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.
 5. ZERO HALLUCINATION FOR GUIDES: If the user asks for step-by-step instructions or configuration steps, you MUST construct them ONLY using the EXACT TEXT provided in the [OFFLINE PULSE KNOWLEDGE MATCHES], [DEEP RESEARCH], or [DOCS SEARCH] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If these sections do not contain the specific steps, you MUST reply "I could not find a SOTI guide for this specific task in my current context." DO NOT guess or use generic Android/IT knowledge to invent steps. DO NOT combine unrelated sections.`;
     }
-    return `You are a Senior SOTI Technical Architect with 100% accuracy on the SOTI ONE Platform.
+    return `${TIER3_IDENTITY}
 
 CRITICAL: You have been given LIVE DATA in this prompt. USE IT. The sections [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [LATEST IDENTITY VERSION], [RELEASE NOTES], [PULSE SEARCH], [DOCS SEARCH], and [DEEP RESEARCH] contain REAL, UP-TO-DATE information fetched from SOTI Pulse and SOTI Docs right now. You MUST use this data to answer questions. Do not rely on memorized or generic IT knowledge when live sections contain the answer.
 
@@ -3745,7 +3943,9 @@ VERSIONING (always apply):
 }
 
 function getLeanLogPrompt() {
-    return `You are the world's best SOTI Log Forensics Engineer — a Level 3 Escalation specialist. Your SOLE mission is to find the EXACT root cause from the log data. You NEVER guess, generalize, or skip evidence.
+    return `${TIER3_IDENTITY}
+
+You are operating in LOG FORENSICS mode. Your SOLE mission is to find the EXACT root cause from the log data. You NEVER guess, generalize, or skip evidence.
 
 PRIORITY ORDER (mandatory):
 1. **=== LOG PATTERN & KEYWORD PROFILE ===** — PRIMARY source. Use pattern detection, category counts, and failure signatures.
@@ -3878,6 +4078,54 @@ CRITICAL RULES:
     2. **WHAT IS MISSING**: (e.g., Server Logs, SOTI Version).
     3. **STATUS**: (Ready / Partial / Awaiting Context).
     4. **NEXT STEP**: (The one best action the user should take).`;
+}
+
+// Compact log-analysis prompt for small / CPU-bound models (gemma4:2b, e2b, e4b...).
+// The full getLeanLogPrompt is ~13KB (~3700 tokens) — on a 6 tok/s CPU that is minutes
+// of prefill before a single token appears, which reads as a "blank" response. This
+// trimmed version keeps the Tier-3 identity and the non-negotiable forensic rules but
+// asks for a focused, concise report so the model starts answering quickly.
+function getCompactLogPrompt() {
+    return `${TIER3_IDENTITY}
+
+You are in LOG ANALYSIS mode. Find the EXACT root cause from the evidence. Never guess or invent errors that are not in the data.
+
+USE THIS EVIDENCE, IN ORDER:
+1. === ATTACHED FILE MANIFEST === — every file listed EXISTS; acknowledge each one.
+2. === LOG PATTERN & KEYWORD PROFILE === and === CROSS-LOG INCIDENT INDEX === — your primary evidence.
+3. Raw log snippets (=== FILE: ... ===) — to confirm specific lines.
+
+RULES:
+- Read exception chains to the INNERMOST exception — that is the true cause.
+- SqlException / Timeout / Deadlock / Login failed / certificate / auth failures are high-priority root-cause candidates.
+- Distinguish the CAUSAL first error from downstream SYMPTOMS. Only the earliest error in a cascade is the root cause.
+- For MSI/installer logs: the real cause is the CustomAction/SQL line immediately BEFORE the first "Return value 3" / "1603". Ignore "Closing MSIHANDLE" and "Note: 1: 2265" noise.
+- The Web Console runs INSIDE the SOTI Management Service — never mention IIS.
+- If evidence is insufficient, say so and name the log you need. NEVER fabricate.
+
+OUTPUT (keep it tight — no padding):
+## Log Analysis
+**Files reviewed:** (one line listing every file from the manifest)
+**Root cause:** ONE sentence — \`ExceptionClass\` at Line X (timestamp) — exact reason.
+**Evidence:** 2-4 cited lines (filename:line @ timestamp) that prove it.
+**Propagation:** root cause → downstream failure → user-visible symptom.
+**Fix:** the specific SOTI action(s) — service to restart, setting/port/SQL command, or version+MCMR if an upgrade resolves it.`;
+}
+
+// Conversational prompt used when logs are attached but the user asked a normal question
+// (e.g. "what's the case number?", "summarize this case") rather than a log analysis.
+// It answers the actual question instead of forcing the forensic report format.
+function getConversationalPrompt() {
+    return `${TIER3_IDENTITY}
+
+Answer the user's question directly and conversationally. You have the case details ([CASE], [ISSUE SUMMARY]) and a manifest/summary of the attached logs available.
+
+RULES:
+- Answer the ACTUAL question asked. Do NOT output a "Log Analysis" report, headed sections, or a root-cause verdict UNLESS the user explicitly asks you to analyse the logs or find the root cause.
+- Case questions (case number, product, version, status, "summarize the case", "what's in the case info") → answer from [CASE] and [ISSUE SUMMARY].
+- Be concise, clear and helpful, in plain prose.
+- Never say "insufficient evidence" for something the case info or logs clearly contain. Only say you lack data if the specific thing asked truly isn't present.
+- If a deeper log investigation would help, briefly offer to run a full analysis (or tell the user to click "Analyse Now").`;
 }
 
 // --- RESEARCH ENGINE ---
@@ -4390,6 +4638,131 @@ function selectReleaseNoteSources(query, history, ci, catalog) {
     return sources;
 }
 
+// --- OFFLINE PULSE KNOWLEDGE BASE (indexed RAG over knowledge/PulseKnowledge.md) ---
+// ~24MB / ~10,000 official SOTI help articles covering MobiControl, SOTI Connect,
+// SOTI XSight, Identity and more. Indexed ONCE per session (chunk split + lowercase
+// precompute), then searched instantly on every query — the previous implementation
+// re-fetched and re-lowercased all 24MB on every single send.
+const PulseKB = {
+    chunks: null,        // [{ text, lower, firstLine }]
+    indexing: null,      // memoized in-flight promise
+
+    async ensureIndex() {
+        if (this.chunks) return this.chunks;
+        if (this.indexing) return this.indexing;
+        this.indexing = (async () => {
+            let raw = '';
+            try {
+                const localUrl = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
+                    ? chrome.runtime.getURL('knowledge/PulseKnowledge.md')
+                    : 'knowledge/PulseKnowledge.md';
+                const res = await fetch(localUrl, { cache: 'no-store' });
+                if (res.ok) raw = await res.text();
+            } catch (e) { console.warn('PulseKB: failed to load physical PulseKnowledge.md', e); }
+            if (!raw) {
+                try {
+                    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                        const d = await chrome.storage.local.get('pulseKnowledgeData');
+                        raw = d.pulseKnowledgeData || '';
+                    } else {
+                        raw = localStorage.getItem('soti_pulse_knowledge') || '';
+                    }
+                } catch (e) { console.warn('PulseKB: failed to load offline knowledge from storage', e); }
+            }
+            if (!raw) {
+                console.log('PulseKB: no offline knowledge found. Sync via Settings.');
+                this.chunks = [];
+                return this.chunks;
+            }
+            const t0 = performance.now();
+            // Fast native string chunking (1000x faster than regex lookahead on 24MB strings)
+            const parts = raw.split('\n# ');
+            raw = null; // release the 24MB source string
+            const chunks = [];
+            for (let i = 0; i < parts.length; i++) {
+                const text = parts[i].startsWith('#') ? parts[i] : '# ' + parts[i];
+                if (text.length < 30) continue;
+                const lower = text.toLowerCase();
+                chunks.push({ text, lower, firstLine: lower.split('\n', 1)[0] || '' });
+            }
+            parts.length = 0;
+            this.chunks = chunks;
+            console.log(`PulseKB: indexed ${chunks.length} articles in ${Math.round(performance.now() - t0)}ms`);
+            return this.chunks;
+        })();
+        return this.indexing;
+    },
+
+    // Score + retrieve top article excerpts. Same proven scorer as before, plus
+    // product-name and log-signature bonuses for log-analysis mode.
+    search(queryLower, kws, opts = {}) {
+        const { productHints = [], signatureTerms = [], maxArticles = 15, maxChars = 24000, perChunkCap = 6000 } = opts;
+        if (!this.chunks || this.chunks.length === 0 || !kws || kws.length === 0) return [];
+        const prodLower = productHints.map(p => (p || '').toLowerCase()).filter(Boolean);
+        const sigLower = signatureTerms.map(s => (s || '').toLowerCase()).filter(s => s.length > 2);
+        const scored = [];
+        for (const { text, lower, firstLine } of this.chunks) {
+            let score = 0;
+            let uniqueHits = 0;
+            let matchedAny = false;
+            for (const k of kws) {
+                if (lower.includes(k)) {
+                    matchedAny = true;
+                    score += 1;
+                    uniqueHits++;
+                    let regex;
+                    try { regex = new RegExp('\\b' + k + '\\b', 'ig'); } catch (e) {}
+                    const matches = regex ? lower.match(regex) : null;
+                    if (matches && matches.length > 0) score += 1 + Math.min(matches.length, 5);
+                    if (firstLine.includes(k)) score += 5; // title match bonus
+                }
+            }
+            if (!matchedAny) continue;
+            // Exponential bonus for matching multiple different keywords
+            score += (uniqueHits * uniqueHits * 3);
+            // Product-name bonus (title hit counts double)
+            for (const p of prodLower) {
+                if (firstLine.includes(p)) score += 8;
+                else if (lower.includes(p)) score += 4;
+            }
+            // Log-signature bonus (e.g. "sqlexception", "enrollment failed")
+            for (const s of sigLower) {
+                if (lower.includes(s)) score += 4;
+            }
+            // Quick reject: skip expensive phrase ops if the chunk barely matches
+            if (score >= 5) {
+                const cleanQuery = queryLower.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+                const cleanChunk = lower.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ');
+                if (cleanQuery.length > 6 && cleanChunk.includes(cleanQuery)) {
+                    score += 50;
+                } else {
+                    if (cleanChunk.includes('work managed') && cleanQuery.includes('work managed')) score += 30;
+                    if (cleanChunk.includes('android enterprise') && cleanQuery.includes('android enterprise')) score += 20;
+                }
+                // Length penalty for bloated generic pages
+                if (lower.length > 2000) score -= Math.floor((lower.length - 2000) / 500) * 2;
+                // Procedural / how-to bonus
+                if (/\b(how|step|guide|procedure|enroll)\b/i.test(queryLower)) {
+                    if (/\b(procedure|steps?|instructions?|about this task)\b/i.test(lower)) score += 25;
+                }
+            }
+            if (score > 0) scored.push({ text, score });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        const out = [];
+        let budget = maxChars;
+        for (let i = 0; i < Math.min(scored.length, maxArticles); i++) {
+            let c = scored[i].text.trim();
+            if (c.length < 30) continue;
+            if (c.length > perChunkCap) c = c.substring(0, perChunkCap) + '\n...[TRUNCATED FOR LENGTH]';
+            if (budget - c.length < 0 && out.length >= Math.min(3, maxArticles)) break;
+            out.push(c);
+            budget -= c.length;
+        }
+        return out;
+    }
+};
+
 async function searchPulseAndDocs(query, msgs, ci) {
     try {
         PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
@@ -4586,123 +4959,18 @@ async function searchPulseAndDocs(query, msgs, ci) {
             const keywords = keywordParts.slice(0, 6).join('%20');
             
             if (keywords) {
-                let offlineKnowledge = '';
-                // 1. Try to read the physical PulseKnowledge.md file directly from the folder to ensure we get the latest edits
-                try {
-                    const localUrl = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
-                        ? chrome.runtime.getURL('knowledge/PulseKnowledge.md')
-                        : 'knowledge/PulseKnowledge.md';
-                    const res = await fetch(localUrl, { cache: 'no-store' });
-                    if (res.ok) {
-                        offlineKnowledge = await res.text();
-                    }
-                } catch (e) {
-                    console.warn('Failed to load physical PulseKnowledge.md', e);
-                }
-                
-                // 2. Fallback to storage if not loaded yet
-                if (!offlineKnowledge) {
-                    try {
-                        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                            const d = await chrome.storage.local.get('pulseKnowledgeData');
-                            offlineKnowledge = d.pulseKnowledgeData || '';
-                        } else {
-                            offlineKnowledge = localStorage.getItem('soti_pulse_knowledge') || '';
-                        }
-                    } catch (e) { console.warn('Failed to load pulse offline knowledge', e); }
-                }
-
-                if (offlineKnowledge) {
-                    // Fast native string chunking (1000x faster than regex lookahead on 24MB strings)
-                    const chunks = offlineKnowledge.split('\n# ').map(c => c.startsWith('#') ? c : '# ' + c);
-                    let relevantChunks = [];
-                    
-                    const kws = keywordParts.filter(kw => kw.length > 2);
-                    if (kws.length > 0) {
-                        const qLowerStr = qLower;
-                        
-                        // Score chunks based on keyword coverage and frequencies
-                        const scored = chunks.map(chunk => {
-                            let score = 0;
-                            let uniqueHits = 0;
-                            const lowerChunk = chunk.toLowerCase();
-                            const firstLine = lowerChunk.split('\n')[0] || "";
-                            
-                            // 1. Keyword coverage & frequency (Optimized)
-                            let matchedAny = false;
-                            kws.forEach(k => {
-                                if (lowerChunk.includes(k)) {
-                                    matchedAny = true;
-                                    score += 1;
-                                    uniqueHits++;
-                                    let regex;
-                                    try { regex = new RegExp('\\b' + k + '\\b', 'ig'); } catch(e) {}
-                                    const matches = regex ? lowerChunk.match(regex) : null;
-                                    if (matches && matches.length > 0) {
-                                        score += 1 + Math.min(matches.length, 5);
-                                    }
-                                    // Title match bonus
-                                    if (firstLine.includes(k)) {
-                                        score += 5;
-                                    }
-                                }
-                            });
-                            
-                            if (!matchedAny) return { chunk, score: 0 };
-                            
-                            // Exponential bonus for matching multiple different keywords
-                            score += (uniqueHits * uniqueHits * 3);
-                            
-                            // Quick reject: skip expensive operations if chunk barely matches
-                            if (score < 5) return { chunk, score };
-                            
-                            // 2. Exact/near-exact phrase matching for query
-                            const cleanQuery = qLowerStr.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-                            const cleanChunk = lowerChunk.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ');
-                            if (cleanQuery.length > 6 && cleanChunk.includes(cleanQuery)) {
-                                score += 50;
-                            } else {
-                                // Sub-phrase matching (e.g. "work managed")
-                                if (cleanChunk.includes("work managed") && cleanQuery.includes("work managed")) score += 30;
-                                if (cleanChunk.includes("android enterprise") && cleanQuery.includes("android enterprise")) score += 20;
-                            }
-                            
-                            // 3. Length penalty for bloated generic pages
-                            if (lowerChunk.length > 2000) {
-                                score -= Math.floor((lowerChunk.length - 2000) / 500) * 2;
-                            }
-                            
-                            // 4. Procedural / How-To Bonus
-                            if (/\b(how|step|guide|procedure|enroll)\b/i.test(qLowerStr)) {
-                                if (/\b(procedure|steps?|instructions?|about this task)\b/i.test(lowerChunk)) {
-                                    score += 25;
-                                }
-                            }
-                            
-                            return { chunk, score };
-                        }).filter(s => s.score > 0)
-                          .sort((a, b) => b.score - a.score);
-                          
-                        // Take top matches but enforce a strict character limit to prevent LLM context truncation
-                        // Context truncation causes the LLM to lose the system prompt and hallucinate!
-                        let maxChars = 24000;
-                        relevantChunks = [];
-                        for (let i = 0; i < Math.min(scored.length, 15); i++) {
-                            let c = scored[i].chunk.trim();
-                            if (c.length < 30) continue;
-                            if (c.length > 6000) c = c.substring(0, 6000) + '\n...[TRUNCATED FOR LENGTH]';
-                            if (maxChars - c.length < 0 && relevantChunks.length >= 3) break; // Ensure at least top 3 fit
-                            relevantChunks.push(c);
-                            maxChars -= c.length;
-                        }
-                    }
-                    
-                    if (relevantChunks.length > 0) {
-                        RESEARCHED_ARTICLE_CONTENT = "[OFFLINE PULSE KNOWLEDGE MATCHES]:\n\n" + relevantChunks.join('\n\n---\n\n');
-                        DOCS_SEARCH_RESULTS = "Data retrieved from local Pulse Knowledge Base.";
-                    }
-                } else {
-                    console.log('No offline knowledge found. Please sync via Settings.');
+                const kws = keywordParts.filter(kw => kw.length > 2);
+                await PulseKB.ensureIndex();
+                // Strict character limit prevents LLM context truncation — truncation
+                // causes the LLM to lose the system prompt and hallucinate!
+                const relevantChunks = PulseKB.search(qLower, kws, {
+                    productHints: ci && ci.product ? [ci.product] : [],
+                    maxArticles: 15,
+                    maxChars: 24000
+                });
+                if (relevantChunks.length > 0) {
+                    RESEARCHED_ARTICLE_CONTENT = "[OFFLINE PULSE KNOWLEDGE MATCHES]:\n\n" + relevantChunks.join('\n\n---\n\n');
+                    DOCS_SEARCH_RESULTS = "Data retrieved from local Pulse Knowledge Base.";
                 }
             }
         }
@@ -4801,18 +5069,113 @@ $('product').onchange = () => {
 let LOCAL_AI_URL = 'http://127.0.0.1:11434';
 let LOCAL_AI_MODEL = '';
 let LOCAL_AI_MODELS = [];
+let LOCAL_AI_CTX_MAX = 'auto'; // user cap for num_ctx: 'auto' or a number (as string)
+const MODEL_CTX_CACHE = new Map(); // model name → native context_length from /api/show
+
+// Probe Ollama for the model's true context window (e.g. gemma e2b/e4b = 131072).
+// Cached in memory + chrome.storage so the probe runs once per model.
+async function getModelContextLength(model) {
+    const FALLBACK = 16384; // legacy behaviour if /api/show is unavailable
+    if (!model) return FALLBACK;
+    if (MODEL_CTX_CACHE.has(model)) return MODEL_CTX_CACHE.get(model);
+    try {
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const res = await fetch(`${baseUrl}/api/show`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model })
+        });
+        if (res.ok) {
+            const info = await res.json();
+            const mi = info.model_info || {};
+            // Key is architecture-prefixed (e.g. "gemma3.context_length") — match by suffix
+            const key = Object.keys(mi).find(k => k.endsWith('.context_length'));
+            const len = key ? parseInt(mi[key], 10) : 0;
+            if (len && len >= 2048) {
+                MODEL_CTX_CACHE.set(model, len);
+                try {
+                    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                        const stored = await chrome.storage.local.get('modelCtxCache');
+                        const cache = stored.modelCtxCache || {};
+                        cache[model] = len;
+                        await chrome.storage.local.set({ modelCtxCache: cache });
+                    }
+                } catch (e) { /* cache persistence is best-effort */ }
+                return len;
+            }
+        }
+    } catch (e) {
+        console.warn('[Ollama] /api/show failed for', model, e);
+    }
+    MODEL_CTX_CACHE.set(model, FALLBACK);
+    return FALLBACK;
+}
+
+// Resolve the effective num_ctx ceiling: min(model's native window, user setting; 'auto' → 65536)
+async function getHardCtxMax(model) {
+    const modelMax = await getModelContextLength(model);
+    const userCap = (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto') ? (parseInt(LOCAL_AI_CTX_MAX, 10) || 65536) : 65536;
+    return { modelMax, userCap, hardMax: Math.max(2048, Math.min(modelMax, userCap)) };
+}
+
+// Small / CPU-bound models (2b, e2b, e4b, 7b…). On CPU these are slow per token, so
+// they get compact prompts and small contexts for fast, reliable analysis.
+function isSmallLocalModel() {
+    return !!(LOCAL_AI_MODEL && /(0\.5b|1\.5b|1b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(LOCAL_AI_MODEL));
+}
+
+// The SINGLE num_ctx used for every request to a given model. Ollama re-allocates the KV
+// cache (≈ a full model reload — many seconds on a CPU) whenever num_ctx changes between
+// requests, so we keep it CONSTANT for the whole session: the model loads once and stays
+// warm. num_predict still varies per task (it does NOT trigger a reload).
+async function getSessionCtx(model) {
+    const { hardMax } = await getHardCtxMax(model);
+    const small = /(0\.5b|1\.5b|1b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(model || '');
+    if (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto') return hardMax;
+    return small ? Math.min(8192, hardMax) : Math.min(32768, hardMax);
+}
+
+// Preload the model at the session num_ctx so the user's FIRST query is already warm
+// (avoids paying the model-load cost on the first real request). Best-effort, non-blocking.
+async function warmUpModel() {
+    if (!LOCAL_AI_MODEL) return;
+    try {
+        const sessionCtx = await getSessionCtx(LOCAL_AI_MODEL);
+        const isThinking = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL);
+        await fetch(`${LOCAL_AI_URL.replace(/\/$/, '')}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: LOCAL_AI_MODEL,
+                messages: [{ role: 'user', content: 'ok' }],
+                stream: false,
+                keep_alive: -1,
+                ...(isThinking ? { think: false } : {}),
+                options: { num_ctx: sessionCtx, num_predict: 1, temperature: 0 }
+            })
+        });
+        console.log('[Ollama] Model warmed up and pinned at num_ctx', sessionCtx);
+    } catch (e) { /* non-fatal — first real request will just load it then */ }
+}
 
 async function loadLocalAISettings() {
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel', 'pulseSyncUrl', 'pulseLastSync']);
+            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel', 'localAiCtx', 'modelCtxCache', 'pulseSyncUrl', 'pulseLastSync']);
         } else {
             const s = localStorage.getItem('soti_local_ai');
             if (s) data = JSON.parse(s);
         }
         LOCAL_AI_URL = data.localAiUrl || 'http://127.0.0.1:11434';
         LOCAL_AI_MODEL = data.localAiModel || '';
+        LOCAL_AI_CTX_MAX = data.localAiCtx || 'auto';
+        // Hydrate the per-model context-length cache (avoids re-probing /api/show)
+        if (data.modelCtxCache && typeof data.modelCtxCache === 'object') {
+            for (const [m, len] of Object.entries(data.modelCtxCache)) {
+                if (len && len >= 2048) MODEL_CTX_CACHE.set(m, len);
+            }
+        }
         
         // Add defaults for Pulse Sync
         window.PULSE_SYNC_URL = data.pulseSyncUrl || 'https://pulse.soti.net/support/soti-mobicontrol';
@@ -4837,9 +5200,10 @@ async function loadLocalAISettings() {
 
 async function saveLocalAISettings() {
     try {
-        const d = { 
-            localAiUrl: LOCAL_AI_URL, 
+        const d = {
+            localAiUrl: LOCAL_AI_URL,
             localAiModel: LOCAL_AI_MODEL,
+            localAiCtx: LOCAL_AI_CTX_MAX,
             pulseSyncUrl: window.PULSE_SYNC_URL,
             pulseLastSync: window.PULSE_LAST_SYNC
         };
@@ -4985,61 +5349,77 @@ const OllamaAI = {
                 messages[0].content += "\n\nIMPORTANT: You must NOT output any <think> tags or internal reasoning process. Output the final answer directly.";
             }
 
-            // If listing all release notes or doing log analysis, use larger context window for thinking models.
-            const maxCtxTokens = (isListingAll || hasLogs) ? (isThinkingModelReq ? 16384 : 16384) : (isThinkingModelReq ? 4096 : 2048);
-            const numPredict = isListingAll ? 8192 : (hasLogs ? (isThinkingModelReq ? 4096 : 2048) : (isThinkingModelReq ? 2048 : 800));
+            // Model-aware context sizing: use the model's true window (gemma e2b/e4b = 131072)
+            // capped by the user's Context Size setting ('auto' → up to 64K).
+            const { modelMax, hardMax } = await getHardCtxMax(model);
+            // Small models (2b/e2b/e4b/7b…) are usually CPU-bound on this hardware — every extra
+            // 1000 tokens of context costs real seconds of prefill. Keep contexts modest for speed
+            // unless the user explicitly raises Context Size. The FILE MANIFEST guarantees the
+            // model still knows about every attached file even when snippets are compressed.
+            const isSmall = /(0\.5b|1\.5b|1b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(model || '');
+            // FIXED context size for the whole session — never varies per request, so Ollama
+            // keeps the model loaded and warm instead of reloading it every turn (huge on CPU).
+            const ctxCeiling = await getSessionCtx(model);
+            // Keep generation bounded so a 6 tok/s CPU finishes in minutes, not tens of minutes.
+            const numPredict = isListingAll
+                ? (isSmall ? 2048 : 8192)
+                : (hasLogs ? (isSmall ? 1280 : (isThinkingModelReq ? 4096 : 2048)) : (isSmall ? 1024 : (isThinkingModelReq ? 1536 : 800)));
 
+            const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token (conservative → num_ctx stays generous, prompt never overflows)
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
-            let estimatedTokens = Math.ceil(totalChars / 3.5);
-            
-            // Strict token budget matching: if estimatedTokens exceeds the target context window,
-            // we must trim the system prompt (RAG results & log snippets) to fit so Ollama doesn't choke or truncate.
-            const maxAllowedTokens = maxCtxTokens - numPredict - 600;
-            const maxAllowedChars = Math.floor(maxAllowedTokens * 3.2);
-            
-            if (totalChars > maxAllowedChars && messages[0] && messages[0].role === 'system') {
-                let sysText = messages[0].content;
-                if (sysText.includes('=== FILE:')) {
-                    // Truncate logs section first
-                    const logIndex = sysText.indexOf('=== FILE:');
-                    if (logIndex !== -1) {
-                        const preLogText = sysText.substring(0, logIndex);
-                        const otherMsgsChars = messages.reduce((acc, m, i) => i === 0 ? acc : acc + (m.content ? m.content.length : 0), 0);
-                        const availableChars = maxAllowedChars - preLogText.length - otherMsgsChars;
-                        if (availableChars > 1000) {
-                            messages[0].content = preLogText + sysText.substring(logIndex).slice(0, availableChars - 100) + "\n\n[LOG DATA TRUNCATED TO FIT CONTEXT BUDGET]";
-                        } else {
-                            messages[0].content = preLogText.slice(0, Math.max(2000, maxAllowedChars - 100)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
-                        }
-                    }
-                } else {
-                    // Truncate general system prompt
-                    const otherMsgsChars = messages.reduce((acc, m, i) => i === 0 ? acc : acc + (m.content ? m.content.length : 0), 0);
-                    const availableChars = maxAllowedChars - otherMsgsChars;
-                    messages[0].content = sysText.slice(0, Math.max(2000, availableChars)) + "\n\n[CONTEXT TRUNCATED TO FIT CONTEXT BUDGET]";
+
+            // If the payload exceeds the context ceiling: drop oldest HISTORY messages first,
+            // then trim the SYSTEM prompt from its END. The system prompt is ordered
+            // [rules][logs][case/research], so end-trimming sacrifices the secondary
+            // case/research data — never the logs, and never the file manifest.
+            const maxAllowedChars = Math.floor((ctxCeiling - numPredict - 600) * CHARS_PER_TOKEN);
+            if (totalChars > maxAllowedChars) {
+                while (totalChars > maxAllowedChars && messages.length > 2) {
+                    const dropped = messages.splice(1, 1)[0];
+                    totalChars -= (dropped.content ? dropped.content.length : 0);
+                    console.warn('[Ollama Request] Dropped oldest history message to fit context budget');
                 }
-                // Recalculate total characters and estimated tokens
-                totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
-                estimatedTokens = Math.ceil(totalChars / 3.5);
+                const sysMsg = messages[0];
+                if (totalChars > maxAllowedChars && sysMsg && sysMsg.role === 'system') {
+                    const sys = sysMsg.content;
+                    const othersChars = totalChars - sys.length;
+                    const sysBudget = Math.max(1500, maxAllowedChars - othersChars);
+                    if (sys.length > sysBudget) {
+                        // Position just after the log section (logs sit early in the prompt).
+                        const logEnd = Math.max(sys.lastIndexOf('=== END:'), sys.lastIndexOf('=== END FILE'));
+                        const afterLog = logEnd !== -1 ? ((sys.indexOf('\n', logEnd) + 1) || sys.length) : 0;
+                        const manifestEnd = sys.indexOf('=== END FILE MANIFEST ===');
+                        const minKeep = manifestEnd !== -1 ? manifestEnd + 30 : Math.min(2000, sys.length);
+                        const keep = Math.max(minKeep, Math.min(sys.length, sysBudget - 60));
+                        const note = keep >= afterLog
+                            ? "\n\n[Secondary case/reference context trimmed to fit the context window.]"
+                            : "\n\n[Log snippets and secondary context trimmed to fit — all attached files are named in the manifest above.]";
+                        sysMsg.content = sys.slice(0, keep) + note;
+                        totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
+                        console.warn(`[Ollama Request] Trimmed system prompt to fit (kept ${keep}/${sys.length} chars, logs preserved: ${keep >= afterLog})`);
+                    }
+                }
             }
 
-            const neededTokens = estimatedTokens + numPredict + 500; // room for response
-            const numCtx = Math.max(2048, Math.min(maxCtxTokens, Math.ceil(neededTokens / 1024) * 1024));
-            
-            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, num_predict: ${numPredict}`);
+            let estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
+            // num_ctx is FIXED at the session size (no grow-to-fit) so the model never reloads
+            // between turns. The prompt has already been trimmed to fit maxAllowedChars above.
+            let numCtx = ctxCeiling;
 
-            const res = await fetch(`${baseUrl}/api/chat`, {
+            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx} (fixed), num_predict: ${numPredict}, modelMax: ${modelMax}, hardMax: ${hardMax}`);
+
+            const doOllamaFetch = (ctx) => fetch(`${baseUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 signal: req.signal || null,  // AbortController signal for per-case cancellation
-                body: JSON.stringify({ 
-                    model, 
-                    messages, 
+                body: JSON.stringify({
+                    model,
+                    messages,
                     stream: true,
                     keep_alive: -1, // Keep model loaded indefinitely for instant subsequent responses
                     ...(isThinkingModelReq ? { think: false } : {}), // Disable internal thinking phase so output goes to content
                     options: {
-                        num_ctx: numCtx,
+                        num_ctx: ctx,
                         temperature: 0.0,
                         repeat_penalty: 1.1,
                         top_p: 0.9,
@@ -5047,14 +5427,179 @@ const OllamaAI = {
                     }
                 })
             });
+
+            let res = await doOllamaFetch(numCtx);
             if (!res.ok) {
                 const err = await res.text();
-                throw new Error(`Ollama error ${res.status}: ${err}`);
+                // GPU/RAM exhaustion: retry once with a halved context window
+                if (/memory|oom|cudamalloc|allocate|vram/i.test(err) && numCtx > 8192) {
+                    numCtx = Math.max(8192, Math.floor(numCtx / 2 / 1024) * 1024);
+                    console.warn(`[Ollama Request] OOM detected — retrying with num_ctx: ${numCtx}`);
+                    try { toast('GPU memory tight — retried with a smaller context. Consider lowering Context Size in Settings (⚙).', 'w', 6000); } catch (e) {}
+                    res = await doOllamaFetch(numCtx);
+                }
+                if (!res.ok) {
+                    const err2 = res.bodyUsed ? err : await res.text();
+                    throw new Error(`Ollama error ${res.status}: ${err2}`);
+                }
             }
             return res.body.getReader();
         }
     }
 };
+
+// --- SELF-LEARNING (retrieval-based) ---
+// The model itself can't be retrained on-device, but every analysis the user
+// confirms (👍) or corrects (👎) is stored as a compact "insight" and re-injected
+// into future prompts whose logs/questions match — so the analyser genuinely gets
+// smarter with every verified case.
+const INSIGHT_STOPWORDS = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for', 'logs', 'log', 'analyse', 'analyze', 'please', 'case']);
+
+async function loadLearnedInsights() {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            const d = await chrome.storage.local.get('learnedInsights');
+            return Array.isArray(d.learnedInsights) ? d.learnedInsights : [];
+        }
+        return JSON.parse(localStorage.getItem('soti_learned_insights') || '[]');
+    } catch (e) { return []; }
+}
+
+async function persistLearnedInsights(insights) {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            await chrome.storage.local.set({ learnedInsights: insights });
+        } else {
+            localStorage.setItem('soti_learned_insights', JSON.stringify(insights));
+        }
+    } catch (e) { console.warn('Failed to persist learned insights', e); }
+}
+
+function collectLogSignatureTerms(logs) {
+    const sigs = [];
+    for (const l of (logs || []).slice(0, 8)) {
+        const intel = l && l.panelIntel;
+        if (intel) {
+            if (intel.topException) sigs.push(intel.topException.split(' x')[0]);
+            if (intel.topCategory) sigs.push(intel.topCategory.split(' x')[0]);
+        }
+    }
+    return [...new Set(sigs.filter(Boolean))];
+}
+
+async function saveLearnedInsight(c, question, answerText, verdict, correction = '') {
+    try {
+        const keywords = [...new Set((question || '').toLowerCase().split(/\W+/)
+            .filter(w => w.length > 3 && !INSIGHT_STOPWORDS.has(w)))].slice(0, 12);
+        const signatures = collectLogSignatureTerms(c && c.logs).slice(0, 8);
+        let product = (c && c.ci && c.ci.product) || '';
+        if (!product && c && Array.isArray(c.logs)) {
+            const withProduct = c.logs.find(l => l.panelIntel && l.panelIntel.product);
+            if (withProduct) product = withProduct.panelIntel.product;
+        }
+        const rcMatch = (answerText || '').match(/ROOT\s*CAUSE[^:\n]*[:\-]\s*([\s\S]{10,400}?)(?:\n\n|\n#+|\n\*\*|$)/i);
+        const fixMatch = (answerText || '').match(/(?:MITIGATION|RESOLUTION|RECOMMENDED\s+FIX|FIX)[^:\n]*[:\-]\s*([\s\S]{10,400}?)(?:\n\n|\n#+|$)/i);
+        const insight = {
+            id: 'ins_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            ts: Date.now(),
+            product,
+            caseName: (c && c.name) || '',
+            keywords,
+            signatures,
+            rootCause: (rcMatch ? rcMatch[1] : (answerText || '').slice(0, 300)).replace(/\s+/g, ' ').trim().slice(0, 400),
+            resolution: (fixMatch ? fixMatch[1] : '').replace(/\s+/g, ' ').trim().slice(0, 400),
+            verdict,
+            correction: (correction || '').replace(/\s+/g, ' ').trim().slice(0, 400)
+        };
+        const insights = await loadLearnedInsights();
+        insights.push(insight);
+        while (insights.length > 200) {
+            const idx = insights.findIndex(i => i.verdict === 'confirmed');
+            insights.splice(idx >= 0 ? idx : 0, 1);
+        }
+        await persistLearnedInsights(insights);
+        console.log(`[Learning] Saved ${verdict} insight (${insights.length} total):`, insight.rootCause.slice(0, 80));
+        return true;
+    } catch (e) { console.warn('saveLearnedInsight failed', e); return false; }
+}
+
+// Find past human-verified insights relevant to the current question + log signatures.
+async function matchLearnedInsights(txt, logs) {
+    try {
+        const insights = await loadLearnedInsights();
+        if (!insights.length) return '';
+        const qTerms = new Set((txt || '').toLowerCase().split(/\W+/).filter(w => w.length > 3 && !INSIGHT_STOPWORDS.has(w)));
+        const sigTerms = new Set(collectLogSignatureTerms(logs).map(s => s.toLowerCase()));
+        const scored = insights.map(i => {
+            let overlap = 0;
+            for (const k of (i.keywords || [])) if (qTerms.has(k)) overlap++;
+            for (const s of (i.signatures || [])) if (sigTerms.has((s || '').toLowerCase())) overlap += 2;
+            return { i, overlap };
+        }).filter(x => x.overlap >= 2)
+          .sort((a, b) => b.overlap - a.overlap || b.i.ts - a.i.ts)
+          .slice(0, 2);
+        if (!scored.length) return '';
+        const lines = scored.map(({ i }) => {
+            if (i.verdict === 'corrected' && i.correction) {
+                return `- (${i.product || 'SOTI'}) In a similar past case the AI wrongly concluded: "${i.rootCause.slice(0, 200)}". The human-confirmed cause was: "${i.correction}".`;
+            }
+            return `- (${i.product || 'SOTI'}) Confirmed root cause in a similar past case: "${i.rootCause.slice(0, 300)}"${i.resolution ? ` | Confirmed fix: "${i.resolution.slice(0, 200)}"` : ''}`;
+        });
+        return `[LEARNED FROM PAST CONFIRMED CASES — human-verified hints from earlier analyses. Verify against the current logs before relying on them.]\n${lines.join('\n')}`;
+    } catch (e) { return ''; }
+}
+
+// 👍/👎 buttons under substantial assistant answers — the entry point of the learning loop.
+function attachFeedbackUI(bubbleEl, c, question, answerText) {
+    try {
+        if (!bubbleEl || !answerText) return;
+        if (answerText.length < 400 && !/root\s*cause/i.test(answerText)) return;
+        const row = document.createElement('div');
+        row.className = 'fb-row';
+        row.innerHTML = `<span class="fb-hint">Was this analysis correct?</span>` +
+            `<button class="fb-btn" data-v="up" title="Correct — remember this analysis for similar future cases">👍</button>` +
+            `<button class="fb-btn" data-v="down" title="Wrong — teach the AI the real cause">👎</button>`;
+        const done = (msg) => { row.innerHTML = `<span class="fb-done">${msg}</span>`; };
+        row.querySelector('[data-v="up"]').onclick = async () => {
+            const ok = await saveLearnedInsight(c, question, answerText, 'confirmed');
+            done(ok ? '✓ Learned — this analysis will inform similar future cases' : 'Could not save feedback');
+        };
+        row.querySelector('[data-v="down"]').onclick = () => {
+            row.innerHTML = `<input class="fb-input" type="text" placeholder="What was the real root cause / fix?" maxlength="400">` +
+                `<button class="fb-btn fb-save">Teach AI</button>`;
+            const inp = row.querySelector('.fb-input');
+            inp.focus();
+            const submit = async () => {
+                const correction = inp.value.trim();
+                if (!correction) { inp.placeholder = 'Please describe the real cause first...'; return; }
+                const ok = await saveLearnedInsight(c, question, answerText, 'corrected', correction);
+                done(ok ? '✓ Correction learned — the AI will use this in similar future cases' : 'Could not save feedback');
+            };
+            row.querySelector('.fb-save').onclick = submit;
+            inp.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+        };
+        bubbleEl.appendChild(row);
+    } catch (e) { console.warn('attachFeedbackUI failed', e); }
+}
+
+// Make a model-safe copy of chat history: strip any log dumps that older versions
+// stored inside messages (they crowd out newly added logs), and cap each message
+// so ten long answers can't eat the whole context window. Never mutates c.msgs.
+function sanitizeHistoryForModel(msgs, capChars = 4000) {
+    return (msgs || []).map(m => {
+        let content = m.content || '';
+        if (content.includes('=== FILE:')) {
+            content = content.replace(/=== FILE:[\s\S]*?=== END[^\n]*\n?/g, '[log snippet from an earlier message removed — current log data is provided fresh]\n');
+        }
+        if (content.includes('[LOG ANALYSIS DATA') || content.includes('[DIAGNOSTIC DATA')) {
+            content = content.replace(/\[(?:LOG ANALYSIS DATA|DIAGNOSTIC DATA)[^\]]*\]/g, '[earlier log data removed]');
+        }
+        if (content.length > capChars) {
+            content = content.slice(0, capChars) + '\n…[earlier message trimmed]';
+        }
+        return { role: m.role, content };
+    });
+}
 
 async function send(overrideText = null, silent = false) {
     const c = cases.find(x => x.id === activeCaseId);
@@ -5084,6 +5629,21 @@ async function send(overrideText = null, silent = false) {
         $('chatIn').style.height = '';
     }
     if ($('welcome')) $('welcome').style.display = 'none';
+
+    // Wait for any log files still being read/extracted (ZIPs can take a while) —
+    // sending early would silently exclude them from the AI's context.
+    if (pendingLogUploads.get(c.id) > 0) {
+        toast('Waiting for log files to finish processing...', 'w');
+        await new Promise(resolve => {
+            const check = setInterval(() => {
+                if (!(pendingLogUploads.get(c.id) > 0)) {
+                    clearInterval(check);
+                    resolve();
+                }
+            }, 300);
+            setTimeout(() => { clearInterval(check); resolve(); }, 30000); // 30s max wait
+        });
+    }
 
     // Wait for any images still being OCR-processed
     if (c.imgs && c.imgs.some(img => img.processing)) {
@@ -5147,16 +5707,56 @@ async function send(overrideText = null, silent = false) {
     const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
     const hasLogs = c.logs.length > 0;
     const forensicRun = hasLogs && isLogForensicsRequest(txt);
-    
+    // Logs attached, but does THIS message want an analysis, or a normal/case answer?
+    const analysisRun = hasLogs && (forensicRun || wantsLogAnalysis(txt, silent));
+    // Version / release-notes / product question → wants live research (even with logs attached).
+    const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+
+    let supportingRefSection = "";
     if (!isGreeting && !forensicRun) {
-        const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
-        const researchMs = needsDeepPulse ? 20000 : 10000;
-        try {
-            await Promise.race([
-                searchPulseAndDocs(txt, c.msgs, ci),
-                new Promise(r => setTimeout(r, researchMs))
-            ]);
-        } catch (e) { console.warn('Research timed out'); }
+        if (!hasLogs || needsDeepPulse) {
+            // Q&A mode (or explicit release-notes request): full online + offline research
+            const researchMs = needsDeepPulse ? 20000 : 10000;
+            try {
+                await Promise.race([
+                    searchPulseAndDocs(txt, c.msgs, ci),
+                    new Promise(r => setTimeout(r, researchMs))
+                ]);
+            } catch (e) { console.warn('Research timed out'); }
+        } else if (!isSmallLocalModel()) {
+            // Logs attached (larger models only): small, clearly-labelled offline KB lookup —
+            // supports the analysis with official docs but never distracts from the logs.
+            // Skipped for small/CPU models: it's explicitly "background, ignore for the answer"
+            // text that just burns prefill time and crowds the log evidence out of the window.
+            try {
+                await PulseKB.ensureIndex();
+                const sigTerms = [];
+                const prodHints = [];
+                for (const l of c.logs.slice(0, 6)) {
+                    const intel = l.panelIntel;
+                    if (intel) {
+                        if (intel.product) prodHints.push(intel.product);
+                        if (intel.topException) sigTerms.push(intel.topException.split(' x')[0]);
+                        if (intel.topCategory) sigTerms.push(intel.topCategory.split(' x')[0]);
+                    }
+                }
+                const stop = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for', 'logs', 'log', 'analyse', 'analyze']);
+                const kws = [...new Set(
+                    txt.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stop.has(w))
+                        .concat(sigTerms.map(s => s.toLowerCase()).filter(s => s.length > 3))
+                )].slice(0, 10);
+                const refs = PulseKB.search(txt.toLowerCase(), kws, {
+                    productHints: prodHints,
+                    signatureTerms: sigTerms,
+                    maxArticles: 2,
+                    maxChars: 3000,
+                    perChunkCap: 1500
+                });
+                if (refs.length > 0) {
+                    supportingRefSection = `[SUPPORTING REFERENCE — internal KB excerpts for background only. Your analysis MUST be driven by the attached LOGS; NEVER summarize these articles as the answer.]\n${refs.join('\n---\n')}`;
+                }
+            } catch (e) { console.warn('KB reference lookup failed', e); }
+        }
     }
 
     try {
@@ -5165,7 +5765,7 @@ async function send(overrideText = null, silent = false) {
         let userMsgForModel = txt;
         
         if (isGreeting) {
-            sysPrompt = "You are SOTI AI, a technical architect assistant for the SOTI ONE Platform. Respond politely to the user's greeting, ask how you can help, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
+            sysPrompt = "You are the SOTI Tier-3 AI Analyser, a senior escalation engineer for the SOTI ONE Suite (MobiControl, SOTI Connect, SOTI XSight). Respond politely to the user's greeting, ask how you can help, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
             userMsgForModel = txt;
             
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
@@ -5176,75 +5776,85 @@ async function send(overrideText = null, silent = false) {
             }
             modelMessages = [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-5)];
         } else {
-            // --- LOG CONTEXT ---
-            let logContext = "";
-
-            if (hasLogs) {
-                if (forensicRun) {
-                    logContext = await buildLogAnalysisContext(c.logs);
-                } else {
-                    logContext = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
-                    logContext += await buildLogPatternProfile(c.logs);
-                    logContext += await buildCrossLogIncidentIndex(c.logs, { patternMode: true });
-                    const isLocalAI = !!LOCAL_AI_MODEL;
-                    const perLogLimit = isLocalAI 
-                        ? Math.max(8000, Math.floor(30000 / Math.max(1, c.logs.length)))
-                        : Math.max(120000, Math.floor(c.logs.length === 1 ? 650000 : 420000 / Math.max(1, c.logs.length)));
-                    for (const l of c.logs) {
-                        logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, perLogLimit, l.name, l.lines)}\n=== END: ${l.name} ===`;
-                    }
-                }
-            }
-
             const summaryText = buildEffectiveIssueSummary(ci) || 'NO SUMMARY PROVIDED';
+            const isSmallModel = isSmallLocalModel();
 
-            const isSmallModel = !!(LOCAL_AI_MODEL && /(1\.5b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(LOCAL_AI_MODEL));
-            let corePrompt = hasLogs
-                ? (forensicRun ? getLogForensicsSystemPrompt() : getLeanLogPrompt())
-                : getLeanQAPrompt(isSmallModel);
+            // 1) CORE SYSTEM PROMPT (rules) + product-specific knowledge.
+            // - analysisRun: forensic / compact log-analysis prompt.
+            // - logs attached but a normal/case question: conversational prompt (answers the
+            //   actual question instead of forcing a forensic report).
+            // - no logs: standard Q&A prompt.
+            // Small / CPU-bound models get the compact log prompt — the full 13KB prompt is
+            // minutes of prefill on a 6 tok/s CPU and is the main cause of "blank" responses.
+            let corePrompt;
+            if (analysisRun) {
+                corePrompt = forensicRun ? getLogForensicsSystemPrompt() : (isSmallModel ? getCompactLogPrompt() : getLeanLogPrompt());
+            } else if (hasLogs && !needsDeepPulse) {
+                corePrompt = getConversationalPrompt();
+            } else {
+                corePrompt = getLeanQAPrompt(isSmallModel);
+            }
 
-            // Fetch external heuristics if logs are present
-            let detectedProduct = ci && ci.product ? ci.product : null;
+            // Detect ALL products present across the attached logs — filename heuristics
+            // plus a content scan (first 5,000 chars), so mixed-product cases get every
+            // relevant knowledge file injected, not just the first match.
+            const detectedProducts = new Set();
+            if (ci && ci.product) {
+                const p = String(ci.product).toLowerCase();
+                if (p.includes('xsight')) detectedProducts.add('SOTI XSight');
+                else if (p.includes('connect')) detectedProducts.add('SOTI Connect');
+                else if (p.includes('mobicontrol')) detectedProducts.add('MobiControl');
+            }
             if (hasLogs) {
-                for (let log of c.logs) {
+                for (const log of c.logs) {
                     const ln = (log.name || "").toLowerCase();
-                    if (ln.includes('setupsotixsight') || ln.includes('xsight')) {
-                        detectedProduct = "SOTI XSight";
-                        break;
-                    } else if (ln.includes('mobicontrol') || ln.includes('adb.log') || /\b(ms|ds|dse)\b/i.test(log.name) || /^(ms|ds|dse)/i.test(log.name)) {
-                        detectedProduct = "MobiControl";
-                        break;
+                    const head = (log.content || "").slice(0, 5000);
+                    const inferred = ((log.panelIntel && log.panelIntel.product) || inferProductFromLogName(log.name || "", head) || "").toLowerCase();
+                    if (ln.includes('setupsotixsight') || ln.includes('xsight') || inferred.includes('xsight')) {
+                        detectedProducts.add('SOTI XSight');
+                    } else if (ln.includes('connect') || inferred.includes('connect') || /\bSOTI\s+Connect\b/i.test(head) || (/\bMQTT\b/i.test(head) && /\bSOTI\b/i.test(head))) {
+                        detectedProducts.add('SOTI Connect');
+                    } else if (ln.includes('mobicontrol') || ln.includes('adb.log') || /\b(ms|ds|dse)\b/i.test(log.name) || /^(ms|ds|dse)/i.test(log.name) || inferred.includes('mobicontrol')) {
+                        detectedProducts.add('MobiControl');
                     }
                 }
             }
 
-            if (hasLogs && detectedProduct) {
+            if (analysisRun && detectedProducts.size > 0) {
                 const map = {
                     "MobiControl": "MobiControl.md",
                     "SOTI XSight": "XSight.md",
                     "SOTI Connect": "Connect.md"
                 };
-                if (map[detectedProduct]) {
+                // Small/CPU models: inject only the PRIMARY product's signatures to save prefill.
+                const prodList = isSmallModel ? [...detectedProducts].slice(0, 1) : [...detectedProducts];
+                for (const prod of prodList) {
+                    if (!map[prod]) continue;
                     try {
                         const url = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
-                            ? chrome.runtime.getURL('knowledge/' + map[detectedProduct])
-                            : 'knowledge/' + map[detectedProduct];
+                            ? chrome.runtime.getURL('knowledge/' + map[prod])
+                            : 'knowledge/' + map[prod];
                         const res = await fetch(url);
                         if (res.ok) {
-                            corePrompt += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES:\n` + await res.text();
+                            let kb = await res.text();
+                            // Cap for small/CPU models so the curated signatures (front of the
+                            // file) fit without starving the actual log evidence of context.
+                            if (isSmallModel && kb.length > 2800) kb = kb.slice(0, 2800) + '\n…[signatures trimmed]';
+                            corePrompt += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES — ${prod}:\n` + kb;
                         }
                     } catch (e) {
-                        console.warn("Could not load knowledge for " + detectedProduct, e);
+                        console.warn("Could not load knowledge for " + prod, e);
                     }
                 }
             }
 
+            // 2) LIVE DATA / CASE CONTEXT (case info, research, learned insights).
             let liveDataSection = "";
             const liveDataLines = [];
             liveDataLines.push(`[ISSUE SUMMARY]: ${summaryText}`);
             liveDataLines.push(`[TIME]: ${new Date().toLocaleString()}`);
-            liveDataLines.push(`[CASE]: ${JSON.stringify(ci, null, 2)}`);
-            
+            liveDataLines.push(`[CASE]: ${JSON.stringify(buildCaseContextForPrompt(ci, isSmallModel), null, 2)}`);
+
             if (VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST MOBICONTROL VERSION]: ${VERSIONS[0]}`);
                 liveDataLines.push(`[ALL MOBICONTROL VERSIONS]: ${VERSIONS.join(', ')}`);
@@ -5269,23 +5879,75 @@ async function send(overrideText = null, silent = false) {
             if (RESEARCHED_ARTICLE_CONTENT && RESEARCHED_ARTICLE_CONTENT.trim()) {
                 liveDataLines.push(`[DEEP RESEARCH]:\n${RESEARCHED_ARTICLE_CONTENT}`);
             }
+            if (supportingRefSection) {
+                liveDataLines.push(supportingRefSection);
+            }
+            const learnedSection = await matchLearnedInsights(txt, hasLogs ? c.logs : []);
+            if (learnedSection) {
+                liveDataLines.push(learnedSection);
+            }
+            if (hasLogs) {
+                liveDataLines.push(`[CRITICAL INSTRUCTION: You MUST read and retain the [CASE] and [ISSUE SUMMARY] information in this prompt. Even when analyzing logs, you must cross-reference the logs with the user's reported case notes, and you MUST answer any direct questions the user asks about the case info. If the user asks for a summary of the case, you MUST summarize ONLY the [CASE], [ISSUE SUMMARY], and the attached logs. NEVER summarize [DEEP RESEARCH], [DOCS SEARCH], or [SUPPORTING REFERENCE] as the case summary, as those are external articles, not the case itself.]`);
+            }
             liveDataSection = liveDataLines.join('\n');
 
+            // 3) LOG CONTEXT.
+            // - analysisRun: full evidence (manifest + profile + incident + budgeted snippets),
+            //   sized against everything else so it ALWAYS fits the context window.
+            // - logs attached but a normal/case question: lightweight manifest only — fast, and
+            //   enough to reference the files without a slow full-snippet prefill on CPU.
+            let logContext = "";
+            if (analysisRun) {
+                const historyChars = c.msgs.slice(-10).reduce((a, m) => a + Math.min((m.content || '').length, 4000), 0);
+                const externalOverhead = corePrompt.length + liveDataSection.length + (imgContext || '').length + historyChars + (txt || '').length + 1500;
+                if (forensicRun) {
+                    logContext = await buildLogAnalysisContext(c.logs, c.lastSentAt || 0, externalOverhead);
+                } else {
+                    let header = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
+                    header += await buildFileManifest(c.logs, c.lastSentAt || 0);
+                    header += await buildLogPatternProfile(c.logs);
+                    header += await buildCrossLogIncidentIndex(c.logs, { patternMode: true });
+                    const snippetBudget = await computeSnippetBudget(c.logs.length, externalOverhead + header.length);
+                    const budgets = allocatePerFileBudgets(c.logs, snippetBudget, isSmallModel ? 1500 : 4000);
+                    logContext = header;
+                    for (const l of c.logs) {
+                        logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, budgets.get(l) || 10000, l.name, l.lines)}\n=== END: ${l.name} ===`;
+                    }
+                }
+            } else if (hasLogs) {
+                logContext = `\n\n[ATTACHED LOGS — reference only; the user asked a question, not for a full analysis]`
+                    + await buildFileManifest(c.logs, c.lastSentAt || 0);
+            }
+
+            // 4) ASSEMBLE.
+            // - Forensic: logs travel in the user message; system = rules + learned + images.
+            // - Analysis with logs: rules + LOGS first (strongly attended, protected from
+            //   end-trim), then images, then case/research data.
+            // - Otherwise (conversational / Q&A): case + research data first (the answer
+            //   source), then rules, then the lightweight log manifest.
             sysPrompt = forensicRun && hasLogs
-                ? scrubPII(`${corePrompt}
+                ? scrubPII(`${corePrompt}${learnedSection ? '\n\n' + learnedSection : ''}
 
 ${imgContext}`)
-                : scrubPII(`${liveDataSection}
+                : analysisRun
+                    ? scrubPII(`${corePrompt}
 
-${corePrompt}
+${logContext}
 
 ${imgContext}
 
-${logContext}`);
+${liveDataSection}`)
+                    : scrubPII(`${liveDataSection}
 
-            userMsgForModel = forensicRun && hasLogs
-                ? scrubPII(`${logContext}\n\n${txt}`)
-                : scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
+${corePrompt}
+
+${logContext}
+
+${imgContext}`);
+
+            // Store ONLY the clean user text in history — never log dumps. Keeping history
+            // light is what lets newly added logs always fit the context on later sends.
+            userMsgForModel = scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
@@ -5294,7 +5956,13 @@ ${logContext}`);
                 c.msgs.push({ role: 'user', content: userMsgForModel, hidden: silent });
             }
 
-            modelMessages = [{ role: 'system', content: sysPrompt }, ...c.msgs.slice(-10)];
+            const history = sanitizeHistoryForModel(c.msgs.slice(-10));
+            if (forensicRun && hasLogs && history.length > 0) {
+                // Forensic mode: the log payload travels in the FINAL user message only
+                // (ephemeral — rebuilt fresh each send, never persisted to history).
+                history[history.length - 1] = { role: 'user', content: scrubPII(`${logContext}\n\n${txt}`) };
+            }
+            modelMessages = [{ role: 'system', content: sysPrompt }, ...history];
         }
 
         const selectedModel = LOCAL_AI_MODEL || null;
@@ -5399,10 +6067,31 @@ ${logContext}`);
             console.warn('[Ollama] No content tokens received — using reasoning output as response. Model:', LOCAL_AI_MODEL);
             resp = thinkingResp;
         }
-        
+
+        // NEVER-BLANK SAFETY NET: an empty bubble is the failure the user reported.
+        // Recover from stray reasoning tags, then the raw reasoning field, then show a
+        // clear, actionable message instead of nothing.
+        let finalAnswer = sanitizeAssistantResponse(resp);
+        if (!finalAnswer.trim()) {
+            const recovered = ((resp || '') + ' ' + (thinkingResp || ''))
+                .replace(/<\/?\|?think\|?>/gi, '').trim();
+            finalAnswer = sanitizeAssistantResponse(recovered);
+        }
+        if (!finalAnswer.trim()) {
+            console.warn('[Ollama] Empty response after recovery. resp len:', resp.length, 'thinking len:', thinkingResp.length);
+            finalAnswer = "⚠️ The model returned an empty response. On a CPU-only setup a large analysis can exhaust the model's output budget before it finishes.\n\n**Try this:**\n- Lower **Context Size** in Settings (⚙) to 8K\n- Attach fewer / smaller logs, or remove very large files\n- Switch to a smaller, faster model (e.g. `gemma4:2b`)\n\nThen click **Analyse Now** again.";
+        }
+
+        // Force the final paint (renderUpdate is a no-op when pendingRender is false, which
+        // would otherwise leave the recovered/fallback text unrendered).
+        pendingRender = true;
+        resp = finalAnswer; // so renderUpdate shows the recovered text, not the raw stream
         renderUpdate();
-        c.msgs.push({ role: 'assistant', content: sanitizeAssistantResponse(resp) });
+
+        c.msgs.push({ role: 'assistant', content: finalAnswer });
+        c.lastSentAt = Date.now(); // logs uploaded after this moment get flagged as NEW next send
         saveState();
+        attachFeedbackUI(aib, c, txt, finalAnswer); // 👍/👎 self-learning loop
     } catch (e) { 
         if (e.name !== 'AbortError') {
             aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
@@ -5733,6 +6422,10 @@ async function readLogUpload(file) {
     }];
 }
 
+// Tracks in-flight log uploads per case so send() never fires while files
+// (especially ZIPs) are still being read — the AI would miss them otherwise.
+const pendingLogUploads = new Map();
+
 const handleFiles = async (files) => {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) return;
@@ -5740,35 +6433,40 @@ const handleFiles = async (files) => {
     const uploads = Array.from(files || []);
     if (uploads.length === 0) return;
 
+    pendingLogUploads.set(c.id, (pendingLogUploads.get(c.id) || 0) + 1);
     toast('Uploading logs...', 'i', 0);
     const added = [];
     const skipped = [];
 
-    for (const f of uploads) {
-        try {
-            const entries = await readLogUpload(f);
-            if (!entries.length) {
-                skipped.push(`${f.name}: no supported log files found`);
-                continue;
-            }
+    try {
+        for (const f of uploads) {
+            try {
+                const entries = await readLogUpload(f);
+                if (!entries.length) {
+                    skipped.push(`${f.name}: no supported log files found`);
+                    continue;
+                }
 
-            for (const entry of entries) {
-                const content = normalizeLogText(entry.content || "");
-                const lines = content ? content.split('\n') : [];
-                const log = {
-                    name: entry.name,
-                    content: content,
-                    lines: lines,
-                    sourceZip: entry.sourceZip || "",
-                    uploadedAt: Date.now()
-                };
-                await getLogPanelIntel(log);
-                c.logs.push(log);
-                added.push(entry.name);
+                for (const entry of entries) {
+                    const content = normalizeLogText(entry.content || "");
+                    const lines = content ? content.split('\n') : [];
+                    const log = {
+                        name: entry.name,
+                        content: content,
+                        lines: lines,
+                        sourceZip: entry.sourceZip || "",
+                        uploadedAt: Date.now()
+                    };
+                    await getLogPanelIntel(log);
+                    c.logs.push(log);
+                    added.push(entry.name);
+                }
+            } catch (e) {
+                skipped.push(`${f.name}: ${e.message || e}`);
             }
-        } catch (e) {
-            skipped.push(`${f.name}: ${e.message || e}`);
         }
+    } finally {
+        pendingLogUploads.set(c.id, Math.max(0, (pendingLogUploads.get(c.id) || 1) - 1));
     }
 
     renderLogs();
@@ -5776,11 +6474,14 @@ const handleFiles = async (files) => {
 
     if (added.length > 0) {
         toast('Logs uploaded', 's', 2500);
+        // Visible note in the chat — also lands in history so the model knows files arrived
+        addMsg('assistant', `📎 **${added.length} log file${added.length === 1 ? '' : 's'} attached:** ${added.join(', ')}${skipped.length ? `\n\n⚠ Skipped: ${skipped.join('; ')}` : ''}`, true);
         if ($('panelR') && $('panelR').classList.contains('collapsed') && typeof $('toggleR').onclick === 'function') {
             $('toggleR').onclick();
         }
     } else {
         hideToast();
+        if (skipped.length > 0) toast(`Upload skipped: ${skipped[0]}`, 'w', 4000);
     }
 };
 
@@ -6341,9 +7042,10 @@ ${JIRA_TEMPLATE}`);
         const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
         
         const numPredict = 3072;
-        const estimatedTokens = Math.ceil(userPrompt.length / 3.5);
+        const estimatedTokens = Math.ceil(userPrompt.length / 3.0);
         const neededTokens = estimatedTokens + numPredict + 500;
-        const numCtx = Math.max(8192, Math.min(32768, Math.ceil(neededTokens / 1024) * 1024));
+        const { hardMax: jiraHardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
+        const numCtx = Math.max(8192, Math.min(jiraHardMax, Math.ceil(neededTokens / 1024) * 1024));
 
         console.log(`[Ollama JIRA Request] Model: ${LOCAL_AI_MODEL}, Chars: ${userPrompt.length}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
 
@@ -6400,7 +7102,14 @@ $('btnCopyJira').onclick = () => { $('jiraTa').select(); document.execCommand('c
 
 loadState();
 fetchLatestSOTIVersions();
-loadLocalAISettings().then(() => updateLocalAIBadge());
+loadLocalAISettings().then(() => {
+    updateLocalAIBadge();
+    // Preload the model so the first query is warm (no model-load wait on a slow CPU).
+    setTimeout(() => { warmUpModel(); }, 1500);
+});
+// Warm the offline knowledge-base index in the background so the first
+// question never pays the 24MB parse cost.
+setTimeout(() => { PulseKB.ensureIndex().catch(() => {}); }, 3000);
 
 // --- SETTINGS MODAL (AI - OLLAMA & PULSE SYNC) ---
 async function refreshSettingsModal() {
@@ -6419,6 +7128,7 @@ async function refreshSettingsModal() {
 
     if (urlInp) urlInp.value = LOCAL_AI_URL;
     if (urlInp && !urlInp.placeholder) urlInp.placeholder = 'http://127.0.0.1:11434';
+    if ($('localAiCtxSel')) $('localAiCtxSel').value = LOCAL_AI_CTX_MAX || 'auto';
 
     if (statusEl) { statusEl.textContent = 'Connecting to Ollama...'; statusEl.style.color = 'var(--txt2)'; }
     const models = await fetchOllamaModels(urlInp ? urlInp.value : LOCAL_AI_URL);
@@ -7112,11 +7822,50 @@ $('localAiModelSel').onchange = () => {
 $('btnSaveLocalAI').onclick = async () => {
     LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://127.0.0.1:11434';
     LOCAL_AI_MODEL = $('localAiModelSel').value || LOCAL_AI_MODEL;
+    if ($('localAiCtxSel')) LOCAL_AI_CTX_MAX = $('localAiCtxSel').value || 'auto';
     await saveLocalAISettings();
     updateLocalAIBadge();
     $('mSettings').style.display = 'none';
     toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}`, 's');
+    setTimeout(() => { warmUpModel(); }, 200); // preload the newly-selected model / context size
 };
+
+// "Clear all cases & logs now" — privacy panic button. Wipes all stored case/log data and
+// learned insights from this device immediately, then resets to one empty case. Keeps the
+// Ollama connection settings (URL/model/context) and the offline knowledge base, since
+// those aren't customer data.
+if ($('btnClearAllData')) {
+    $('btnClearAllData').onclick = async () => {
+        if (!confirm('Delete ALL cases, attached logs, and learned insights from this device now?\n\nThis cannot be undone. Ollama settings and the offline knowledge base are kept.')) return;
+        try {
+            // Stop any in-flight streams so they don't re-save data after the wipe.
+            for (const ctrl of streamControllers.values()) { try { ctrl.abort(); } catch (e) {} }
+            streamControllers.clear();
+
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                await chrome.storage.local.remove(['cases', 'activeCaseId', 'learnedInsights']);
+            }
+            try {
+                localStorage.removeItem('soti_ai_state');
+                localStorage.removeItem('soti_learned_insights');
+                sessionStorage.removeItem('soti_ai_quick_cache');
+            } catch (e) {}
+
+            // Reset to a single fresh, empty case.
+            cases = [getDefaultCase('Case 1')];
+            activeCaseId = cases[0].id;
+            await saveState();
+            renderTabs();
+            switchCase(activeCaseId);
+
+            $('mSettings').style.display = 'none';
+            toast('✓ All cases, logs and learned data cleared from this device', 's', 5000);
+        } catch (e) {
+            console.error('Clear all data failed', e);
+            toast('Could not clear data: ' + (e.message || e), 'e', 5000);
+        }
+    };
+}
 
 if ($('btnDownloadLocalAISetup')) {
     $('btnDownloadLocalAISetup').onclick = () => {

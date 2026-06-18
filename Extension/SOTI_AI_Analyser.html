@@ -345,6 +345,18 @@
                 </select>
             </div>
 
+            <div class="fld" style="margin-top:12px">
+                <span class="flbl">Context Size (num_ctx)</span>
+                <select class="fsel" id="localAiCtxSel" title="Maximum context window for log analysis. Auto uses up to 64K when the model supports it. Lower this if you run out of GPU memory.">
+                    <option value="auto">Auto (recommended)</option>
+                    <option value="8192">8K — low VRAM</option>
+                    <option value="16384">16K</option>
+                    <option value="32768">32K</option>
+                    <option value="65536">64K</option>
+                    <option value="131072">128K — max</option>
+                </select>
+            </div>
+
             <div id="localAiStandaloneHelp" style="display:none;padding:10px 12px;border-radius:8px;margin-top:14px;font-size:11px;color:var(--txt2);background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.35);line-height:1.65">
                 <strong style="color:var(--txt1);display:block;margin-bottom:5px">Standalone browser mode</strong>
                 <div>Local AI works here if you <strong>do not</strong> open this file directly (file://).</div>
@@ -382,6 +394,14 @@
                     Sync Now
                 </button>
                 <div id="pulseSyncStatus" style="font-size:10px;color:var(--txt2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Never synced</div>
+            </div>
+
+            <div style="border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 15px"></div>
+
+            <div style="padding:10px 12px;border-radius:8px;font-size:11px;color:var(--txt2);background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.3);line-height:1.6">
+                <strong style="color:var(--txt1);display:block;margin-bottom:5px">🔒 Data &amp; Privacy</strong>
+                <div style="margin-bottom:8px">Cases and their logs are stored locally on this device and auto-deleted after <strong>7 days of inactivity</strong>. Nothing is uploaded. Use the button below to wipe everything now.</div>
+                <button type="button" class="btn" id="btnClearAllData" style="width:100%;background:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.4)">Clear all cases &amp; logs now</button>
             </div>
 
             <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">

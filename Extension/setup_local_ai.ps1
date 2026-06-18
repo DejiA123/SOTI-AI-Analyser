@@ -194,11 +194,19 @@ Write-Info "Configuring OLLAMA_ORIGINS=* to allow standalone browser access..."
 [System.Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "*", "User")
 $env:OLLAMA_ORIGINS = "*"
 
+# Speed: flash attention + quantized KV cache. On CPU-only / low-RAM laptops this lowers
+# memory bandwidth and can speed up inference. It does NOT change answer quality.
+Write-Info "Configuring OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 for faster inference..."
+[System.Environment]::SetEnvironmentVariable("OLLAMA_FLASH_ATTENTION", "1", "User")
+[System.Environment]::SetEnvironmentVariable("OLLAMA_KV_CACHE_TYPE", "q8_0", "User")
+$env:OLLAMA_FLASH_ATTENTION = "1"
+$env:OLLAMA_KV_CACHE_TYPE = "q8_0"
+
 $runningOllama = Get-Process ollama -ErrorAction SilentlyContinue
 $runningOllamaApp = Get-Process "ollama app" -ErrorAction SilentlyContinue
 
 if ($runningOllama -or $runningOllamaApp) {
-    Write-Info "Restarting Ollama to apply standalone CORS permissions..."
+    Write-Info "Restarting Ollama to apply CORS + speed settings (flash attention, KV cache)..."
     if ($runningOllamaApp) { Stop-Process -Name "ollama app" -Force -ErrorAction SilentlyContinue }
     if ($runningOllama) { Stop-Process -Name "ollama" -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 3

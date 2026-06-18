@@ -962,3 +962,43 @@ body {
 }
 
 .img-del:hover { transform: scale(1.2); }
+
+/* --- Self-learning feedback row (👍/👎 under AI analyses) --- */
+.fb-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--txt2);
+}
+
+.fb-hint { opacity: 0.8; }
+
+.fb-btn {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 3px 9px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--txt1);
+    transition: transform 0.12s, background 0.12s;
+}
+
+.fb-btn:hover { transform: scale(1.12); background: var(--bg2); }
+
+.fb-input {
+    flex: 1;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 11px;
+    color: var(--txt1);
+    outline: none;
+}
+
+.fb-done { color: var(--green); font-size: 11px; }

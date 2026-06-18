@@ -1,5 +1,11 @@
-**Log Sources**: XSight Service logs, Collector logs, Agent telemetry data, Event pipeline logs, Elasticsearch/data store logs.
-**Service Architecture**: XSight Collectors -> Data Pipeline -> XSight Analytics Engine -> Dashboard/Alerts.
+**Log Sources**: XSight Service logs, Collector logs, Agent telemetry data, Event pipeline logs, Elasticsearch/data store logs, SetupSOTIXSight MSI installer logs.
+**Service Architecture**: XSight Collectors -> Data Pipeline -> XSight Analytics Engine -> Dashboard/Alerts. XSight integrates tightly with MobiControl (device data, remote control) and uses its own SQL database plus a search/analytics store.
+**Windows Services**: services are prefixed "SOTI XSight". The installer (SetupSOTIXSight-<version>.exe / MSI) configures the database, services, and integrations via CustomActions — most install failures are CustomAction failures, not file-copy failures.
+**Default Log Locations**: under the SOTI XSight installation directory (service + collector logs); installer logs are MSI logs in %TEMP% or alongside the setup executable. Remote-control session issues also leave evidence in the MobiControl agent DDR.
+**Port Matrix (defaults)**:
+- 443 (HTTPS): dashboard, APIs, MobiControl integration.
+- 1433 (TCP): XSight -> SQL Server database.
+- Collector -> device protocols: SNMP 161, WMI/RPC 135 + dynamic, depending on what is monitored.
 **Key Error Signatures to Hunt**:
 - **Data Collection**: "Collector heartbeat lost", "Telemetry ingestion failed", "Agent reporting gap detected", "SNMP timeout", "WMI access denied" — indicates collector-to-device communication issues.
 - **Pipeline/Processing**: "Event queue overflow", "Processing pipeline backlog", "Message deserialization error", "Schema validation failed" — indicates data pipeline congestion or format issues.
@@ -12,6 +18,8 @@
   - Disk full -> Elasticsearch write block -> Pipeline backlog -> Dashboard shows stale data -> Alerts stop firing
   - Collector offline -> Data gap -> XSight reports inaccurate device health -> False "healthy" status
   - Network firewall change -> Collector cannot reach devices -> Telemetry gaps -> Compliance reports incorrect
+  - SQL CustomAction fails during install (missing rights / unreachable Azure SQL host) -> Return value 3 -> full rollback (the SQL/exception line above the 1603 is the root cause, NOT the rollback itself)
+  - MobiControl integration credential expired -> device data stops syncing -> XSight dashboards empty while MobiControl itself is healthy
 
 **MSI INSTALLER HEURISTICS (CRITICAL FOR XSIGHT INSTALL/UPGRADE LOGS)**:
 When analyzing an XSight MSI installer log (`SetupSOTIXSight`, etc.), the actual cause of a rollback is almost never at the very bottom of the file. You **MUST** hunt for the following specific forensic signatures to find the true root cause:
