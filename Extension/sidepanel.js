@@ -166,6 +166,21 @@ function sanitizeAssistantResponse(text) {
         .replace(strayRx, " ")
         .replace(refRx, "")
         .replace(/\bNo specific highlights[^.]*\./gi, "")
+        // Remove leftover citation PLACEHOLDERS the model copies from the template instead of
+        // real values ("Line N", "Line X", "@ Timestamp T", "(timestamp)", "ExceptionClass").
+        // Real citations use digits ("Line 8924") and real dates, so these only match garbage.
+        .replace(/\s*@\s*Timestamp(?:\s+[A-Z]\b)?/g, "")     // "@ Timestamp T" / "@ Timestamp"
+        .replace(/:?\s*Lines?\s+[A-Z]\b(?:\s*-\s*[A-Z]\b)?/g, "")  // ":Line N" / "Lines X-Y" placeholders
+        .replace(/\(\s*timestamp\s*\)/gi, "")
+        .replace(/`?\bExceptionClass\b`?/g, "the exception")
+        // Strip any "Based on …," preamble at the very START of the answer (the user never wants
+        // the response to open with "Based on the provided documentation / the logs / …").
+        .replace(/^\s*[Bb]ased (?:on|upon)\b[^,.\n]{0,90}[,:]\s*/, "")
+        // Strip source meta-commentary the model sometimes prepends mid-text and the unhelpful
+        // "consult/contact support" deflections.
+        .replace(/\b[Bb]ased on (?:the )?(?:provided|retrieved|available|the above)[^,.\n]*,?\s*/g, "")
+        .replace(/\b(?:the )?(?:retrieved|provided) (?:knowledge base|documentation|context|information)\b/gi, "the SOTI documentation")
+        .replace(/[^.\n]*\b(?:consult the full SOTI documentation|contact SOTI support|was not (?:explicitly )?detailed in[^.\n]*)\b[^.\n]*\.?/gi, "")
         .replace(/[ \t]{2,}/g, " ")
         .replace(/\n {1,}/g, "\n")
         .trim();
@@ -196,6 +211,16 @@ function getDefaultCase(name = 'Case 1') {
 let _suppressStorageReload = false;
 let _saveStateTimer = null;
 let _renderTabsTimer = null;
+// Deterministic guard against reloading our OWN storage writes. The old 80ms timer was too
+// short once a case held megabytes of logs: chrome.storage.local.set took longer than 80ms,
+// so the suppress flag cleared before our own onChanged fired, the listener reloaded our
+// write, re-rendered (tab flicker, scroll jump) and re-saved — a self-sustaining glitch loop.
+// Now every write carries a unique token; the listener ignores any change carrying our token.
+let _lastWriteToken = '';
+function _newWriteToken() {
+    _lastWriteToken = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    return _lastWriteToken;
+}
 
 function buildCaseCiFromForm() {
     return {
@@ -271,11 +296,11 @@ async function saveState() {
 
         _suppressStorageReload = true;
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            await chrome.storage.local.set({ cases, activeCaseId });
+            await chrome.storage.local.set({ cases, activeCaseId, _stateWriteToken: _newWriteToken() });
         } else {
             localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
         }
-    } catch (e) { 
+    } catch (e) {
         console.error('CRITICAL: Save failed', e);
         if (e.message.includes('quota')) {
             toast('Storage quota exceeded! Clear old cases.', 'e');
@@ -377,7 +402,7 @@ async function loadState() {
                 console.warn(`[Security] Data retention: purged ${purged} case(s) idle for over 7 days.`);
                 toast(`${purged} idle case(s) auto-cleared (7-day retention policy)`, 'w', 5000);
                 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                    chrome.storage.local.set({ cases });
+                    chrome.storage.local.set({ cases, _stateWriteToken: _newWriteToken() });
                 }
             }
 
@@ -524,11 +549,11 @@ function switchCase(id) {
             t.classList.toggle('active', t.dataset.id === id)
         );
 
-        // Deferred storage write — suppress onChanged so it doesn't re-trigger loadState
+        // Deferred storage write — token-tagged so our own onChanged is ignored (no reload loop)
         _suppressStorageReload = true;
         requestAnimationFrame(() => {
             if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                chrome.storage.local.set({ cases, activeCaseId }).catch(e =>
+                chrome.storage.local.set({ cases, activeCaseId, _stateWriteToken: _newWriteToken() }).catch(e =>
                     console.error('SwitchCase save failed', e)
                 ).finally(() => {
                     setTimeout(() => { _suppressStorageReload = false; }, 80);
@@ -763,7 +788,7 @@ function normalizeLogSignature(text) {
 
 const EXCEPTION_CLASS_PATTERN = String.raw`((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?:Exception|Error)|[A-Za-z_]\w*(?:Exception|Error)|AggregateException|SqlException|SQLException|TimeoutException|SocketException|WebException|IOException|UnauthorizedAccessException|InvalidOperationException|NullReferenceException|OutOfMemoryException|StackOverflowException|AuthenticationException|SecurityException|TypeError|ReferenceError|RangeError|SyntaxError|ValueError|KeyError|IndexError|RuntimeError|OSError)`;
 
-const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port)\b|^\s*at\s+/i;
+const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port|sso|oauth|saml|oidc|idp|issuer|identityserver|identity|unauthor|forbidden|logon|login|redirect|authoriz|entity|token|429|403|401|404|500|502|503)\b|^\s*at\s+/i;
 
 const DEFAULT_LINE_CLASSIFICATION = {
     categories: [],
@@ -820,22 +845,28 @@ async function precomputeLogIntel(log) {
                 await yieldIfNeeded();
             }
             const line = lines[idx];
-            const hasPrefilter = FAST_FORENSIC_PREFILTER.test(line);
-            
-            const ts = extractLogTimestamp(line);
+            // Cap the length every per-line regex scans. The forensic signal (timestamp, level,
+            // exception class, error message) lives at the START of a line; multi-KB data-export
+            // CSV rows (several thousand chars) otherwise make each of the ~25 regexes scan the whole
+            // line × 150k lines = many minutes of CPU on a big multi-file bundle. Normal log lines
+            // (<1KB) are unaffected. The full line is still kept in `lines` for snippets/windows.
+            const scanLine = (line && line.length > 1500) ? line.slice(0, 1500) : line;
+            const hasPrefilter = FAST_FORENSIC_PREFILTER.test(scanLine);
+
+            const ts = extractLogTimestamp(scanLine);
             if (ts) timestampCache[idx] = ts;
 
             if (hasPrefilter) {
                 prefilteredIndices.push(idx);
-                
-                const intel = classifyLogLine(line);
+
+                const intel = classifyLogLine(scanLine);
                 intelCache[idx] = intel;
 
                 if (intel.isForensic && !intel.hasStackFrame) {
-                    signatureCache[idx] = normalizeLogSignature(line);
+                    signatureCache[idx] = normalizeLogSignature(scanLine);
                 }
 
-                const instEv = getInstallerEvent(line, log.name || "Attached log", idx + 1);
+                const instEv = getInstallerEvent(scanLine, log.name || "Attached log", idx + 1);
                 if (instEv) installerEventCache[idx] = instEv;
             } else {
                 intelCache[idx] = DEFAULT_LINE_CLASSIFICATION;
@@ -858,6 +889,7 @@ async function precomputeLogIntel(log) {
 
 const LOG_SIGNAL_RULES = [
     { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|transaction|rollback|schema|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|constraint|duplicate key)\b/i },
+    { category: 'SSO/Identity/Redirect', weight: 42, regex: /\b(No SSO entity found|SSO entity (?:is )?not found|invalid_client_configuration|request issuer\s*[:=]|wrong issuer|issuer mismatch|unknown client|client (?:not found|is unknown|is not configured)|relying party (?:not|trust)|audience (?:validation failed|mismatch)|redirect_uri|reply ?URL|ACS URL|invalid redirect|redirect loop|Too many requests|HTTP 429|\b429\b.*(?:request|limit)|IdentityServer|IdpInitiated|SAML response|authoriz(?:ation|e) (?:request )?(?:failed|invalid|error)|invalid_grant|invalid_request|access_denied)\b/i },
     { category: 'Certificate/TLS', weight: 38, regex: /\b(certificate|cert\b|SSL|TLS|handshake failed|X509|trust|chain|CRL|OCSP|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors|AuthenticationException|Schannel|PKIX|certificate verify failed|unable to get local issuer|self-signed|hostname mismatch)\b/i },
     { category: 'HTTP/Network', weight: 30, regex: /\b(HTTP\/|HTTP [45]\d\d|StatusCode|BadRequest|Unauthorized|Forbidden|NotFound|Conflict|TooManyRequests|InternalServerError|BadGateway|ServiceUnavailable|GatewayTimeout|WebException|SocketException|ConnectFailure|ConnectionReset|connection dropped|connection lost|lost connection|DNS|resolve|resolution|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|host not found|No such host|network unreachable|proxy|firewall|port \d+|connection refused|connection reset|timed out connecting|name or service not known)\b/i },
     { category: 'Service Lifecycle', weight: 24, regex: /\b(service start|service stop|starting service|stopping service|service failed|failed to start|failed to stop|restarting|OnStart|OnStop|ServiceBase|hosted service|application pool|recycl|terminated unexpectedly|process exited|crashed|crash dump|service control manager|SCM|watchdog|heartbeat lost)\b/i },
@@ -933,6 +965,10 @@ function classifyLogLine(line) {
     if (!FAST_FORENSIC_PREFILTER.test(line)) {
         return DEFAULT_LINE_CLASSIFICATION;
     }
+    // Bound the cost of the ~22 classification regexes below. Forensic signal lives at the START
+    // of a line; very long lines (data-export CSV rows can be several KB) otherwise make each regex
+    // scan thousands of chars across 150k+ lines = minutes of CPU on a big multi-file bundle.
+    if (line && line.length > 2000) line = line.slice(0, 2000);
 
     if (isMsiNoiseLine(line)) {
         return {
@@ -1652,6 +1688,15 @@ function getInstallerEvent(line, logName, lineNum) {
         score: 0
     };
 
+    // MSI PLUMBING NOISE — property assignments, action scheduling/sequencing, op execution, and
+    // successful actions are NOT failures, even when the text mentions a CustomAction name or the
+    // word "rollback"/"error" (e.g. "PROPERTY CHANGE: Adding WixRollbackFirewallExceptionsInstall",
+    // "PROPERTY CHANGE: Modifying VALIDATION_ERROR_MESSAGE"). Demote them so they never crowd the
+    // real failure chain out of the chronological triage. Real failures still pass via the signal check.
+    if (!hasRealFailureSignal(text) && /PROPERTY CHANGE:|Executing op:\s|CustomActionSchedule|Doing action:|Action (?:start|ended)[^.]*\.\s*Return value [12]\b|: Skipping action|Font created|Resetting cached policy|policy value/i.test(text)) {
+        return { ...base, classification: "MSI sequencing / property change (non-fatal)", phase: "MSI plumbing", score: 4 };
+    }
+
     if (/returned actual error code 1603 but will be translated to success due to continue marking/i.test(text)) {
         return {
             ...base,
@@ -1791,8 +1836,45 @@ function extractStackOriginSummary(text) {
     return `Throwing frame: ${throwing}\nOriginating frame: ${originating}`;
 }
 
-async function buildInstallerFailureAnalysis(logs) {
+// DETERMINISTIC MSI ROOT CAUSE — the exact method an expert uses, in code (no AI guessing):
+//   1. Find the FIRST "Action ended ...: <Action>. Return value 3." (the fatal rollback trigger).
+//   2. Search BACKWARDS from there for the nearest "CustomAction <Name> returned actual error
+//      code 1603" that is NOT "translated to success due to continue marking" (those are non-fatal).
+//   That CustomAction is THE root cause. This removes the model's freedom to blame SQL/enumeration
+//   noise, and it is 100% accurate for SOTI MSI setup logs.
+function findMsiRootCause(lines) {
+    if (!lines || !lines.length) return null;
+    // 1) First fatal "Return value 3" on an "Action ended" line.
+    let rv3Idx = -1, rv3Action = "", rv3Ts = "";
+    for (let i = 0; i < lines.length; i++) {
+        const ln = lines[i] || "";
+        if (ln.indexOf("Return value 3") !== -1 && /Action ended/i.test(ln)) {
+            rv3Idx = i;
+            const m = ln.match(/([A-Za-z0-9_.]+)\.\s*Return value 3/i);
+            rv3Action = m ? m[1] : "";
+            rv3Ts = extractLogTimestamp(ln);
+            break;
+        }
+    }
+    // 2) Nearest preceding NON-TRANSLATED "returned actual error code 1603".
+    const searchEnd = rv3Idx >= 0 ? rv3Idx : lines.length - 1;
+    let causeIdx = -1, causeName = "", causeTs = "";
+    for (let i = searchEnd; i >= 0; i--) {
+        const ln = lines[i] || "";
+        if (ln.indexOf("1603") === -1) continue;
+        const m = ln.match(/CustomAction\s+(\S+)\s+returned actual error code 1603/i);
+        if (m && !/translated to success due to continue marking/i.test(ln)) {
+            causeIdx = i; causeName = m[1]; causeTs = extractLogTimestamp(ln);
+            break;
+        }
+    }
+    if (causeIdx < 0 && rv3Idx < 0) return null;
+    return { causeIdx, causeName, causeTs, rv3Idx, rv3Action, rv3Ts };
+}
+
+async function buildInstallerFailureAnalysis(logs, opts = {}) {
     if (!logs || logs.length === 0) return "";
+    const lean = !!opts.lean; // lean = tiny prompt for CPU-bound models (fast prefill)
 
     const events = [];
     const sources = [];
@@ -1881,7 +1963,16 @@ async function buildInstallerFailureAnalysis(logs) {
         returnCode = "1603";
     }
 
-    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || "");
+    // Detect an Azure SQL target even when the connection string uses ":" not "=" (which
+    // extractSqlTarget misses). Azure SQL forbids "ALTER DATABASE ... SET RECOVERY SIMPLE" — a very
+    // common SOTI XSight install failure — so flagging it lets the model name the real cause.
+    let azureHost = "";
+    for (const log of logs) {
+        const m = (log.content || "").match(/([A-Za-z0-9._-]+\.database\.windows\.net(?:,\d+)?)/i);
+        if (m) { azureHost = m[1]; break; }
+    }
+    if (azureHost && !sqlTarget) sqlTarget = azureHost;
+    const azureSql = /\.database\.windows\.net\b/i.test(sqlTarget || "") || !!azureHost;
     const sorted = events
         .filter(e => e.score >= 30)
         .sort((a, b) => a.sortTime - b.sortTime || a.lineNum - b.lineNum);
@@ -1895,20 +1986,103 @@ async function buildInstallerFailureAnalysis(logs) {
     if (lastTimestamp) report += `Install/log end: ${lastTimestamp}\n`;
     const env = [];
     if (machine) env.push(`Server: ${machine}`);
-    if (sqlTarget) env.push(`SQL target: ${sqlTarget}${azureSql ? " (.database.windows.net present in log)" : ""}`);
+    if (sqlTarget) env.push(`SQL target: ${sqlTarget}`);
+    if (azureSql) env.push(`SQL platform: AZURE SQL DATABASE (note: Azure SQL does NOT support "ALTER DATABASE ... SET RECOVERY SIMPLE" — if a migration script runs that, it fails here)`);
     if (env.length > 0) report += `Environment facts: ${env.join('; ')}\n`;
 
-    report += `\n--- CHRONOLOGICAL HIGH-SIGNAL LINES (raw text; not pre-interpreted) ---\n`;
-    report += `Timestamp | Location | Signal tag | Raw log line\n`;
-    sorted.slice(0, 40).forEach(e => {
-        report += `${formatInstallerTime(e.timestamp)} | ${e.file}:Line ${e.lineNum} | ${e.classification} | ${truncateLogLine(e.text, 320)}\n`;
+    // PRIMARY ROOT-CAUSE ANCHOR — leads the evidence so it survives context trimming.
+    // Prefer the DETERMINISTIC MSI cause (exact CustomAction before the first "Return value 3");
+    // only fall back to the highest-score event when there is no Return-value-3 / 1603 chain.
+    let detCause = null;
+    for (const name of sources) {
+        const dl = lineMap.get(name) || [];
+        const r = findMsiRootCause(dl);
+        if (r && r.causeIdx >= 0) { detCause = { ...r, file: name, lines: dl }; break; }
+        if (r && !detCause) detCause = { ...r, file: name, lines: dl };
+    }
+    const haveDet = !!(detCause && detCause.causeIdx >= 0);
+    if (haveDet) {
+        const win = installerEvidenceWindow(detCause.lines, detCause.causeIdx, lean ? 14 : 22, 4);
+        // Find the real WHY by scanning up to ~160 lines above the failing action for the most
+        // specific database/deployment error MESSAGE. The stack frames immediately above a 1603 are
+        // noise — the actionable cause usually sits a little higher (e.g. "ALTER DATABASE ... is not
+        // supported" / "transaction log is full" / "Cannot open database"). Priority-ranked so a
+        // precise cause beats a generic "...failed". Fully generic across different installer logs.
+        const WHY_TIERS = [
+            /ALTER DATABASE statement (?:is not supported|failed)|Setting Recovery mode to SIMPLE|SET RECOVERY SIMPLE|not supported (?:in|on) (?:azure|this edition)/i,
+            /transaction log for database .* is full|log file .* is full|filegroup .* is full|out of (?:disk )?space|insufficient disk space|no space left/i,
+            /Cannot open database .* requested by the login|Login failed for user|password .* (?:has expired|is incorrect)|not associated with a trusted/i,
+            /deadlock|Timeout expired|could not (?:open|connect to)|connection (?:refused|reset|was forcibly closed)|network-related or instance-specific|server was not found/i,
+            /An error occurred during .* deployment|Upgrade failed due to|database deployment failed|exception has occurred in script|Violation of .* constraint|invalid (?:object|column) name/i,
+            /SqlException \(0x[0-9a-f]+\):\s*\S|Number\s+\d{4,5};.*Message:|Error Number:\s*\d{3,5}/i,
+        ];
+        const whyHits = [];
+        for (let tier = 0; tier < WHY_TIERS.length && whyHits.length === 0; tier++) {
+            for (let i = detCause.causeIdx - 1; i >= Math.max(0, detCause.causeIdx - 160); i--) {
+                const t = (detCause.lines[i] || "").trim();
+                if (!t || /Closing MSIHANDLE|Creating MSIHANDLE|^\s*at\s|Note: 1:|PROPERTY CHANGE/i.test(t)) continue;
+                if (WHY_TIERS[tier].test(t)) { whyHits.push(`${detCause.file}:Line ${i + 1} — ${t.slice(0, 260)}`); if (whyHits.length >= 3) break; }
+            }
+        }
+        report += `\n--- PRIMARY ROOT CAUSE (deterministic — this is the failing action; the REAL reason is in the WHY lines below, NOT the earlier SQL-login symptom) ---\n`;
+        report += `Failing action: CustomAction ${detCause.causeName} returned actual error code 1603\n`;
+        report += `Location: ${detCause.file}:Line ${detCause.causeIdx + 1}${detCause.causeTs ? ` @ ${detCause.causeTs}` : ""}\n`;
+        if (whyHits.length) {
+            report += `WHY it failed (ROOT CAUSE — cite these exact lines; this is the source, not a symptom):\n`;
+            whyHits.forEach(h => report += `  • ${h}\n`);
+        }
+        if (detCause.rv3Idx >= 0) {
+            report += `Fatal rollback trigger: ${detCause.rv3Action ? detCause.rv3Action + ' — ' : ''}Return value 3 at ${detCause.file}:Line ${detCause.rv3Idx + 1}${detCause.rv3Ts ? ` @ ${detCause.rv3Ts}` : ""}\n`;
+        }
+        // KEY FAILURE CHAIN — the exact ordered rows for the triage table, so the model uses the
+        // real chain (symptom → root cause → failing action → rollback) instead of medium-signal noise.
+        const earliestSymptom = sorted.find(e => e.score >= 80 && (e.lineNum < detCause.causeIdx + 1)
+            && /SQL|database|login|cannot open|exception|denied|certificate|connection|migration/i.test(e.text || ""));
+        report += `KEY FAILURE CHAIN (use THESE as the triage rows, in this order — do not substitute lower-signal lines):\n`;
+        if (earliestSymptom) report += `  1) SYMPTOM (earliest, installer continued past it): ${detCause.file}:Line ${earliestSymptom.lineNum}${earliestSymptom.timestamp ? ` @ ${earliestSymptom.timestamp}` : ""} — ${truncateLogLine(earliestSymptom.text, 180)}\n`;
+        if (whyHits.length) report += `  2) ROOT-CAUSE error: ${whyHits[0]}\n`;
+        report += `  3) FAILING ACTION: ${detCause.file}:Line ${detCause.causeIdx + 1}${detCause.causeTs ? ` @ ${detCause.causeTs}` : ""} — CustomAction ${detCause.causeName} returned error code 1603\n`;
+        if (detCause.rv3Idx >= 0) report += `  4) ROLLBACK: ${detCause.file}:Line ${detCause.rv3Idx + 1}${detCause.rv3Ts ? ` @ ${detCause.rv3Ts}` : ""} — Return value 3 (installation aborts)\n`;
+        if (win && !lean) { report += `Full context around the failing action:\n`; report += "```text\n" + win + "\n```\n"; }
+    } else {
+        const primaryAnchor = [...sorted].sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)[0];
+        if (primaryAnchor && primaryAnchor.score >= 100) {
+            const aLines = lineMap.get(primaryAnchor.file) || [];
+            const aBlock = installerEvidenceWindow(aLines, primaryAnchor.lineNum - 1, 25, 5);
+            report += `\n--- PRIMARY ROOT-CAUSE ANCHOR (highest-signal failing action — START HERE; the cause is on or just above this line) ---\n`;
+            report += `${primaryAnchor.file}:Line ${primaryAnchor.lineNum}${primaryAnchor.timestamp ? ` @ ${primaryAnchor.timestamp}` : ""} | ${primaryAnchor.classification}\n`;
+            if (aBlock) report += "```text\n" + aBlock + "\n```\n";
+        }
+    }
+
+    // Deduplicate the chronological list by signature so a symptom repeated many times (e.g. the
+    // same SQL-login error) takes ONE row — leaving room for the DISTINCT failure stages (login
+    // symptom → migration/SQL error → deploy failure → rollback). This timeline is what lets the
+    // model build the propagation/domino path and tell the symptom apart from the real cause.
+    const chronoSeen = new Map();
+    const chronoEvents = [];
+    for (const e of sorted) {
+        const sigKey = ((typeof normalizeLogSignature === 'function' ? normalizeLogSignature(e.text) : e.text) || e.text).slice(0, 80);
+        const prev = chronoSeen.get(sigKey);
+        if (prev) { prev.count++; continue; }
+        const rec = { e, count: 1 };
+        chronoSeen.set(sigKey, rec);
+        chronoEvents.push(rec);
+    }
+    const chronoN = lean ? (haveDet ? 6 : 10) : (haveDet ? 16 : 22);
+    const windowN = lean ? 0 : (haveDet ? 2 : 4);
+    report += `\n--- CHRONOLOGICAL HIGH-SIGNAL LINES (deduplicated, earliest first — EARLIER errors are usually symptoms; the cause is the deepest error just before "Return value 3") ---\n`;
+    report += `Timestamp | Location | Signal tag | Raw log line (xN = repeats)\n`;
+    chronoEvents.slice(0, chronoN).forEach(({ e, count }) => {
+        report += `${formatInstallerTime(e.timestamp)} | ${e.file}:Line ${e.lineNum} | ${e.classification} | ${truncateLogLine(e.text, 300)}${count > 1 ? ` (x${count})` : ""}\n`;
     });
 
+    if (windowN > 0) {
     report += `\n--- EVIDENCE WINDOWS (highest-score lines with surrounding context) ---\n`;
     const seen = new Set();
     [...sorted]
         .sort((a, b) => b.score - a.score)
-        .slice(0, 8)
+        .slice(0, windowN)
         .sort((a, b) => a.sortTime - b.sortTime || a.lineNum - b.lineNum)
         .forEach(e => {
             const key = `${e.file}:${e.lineNum}`;
@@ -1924,12 +2098,101 @@ async function buildInstallerFailureAnalysis(logs) {
             const stack = extractStackOriginSummary(block);
             if (stack) report += "Stack excerpt:\n```text\n" + stack + "\n```\n";
         });
+    }
 
-    report += `\nAI instructions: You MUST format your response as a strict Markdown table showing the exact CustomAction that failed with 1603 or Return value 3. `;
-    report += `CRITICAL MSI RULE: The true root cause is almost ALWAYS the CustomAction, script execution, or error immediately preceding "Return value 3" or "Closing MSIHANDLE". `;
-    report += `Do NOT randomly blame early SQL/login lines unless they are directly above the fatal Return value 3 rollback trigger! `;
-    report += `Follow the specific MSI rules in the PRODUCT-SPECIFIC LOG SIGNATURES section if available.\n`;
+    report += `\nAI instructions: Format your response as a strict Markdown table, then a ROOT CAUSE and FIX. `;
+    if (haveDet) {
+        report += `The PRIMARY ROOT CAUSE above is authoritative and already identified for you: the failing action is CustomAction ${detCause.causeName} (the 1603 that was NOT "translated to success"). Your ROOT CAUSE line MUST name CustomAction ${detCause.causeName} and cite its exact line and timestamp. Explain WHY using only the lines shown above it. Do NOT name any other action, and NEVER blame SQL "Cannot open database"/"Login failed"/database-enumeration lines — those are pre-create enumeration noise here. Do NOT invent CustomAction names or 1603 codes that are not in the evidence above.\n`;
+    } else {
+        report += `CRITICAL MSI RULE: The true root cause is almost ALWAYS the CustomAction, script execution, or error immediately preceding "Return value 3" or "Closing MSIHANDLE". Do NOT randomly blame early SQL/login lines unless they are directly above the fatal Return value 3 rollback trigger! Follow the specific MSI rules in the PRODUCT-SPECIFIC LOG SIGNATURES section if available.\n`;
+    }
     report += `=== END INSTALLER EVIDENCE ===`;
+    return report;
+}
+
+// HAR (HTTP Archive) network-capture detection + analysis. A .har is JSON, so the line-based log
+// intelligence can't read it — this parses the JSON and surfaces the failing HTTP transactions
+// (4xx/5xx, 3xx redirects, OAuth/SSO error codes, rate-limiting), plus a host/issuer mismatch
+// check that pinpoints redirect-loop / wrong-FQDN problems. Output is a compact, line-anchored
+// evidence block the model turns into the forensic report.
+function isHarContent(fileName, content) {
+    if (/\.har$/i.test(fileName || "")) return true;
+    const head = (content || "").slice(0, 4000);
+    return /"log"\s*:/.test(head) && /"entries"\s*:/.test(head) && /"request"\s*:/.test(head);
+}
+
+function buildHarAnalysis(content, fileName = "capture.har") {
+    let har;
+    try { har = JSON.parse(content); } catch (e) { return ""; }
+    const entries = (har && har.log && har.log.entries) || [];
+    if (!entries.length) return "";
+
+    const hostCounts = {};
+    const timeline = [];
+    const decode = s => { try { return decodeURIComponent(String(s || "").replace(/\+/g, ' ')); } catch (e) { return String(s || ""); } };
+    const hostOf = u => { try { return new URL(u).host; } catch (e) { return ""; } };
+    const pathOf = u => { try { return new URL(u).pathname + (new URL(u).search || ""); } catch (e) { return u; } };
+
+    for (const e of entries) {
+        const req = e.request || {}, res = e.response || {};
+        const url = req.url || "";
+        const status = res.status || 0;
+        const method = req.method || "";
+        const ts = String(e.startedDateTime || "").replace('T', ' ').replace(/Z$/, '').slice(0, 23);
+        const host = hostOf(url);
+        if (host) hostCounts[host] = (hostCounts[host] || 0) + 1;
+
+        // OAuth/SSO error codes carried in the POST body (or query) params
+        let errInfo = "";
+        const params = (req.postData && Array.isArray(req.postData.params)) ? req.postData.params : (req.queryString || []);
+        if (Array.isArray(params)) {
+            const ec = params.find(p => /error_code|^error$/i.test(p.name));
+            const es = params.find(p => /error_(string|description|message|detail)/i.test(p.name));
+            if (ec || es) errInfo = `${ec ? ec.value : ""}${es ? ` — "${decode(es.value)}"` : ""}`.trim();
+        }
+        // error text in the response body
+        const resText = (res.content && res.content.text) || "";
+        const resErr = /error|too many|denied|unauthor|forbidden|not found|invalid/i.test(resText) ? resText.replace(/\s+/g, ' ').slice(0, 180) : "";
+        // redirect target (Location header or redirectURL)
+        let redirect = res.redirectURL || "";
+        if (!redirect) { const loc = (res.headers || []).find(h => /^location$/i.test(h.name)); redirect = loc ? loc.value : ""; }
+        // issuer / FQDN hints inside the request (referer, origin, body)
+        const referer = ((req.headers || []).find(h => /^referer$/i.test(h.name)) || {}).value || "";
+
+        const isErr = status >= 400 || !!errInfo || !!resErr;
+        const isRedir = status >= 300 && status < 400;
+        timeline.push({ ts, method, status, statusText: res.statusText || "", host, path: pathOf(url), errInfo, resErr, redirect, referer, isErr, isRedir });
+    }
+
+    const interesting = timeline.filter(t => t.isErr || t.isRedir || /oauth|sso|saml|auth|logon|login|token|idp/i.test(t.path));
+    if (interesting.length === 0 && timeline.length === 0) return "";
+
+    let report = `\n\n=== HAR NETWORK CAPTURE ANALYSIS (${fileName}) — line-anchored HTTP facts; AI derives root cause ===\n`;
+    const hosts = Object.keys(hostCounts);
+    report += `Hosts contacted: ${hosts.map(h => `${h} (${hostCounts[h]})`).join(', ') || 'none parsed'}\n`;
+    report += `Total transactions: ${timeline.length}; with errors/redirects: ${timeline.filter(t => t.isErr || t.isRedir).length}\n`;
+    report += `\nNotable HTTP transactions (chronological):\n`;
+    (interesting.length ? interesting : timeline).slice(0, 25).forEach((t, i) => {
+        const extra = [t.errInfo ? `ERROR ${t.errInfo}` : "", t.resErr ? `body: ${t.resErr}` : "", t.redirect ? `redirect → ${t.redirect}` : ""].filter(Boolean).join(' | ');
+        report += `${i + 1}. ${t.ts} | ${t.method} ${t.host}${t.path} → ${t.status} ${t.statusText}${extra ? ` | ${extra}` : ""}\n`;
+    });
+
+    // Key signals + FQDN/issuer mismatch detection
+    const ssoFail = interesting.find(t => /invalid_client|sso.*(?:not|entity)|entity.*not.*found|relying party|unknown client/i.test(`${t.errInfo} ${t.resErr}`));
+    const rate429 = interesting.find(t => t.status === 429 || /too many requests/i.test(t.resErr));
+    const authFlow = interesting.find(t => /oauth|sso|saml|logon|login|token|idp/i.test(t.path));
+    // mismatch: an internal-looking FQDN (.local / private IP) appears anywhere alongside the public host
+    const blob = JSON.stringify(har).slice(0, 200000);
+    const internalFqdn = (blob.match(/https?:\/\/([a-z0-9.\-]+\.local)\b/i) || [])[1] || (blob.match(/https?:\/\/([a-z0-9\-]+\.[a-z0-9.\-]*local)\b/i) || [])[1] || "";
+    const signals = [];
+    if (ssoFail) signals.push(`SSO/client-config error: ${ssoFail.errInfo || ssoFail.resErr}`);
+    if (rate429) signals.push(`HTTP 429 Too Many Requests — the auth/redirect flow is looping and getting rate-limited`);
+    if (authFlow) signals.push(`failure is in the OAuth/SSO flow (${authFlow.path})`);
+    if (internalFqdn && hosts.some(h => !/\.local$/i.test(h))) {
+        signals.push(`FQDN MISMATCH: an internal FQDN "${internalFqdn}" appears while the browser uses public host(s) "${hosts.filter(h => !/local/i.test(h)).join(', ')}" — a wrong issuer/redirect URL (internal vs external) is the classic cause of an SSO redirect loop`);
+    }
+    if (signals.length) report += `\nKey signals: ${signals.join('; ')}.\n`;
+    report += `=== END HAR NETWORK CAPTURE ANALYSIS ===`;
     return report;
 }
 
@@ -1947,11 +2210,16 @@ async function extractExceptionBlocksFromLog(log) {
     const { intelCache, timestampCache } = log.precomputedIntel;
     const blocks = [];
     const consumed = new Set();
+    // Safety cap: data-export CSVs (an "exception"/"error" column on every row) can make almost
+    // every line "start a block", producing tens of thousands of heavy block objects — minutes of
+    // CPU and hundreds of MB. We only ever rank/use the top ~25, so stop after a generous cap.
+    const MAX_BLOCKS = 800;
 
     for (let i = 0; i < lines.length; i++) {
         if (i % 2000 === 0 && i > 0) {
             await yieldIfNeeded();
         }
+        if (blocks.length >= MAX_BLOCKS) break;
         if (consumed.has(i)) continue;
         const line = lines[i];
         const intel = intelCache[i];
@@ -2359,8 +2627,12 @@ async function collectCuratedFailureAnchors(lines, fileName = "", logObj = null)
         if (i % 2000 === 0 && i > 0) {
             await yieldIfNeeded();
         }
+        // These anchors are a small set of distinct high-value markers; once we have enough (or have
+        // scanned plenty of high-signal lines) stop — avoids 8 regexes × tens of thousands of long
+        // lines on a huge log. The strongest markers (SqlException, ALTER DATABASE) appear early.
+        if (anchors.length >= 24 || i > 14000) break;
         const idx = prefilteredIndices[i];
-        const line = lines[idx] || "";
+        const line = (lines[idx] || "").slice(0, 1500);
 
         for (const pattern of patterns) {
             if (!pattern.regex.test(line)) continue;
@@ -2406,6 +2678,18 @@ async function buildCuratedFailureEvidence(content, fileName = "Attached log", p
 function isInstallerLogContent(fileName, content) {
     const sample = `${fileName || ""}\n${(content || "").slice(0, 80000)}`;
     return /\b(SetupSOTI|MSI|Windows Installer|CustomAction|Deploy[A-Za-z]*Database|DbUp|DeploymentEngine|PerformUpgrade|Verbose logging started)\b/i.test(sample);
+}
+
+// STRICT detector used for ROUTING (forensic vs normal). isInstallerLogContent above is
+// deliberately broad for ADDITIVE evidence, but it also matches RUNTIME logs that merely
+// mention "CustomAction"/"Deploy..." (e.g. DeploymentServer.log). Routing a runtime log to
+// the MSI installer forensic prompt produces a wrong/degenerate answer, so routing requires
+// genuine MSI-setup markers: a SetupSOTI/.msi filename, or MSI verbose-log signatures.
+function isMsiInstallerLog(fileName, content) {
+    const name = (fileName || "").toLowerCase();
+    if (/setupsoti|\.msi\b|msiexec|installer/.test(name)) return true;
+    const head = (content || "").slice(0, 60000);
+    return /Verbose logging started|MSI \([cs]\)|Windows ® Installer|Installation success or error status|Return value 3/i.test(head);
 }
 
 function extractNearbyMsiTimestamp(lines, idx) {
@@ -2978,18 +3262,27 @@ async function buildFileManifest(logs, lastSentAt = 0) {
 
 // The number of CHARS the model's context window can hold for the prompt (excluding the
 // reserved output budget). Single source of truth for sizing the whole prompt.
+// On a CPU the PROMPT (prefill) is the dominant cost: ~23 tok/s means every 1,000 prompt
+// tokens ≈ 43 s of waiting before the model even starts answering. A 6,000-token prompt is a
+// ~4.5-minute prefill — long enough that the browser drops the still-pending fetch ("Failed to
+// fetch"). So for small/CPU models we BUDGET the prompt against a much smaller window than the
+// model's num_ctx: num_ctx stays at the session size (8K — keeps the model warm and leaves
+// generous output room), but we only FILL ~4K tokens of prompt. The Log-Intelligence pre-analysis
+// (manifest + incident index) keeps the high-signal evidence even at this smaller size, so the
+// answer quality holds while the analysis goes from ~5 minutes to ~2.
+const SMALL_PROMPT_BUDGET_CTX = 6144;
 async function getPromptCharBudget() {
     if (!LOCAL_AI_MODEL) return Math.floor(650000 * 2.5); // cloud path (legacy generous budget)
     const { hardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
     const small = isSmallLocalModel();
-    // 'auto': small/CPU models target an 8K context (fast prefill); larger models 32K.
+    // 'auto': small/CPU models budget against ~4K (fast prefill); larger models 32K.
     // An explicit Context Size setting is honoured as the target directly.
     const target = (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto')
         ? hardMax
-        : (small ? Math.min(8192, hardMax) : Math.min(32768, hardMax));
-    const numPredict = small ? 1280 : 4096;
+        : (small ? Math.min(SMALL_PROMPT_BUDGET_CTX, hardMax) : Math.min(32768, hardMax));
+    const numPredict = small ? 1024 : 4096;
     const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token
-    return Math.floor((target - numPredict - 800) * CHARS_PER_TOKEN);
+    return Math.floor((target - numPredict - 600) * CHARS_PER_TOKEN);
 }
 
 // Char budget left for LOG SNIPPETS after everything else (system prompt, case data,
@@ -3081,16 +3374,69 @@ async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 
 function getLogForensicsSystemPrompt() {
     return `${TIER3_IDENTITY}
 
-You are operating in FORENSIC REPORT mode. Your goal is to provide a highly accurate, definitive, and professional Forensic Installation Failure Report.
-Do not write like a robot. Synthesize the context gracefully to point out the exact root cause of the failure.
+You are operating in FORENSIC REPORT mode for an MSI/setup installer log. Your goal is a highly accurate, definitive Forensic Installation Failure Report that names the EXACT failing action.
 
-Rules:
-- For MSI/Installer logs, you MUST follow the PRODUCT-SPECIFIC LOG SIGNATURES explicitly.
-- CRITICAL: "Return value 3" and "1603" are FATAL ROLLBACK TRIGGERS in MSI logs. 
-- If you see "Return value 3" or "1603", you MUST read the lines immediately preceding them to identify the exact CustomAction or script that failed.
-- DO NOT list SQL or Authentication as the root cause if a CustomAction 1603 triggered the rollback. Ignore earlier SQL errors completely if a 1603 is present.
-- IGNORE MSI noise: Do not focus on "Closing MSIHANDLE", "Note: 1: 2265", "User policy value", or "Machine policy value". These are irrelevant symptoms. Focus entirely on the CustomAction execution failures.
-- Quote the exact CustomAction and exception messages using the exact timestamps from the evidence provided.`;
+THE MSI ROOT-CAUSE METHOD (follow in this order — this is how an expert reads an MSI log):
+1. Find the FIRST "Action ended ...: <Action>. Return value 3." — "Return value 3" = that action FAILED and triggered the rollback. (Return value 1 = success; Return value 2 = user cancel.)
+2. Just above it, find the line "CustomAction <Name> returned actual error code 1603". That named CustomAction is THE ROOT CAUSE. Read the 5–30 lines ABOVE it to explain WHY it failed.
+3. "MainEngineThread is returning 1603" is only the final summary exit code — never cite it as the root cause.
+
+WHAT IS NOISE — you MUST ignore it as the root cause:
+- A 1603 that says "but will be translated to success due to continue marking" is NON-FATAL (e.g. CheckConnectionString, WixRemoveFoldersEx). It did NOT fail the install. Never blame it.
+- SQL lines such as "Cannot open database ... requested by the login", "Login failed", "EnumerateDatabaseNames" during install are usually pre-create ENUMERATION noise. Do NOT name SQL/authentication as root cause when a non-translated CustomAction 1603 precedes the rollback.
+- "Closing MSIHANDLE", "Note: 1: 2265", "User/Machine policy value", and post-failure actions (XSFatalErrorDlg, CopyInstallationLog, OpenInstallFolder) are symptoms/cleanup, never the cause.
+
+OUTPUT — a Markdown table plus a verdict:
+| Signal | Meaning |
+| --- | --- |
+| (rows: the failing CustomAction + its 1603, the "Return value 3" line with its action and timestamp, and the key lines above showing WHY it failed) |
+
+Then: **ROOT CAUSE:** the exact CustomAction name, its file:line and timestamp, and the precise reason from the lines above it. **FIX:** the specific remediation for that action. Quote exact names, line numbers and timestamps from the INSTALLER EVIDENCE — never invent them, and never write placeholders. Begin directly with the table — NEVER open with "Based on" or any preamble.`;
+}
+
+// Installer-forensic prompt for small/CPU-bound models. The evidence already contains the
+// environment, the deterministic failing action + the WHY (root-cause) lines, and a deduplicated
+// timeline — so the model reasons over a compact, high-signal brief and produces the full forensic
+// report format (triage → propagation → symptom-vs-cause → recommendation) the user expects.
+function getCompactInstallerForensicPrompt() {
+    return `${TIER3_IDENTITY}
+
+You are writing a Forensic Installation Failure Report for a SOTI MSI/setup log. Everything you need is
+in the evidence below: the environment, a "PRIMARY ROOT CAUSE" block (the failing CustomAction + the
+"WHY it failed" lines = the real cause), and a deduplicated CHRONOLOGICAL timeline. Derive the report
+ONLY from that evidence.
+
+HOW TO REASON (critical):
+- The ROOT CAUSE is the deepest error in the "WHY it failed" lines — the error the failing CustomAction
+  hit just before "Return value 3" (e.g. "ALTER DATABASE ... is not supported", "transaction log is full",
+  a failing migration script, a constraint violation).
+- The EARLIEST errors in the timeline (especially "Cannot open database ... login failed") are usually
+  SYMPTOMS the installer logged but continued past — NEVER report a symptom as the root cause.
+- If the environment says AZURE SQL DATABASE and the failure is "ALTER DATABASE / SET RECOVERY", the cause
+  is that Azure SQL does not support that statement; recommend a supported SQL Server or a patched script.
+
+OUTPUT FORMAT — use these exact headings. Cite ONLY real file:Line and timestamps copied from the evidence
+(never invent, never write placeholders like "Line N"/"{n}"). Begin directly with the "## 🔍" heading, no preamble:
+
+## 🔍 Forensic Analysis: <product + version> Installation Failure
+**Log Source:** <file> | **Install:** <start ts> → <end ts> (Return <code>)
+**Environment:** <server; SQL target; note Azure SQL if flagged>
+
+### 1. Chronological Triage
+| Timestamp | Location | Event |
+| --- | --- | --- |
+(4–6 rows from the CHRONOLOGICAL evidence: the first SQL/validation symptom, the migration/SQL error, the failing CustomAction's 1603, and the "Return value 3" rollback — each with its real file:Line.)
+
+### 2. Propagation Path (domino effect)
+A short numbered chain: earliest symptom → deeper error → the WHY/root-cause error → failing CustomAction → rollback (Return <code>).
+
+### 3. Root Cause — Symptom vs. Source
+| Finding | Classification |
+| --- | --- |
+(Mark the early SQL-login / FQDN / validation lines as **Symptom**; mark the WHY error as **ROOT CAUSE**.)
+
+**Root Cause:** one precise sentence naming the failing CustomAction and the WHY error (with file:Line).
+**Recommendation:** the specific fix for that error (supported SQL Server / patched migration script / free the transaction log / grant db_owner / etc.).`;
 }
 
 function validateForensicAIResponse(text, logs) {
@@ -3224,10 +3570,15 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         await precomputeLogIntel(log);
         const { prefilteredIndices, intelCache, timestampCache, signatureCache } = log.precomputedIntel;
 
+        // Safety cap (per log): a data-export CSV can have 100k+ "forensic" rows; we only use the
+        // earliest ~35 + top ~15 by score, so cap how many events we build to keep memory/CPU bounded.
+        const MAX_EVENTS_PER_LOG = 6000;
+        let logEventCount = 0;
         for (let i = 0; i < prefilteredIndices.length; i++) {
             if (i % 2000 === 0 && i > 0) {
                 await yieldIfNeeded();
             }
+            if (logEventCount >= MAX_EVENTS_PER_LOG) break;
             const idx = prefilteredIndices[i];
             const line = lines[idx];
             const intel = intelCache[idx];
@@ -3258,6 +3609,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
             };
 
             allEvents.push(event);
+            logEventCount++;
             intel.categories.forEach(cat => {
                 categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
             });
@@ -3313,7 +3665,17 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         .filter(b => b.sql && /\b(SqlException|ALTER DATABASE|Cannot open database|Upgrade failed)\b/i.test(`${b.message}\n${b.excerpt || ""}`))
         .sort((a, b) => b.score - a.score)[0];
     const topEvent = topRootCandidates[0] || null;
-    const domino = buildDominoAnalysis(allEvents, exceptionBlocks);
+    // buildDominoAnalysis runs an ~O(n²) architect-root/propagation search, so feed it only the
+    // highest-signal candidates. On a big/noisy log (tens of thousands of events) passing everything
+    // was minutes of CPU (the multi-file/large-log "hang"); the top few hundred by score still
+    // contain the real root and its downstream chain.
+    const dominoEvents = allEvents.length > 400
+        ? [...allEvents].sort((a, b) => b.score - a.score).slice(0, 400)
+        : allEvents;
+    const dominoBlocks = exceptionBlocks.length > 200
+        ? [...exceptionBlocks].sort((a, b) => b.score - a.score).slice(0, 200)
+        : exceptionBlocks;
+    const domino = buildDominoAnalysis(dominoEvents, dominoBlocks);
     const preferSqlBlock = largeInstallerLogs.length === logs.length && topSqlBlock;
     const deterministicRoot = preferSqlBlock ? {
             source: "parsed SQL/installer block",
@@ -3417,6 +3779,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         report += `Instruction: final answer must either confirm this as root cause with evidence or explicitly explain why an earlier/stronger event supersedes it.\n`;
     } else if (deterministicRoot && patternMode) {
         report += `\n--- STRONGEST ROOT-CAUSE PATTERN (keyword-derived) ---\n`;
+        report += `Location: ${deterministicRoot.file}:Line ${deterministicRoot.line}${deterministicRoot.timestamp ? `  (time ${deterministicRoot.timestamp})` : ""}\n`;
         report += `Component: ${deterministicRoot.component || "Unknown"}; Failure kind: ${deterministicRoot.failureKind || "Forensic event"}; Categories: ${deterministicRoot.categories.join(', ') || 'Unclassified'}\n`;
         if (deterministicRoot.innermost) report += `Innermost exception: ${deterministicRoot.innermost}\n`;
         if (deterministicRoot.sql) report += `SQL diagnosis: ${deterministicRoot.sql.type}\n`;
@@ -3429,9 +3792,9 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
             report += `${idx + 1}. ${event.file}:Line ${event.lineNum}${event.timestamp ? ` @ ${event.timestamp}` : ""} [score ${event.score}; ${event.categories.join(', ') || 'Unclassified'}] ${event.text}\n`;
         });
     } else if (topRootCandidates.length > 0) {
-        report += `\n--- TOP FAILURE PATTERN SAMPLES (by score, not line-by-line) ---\n`;
+        report += `\n--- TOP FAILURE EVENTS (cite as filename:Line N — text) ---\n`;
         topRootCandidates.slice(0, 8).forEach((event, idx) => {
-            report += `${idx + 1}. [${event.categories.join(', ') || 'Unclassified'}] ${truncateLogLine(event.text, 280)}\n`;
+            report += `${idx + 1}. ${event.file}:Line ${event.lineNum} — ${truncateLogLine(event.text, 280)}${event.timestamp ? `  (time ${event.timestamp})` : ""}\n`;
         });
     }
 
@@ -3439,7 +3802,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         report += `\n--- EXCEPTION CHAIN INTELLIGENCE (parsed blocks, ranked) ---\n`;
         rankedExceptionBlocks.slice(0, patternMode ? 10 : 25).forEach((block, idx) => {
             if (patternMode) {
-                report += `${idx + 1}. [${block.categories.join(', ') || 'Unclassified'}] ${block.innermostException || block.outerException || "Exception"} — ${truncateLogLine(block.message, 260)}\n`;
+                report += `${idx + 1}. ${block.file}:Lines ${block.startLine}-${block.endLine} — ${block.innermostException || block.outerException || "Exception"} — ${truncateLogLine(block.message, 240)}${block.timestamp ? `  (time ${block.timestamp})` : ""}\n`;
             } else {
                 report += `${idx + 1}. ${block.file}:Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [score ${block.score}; ${block.categories.join(', ') || 'Unclassified'}]\n`;
                 report += `   Outer: ${block.outerException || "Not detected"} | Innermost: ${block.innermostException || "Not detected"}\n`;
@@ -3467,7 +3830,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         report += `\n--- SQL/DATABASE PATTERNS (mandatory for final answer) ---\n`;
         sqlExceptionBlocks.slice(0, patternMode ? 8 : 25).forEach((block, idx) => {
             report += patternMode
-                ? `${idx + 1}. [${block.sql?.type || "SQL"}] ${truncateLogLine(block.message, 280)}\n`
+                ? `${idx + 1}. ${block.file}:Lines ${block.startLine}-${block.endLine} — [${block.sql?.type || "SQL"}] ${truncateLogLine(block.message, 280)}${block.timestamp ? `  (time ${block.timestamp})` : ""}\n`
                 : `Block ${idx + 1}. ${block.file}:Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [${block.sql.type}; score ${block.score}] ${block.message}\n`;
         });
         if (!patternMode) {
@@ -3479,13 +3842,13 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         report += `\n--- SQL/DATABASE PATTERNS ---\nNo SQL/database exception signatures were detected across the uploaded logs.\n`;
     }
 
-    if (!patternMode) {
+    {
         const timelineEvents = largeInstallerLogs.length === logs.length
             ? earliest.filter(e => /\b(SqlException|ALTER DATABASE|Cannot open database|Login failed|Upgrade failed|Location Service database|returning 1603)\b/i.test(e.text))
             : earliest;
-        report += `\n--- EARLIEST FORENSIC EVENTS (MASTER TIMELINE START) ---\n`;
-        timelineEvents.slice(0, 20).forEach(event => {
-            report += `${event.timestamp || "No timestamp"} | ${event.file}:Line ${event.lineNum} | ${event.categories.join(', ') || 'Unclassified'} | ${event.text}\n`;
+        report += `\n--- EARLIEST FORENSIC EVENTS (MASTER TIMELINE START — cite as filename:Line N) ---\n`;
+        timelineEvents.slice(0, patternMode ? 8 : 20).forEach(event => {
+            report += `${event.file}:Line ${event.lineNum} — ${event.text}${event.timestamp ? `  (time ${event.timestamp})` : ""}\n`;
         });
     }
 
@@ -3513,12 +3876,19 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     const { prefilteredIndices, intelCache, timestampCache, signatureCache } = log.precomputedIntel;
 
     // Large MSI/installer logs: pattern/keyword profile only (no line-by-line context).
+    // The installer FAILURE ANALYSIS leads (it carries the deterministic root-cause anchor),
+    // so if anything is trimmed the failing CustomAction always survives.
     if (totalLines >= 5000 && isInstallerLogContent(fileName, content)) {
-        let focused = await buildLogPatternProfile([{ name: fileName, content, lines }]);
+        let focused = await buildInstallerFailureAnalysis([{ name: fileName, content, lines }]);
         focused += await buildInstallerPatternSummary([{ name: fileName, content, lines }]);
-        focused += await buildInstallerFailureAnalysis([{ name: fileName, content, lines }]);
-        if (focused.length > limit) {
-            focused = `${focused.slice(0, limit)}\n\n[TRUNCATED: pattern profile preserved]\n`;
+        focused += await buildLogPatternProfile([{ name: fileName, content, lines }]);
+        // On small/CPU models the deterministic anchor already pinpoints the failing action,
+        // so a few KB of evidence is plenty. Hard-cap well below the raw budget: a smaller
+        // prompt means far less CPU prefill — the difference between a ~1-minute and a
+        // ~5-minute analysis on a no-GPU machine (and it stops the long request from dying).
+        const hardCap = isSmallLocalModel() ? Math.min(limit, 5200) : limit;
+        if (focused.length > hardCap) {
+            focused = `${focused.slice(0, hardCap)}\n\n[TRUNCATED: primary root-cause anchor preserved above]\n`;
         }
         return focused;
     }
@@ -3546,6 +3916,10 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         if (i % 2000 === 0 && i > 0) {
             await yieldIfNeeded();
         }
+        // Bound the deep scan on huge, error-dense logs: the output is budget-limited to a few KB
+        // anyway, and the cross-log incident index already supplies the high-signal map. Without
+        // this, a 60k+ line runtime log runs scoreRootCauseCandidate tens of thousands of times.
+        if (forensicEntries.length > 4000) break;
 
         if (!inException) {
             // Jump to the next prefiltered index >= i
@@ -3895,7 +4269,8 @@ RULES:
 2. NEVER say "check the website", "visit Pulse", or "click here". Do NOT output links or tell the user to go elsewhere. Just print the facts.
 3. Keep answers extremely short and direct (1-2 sentences). Do not add conversational fluff.
 4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.
-5. ZERO HALLUCINATION FOR GUIDES: If the user asks for step-by-step instructions or configuration steps, you MUST construct them ONLY using the EXACT TEXT provided in the [OFFLINE PULSE KNOWLEDGE MATCHES], [DEEP RESEARCH], or [DOCS SEARCH] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If these sections do not contain the specific steps, you MUST reply "I could not find a SOTI guide for this specific task in my current context." DO NOT guess or use generic Android/IT knowledge to invent steps. DO NOT combine unrelated sections.`;
+5. ZERO HALLUCINATION FOR GUIDES: If the user asks for step-by-step instructions or configuration steps, you MUST construct them ONLY using the EXACT TEXT provided in the [OFFLINE PULSE KNOWLEDGE MATCHES], [DEEP RESEARCH], or [DOCS SEARCH] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If these sections do not contain the specific steps, you MUST reply "I could not find a SOTI guide for this specific task in my current context." DO NOT guess or use generic Android/IT knowledge to invent steps. DO NOT combine unrelated sections.
+6. NEVER write meta-commentary about your sources or context. The following phrases are STRICTLY FORBIDDEN: "Based on the provided documentation", "Based on the provided information", "the retrieved knowledge base", "the provided context", "consult the full SOTI documentation", "contact SOTI support", "was not explicitly detailed", "you may need to consult". State the facts directly as established SOTI knowledge, with no preamble.`;
     }
     return `${TIER3_IDENTITY}
 
@@ -4088,28 +4463,46 @@ CRITICAL RULES:
 function getCompactLogPrompt() {
     return `${TIER3_IDENTITY}
 
-You are in LOG ANALYSIS mode. Find the EXACT root cause from the evidence. Never guess or invent errors that are not in the data.
+You are in LOG ANALYSIS mode for SOTI runtime logs (Management Service, Deployment Server, Agent,
+Location Service, Identity) and/or HAR network captures. Find the EXACT root cause from the evidence
+below and present a full forensic report. Never invent errors that are not in the data.
 
-USE THIS EVIDENCE, IN ORDER:
-1. === ATTACHED FILE MANIFEST === — every file listed EXISTS; acknowledge each one.
-2. === LOG PATTERN & KEYWORD PROFILE === and === CROSS-LOG INCIDENT INDEX === — your primary evidence.
-3. Raw log snippets (=== FILE: ... ===) — to confirm specific lines.
+EVIDENCE, in order of authority:
+1. === HAR NETWORK CAPTURE ANALYSIS === (if present) — real HTTP transactions: 4xx/5xx, redirects, OAuth/SSO error codes, FQDN mismatch.
+2. === CROSS-LOG INCIDENT INDEX === (incl. CAUSAL DOMINO ANALYSIS) and === LOG PATTERN & KEYWORD PROFILE === — the line-anchored incident map.
+3. Raw snippets (=== FILE: ... ===) — to confirm exact lines.
 
-RULES:
-- Read exception chains to the INNERMOST exception — that is the true cause.
-- SqlException / Timeout / Deadlock / Login failed / certificate / auth failures are high-priority root-cause candidates.
-- Distinguish the CAUSAL first error from downstream SYMPTOMS. Only the earliest error in a cascade is the root cause.
-- For MSI/installer logs: the real cause is the CustomAction/SQL line immediately BEFORE the first "Return value 3" / "1603". Ignore "Closing MSIHANDLE" and "Note: 1: 2265" noise.
+HOW TO REASON:
+- Read exception chains to the INNERMOST exception. Separate the EARLIEST causal error from downstream SYMPTOMS — only the first error in a cascade is the root cause.
+- CORRELATE WITH THE CASE: if a [REPORTED ISSUE]/[ISSUE SUMMARY]/[CASE] describes a specific symptom (redirect / wrong URL / FQDN, SSO or login failure, slowness, enrollment, certificate), PRIORITIZE the evidence that matches that symptom over an unrelated high-severity error elsewhere. A "redirect to the wrong/internal FQDN" symptom points to SSO issuer / redirect-URL config — e.g. "No SSO entity found ... request issuer: <internal .local FQDN>", invalid_client_configuration, HTTP 429 — NOT an unrelated SQL constraint or device-unmap error.
+- A wrong/internal issuer or redirect URL (an internal *.local FQDN where the external host is expected) is the classic cause of an SSO redirect loop and HTTP 429 (Too Many Requests).
+- SqlException / Timeout / Deadlock / Login failed / certificate / auth failures are high-priority candidates ONLY when they fit the reported symptom.
 - The Web Console runs INSIDE the SOTI Management Service — never mention IIS.
-- If evidence is insufficient, say so and name the log you need. NEVER fabricate.
+- If evidence is genuinely insufficient, say so and name the log you need. NEVER fabricate.
 
-OUTPUT (keep it tight — no padding):
-## Log Analysis
-**Files reviewed:** (one line listing every file from the manifest)
-**Root cause:** ONE sentence — \`ExceptionClass\` at Line X (timestamp) — exact reason.
-**Evidence:** 2-4 cited lines (filename:line @ timestamp) that prove it.
-**Propagation:** root cause → downstream failure → user-visible symptom.
-**Fix:** the specific SOTI action(s) — service to restart, setting/port/SQL command, or version+MCMR if an upgrade resolves it.`;
+CITATIONS: use exactly "filename:Line <number> — <exact text>", copied from the evidence sections. NEVER write a placeholder ("Line N", "@ Timestamp", "ExceptionClass") or invent a line/timestamp/message. A full date-time (e.g. "2026-06-05 11:52:05.101") in parentheses at the END is optional; never put a time where the line number goes.
+
+OUTPUT — use these exact headings; begin directly with "## 🔍" (no "Based on" preamble):
+
+## 🔍 Forensic Analysis: <product/area> — <one-line problem>
+**Logs reviewed:** <comma-separated files> | **Window:** <first ts> → <last ts>
+**Environment:** <servers/hosts/SQL/identity facts you can cite, incl. any FQDN mismatch>
+
+### 1. Chronological Triage
+| Timestamp | Location | Event |
+| --- | --- | --- |
+(4–6 rows from the evidence, earliest first: the first real error, the key failures, and the user-visible symptom — each with a real file:Line.)
+
+### 2. Propagation Path (domino effect)
+A short numbered chain: earliest causal error → downstream effects → user-visible symptom.
+
+### 3. Root Cause — Symptom vs. Source
+| Finding | Classification |
+| --- | --- |
+(Mark downstream/cosmetic items as **Symptom**; mark the true cause as **ROOT CAUSE**.)
+
+**Root Cause:** one precise sentence naming the real cause (with file:Line and the exact message).
+**Recommendation:** the specific SOTI fix (the setting/URL/issuer to correct, service to restart, SQL action, or version + MCMR if a release-notes section names one).`;
 }
 
 // Conversational prompt used when logs are attached but the user asked a normal question
@@ -4638,56 +5031,80 @@ function selectReleaseNoteSources(query, history, ci, catalog) {
     return sources;
 }
 
-// --- OFFLINE PULSE KNOWLEDGE BASE (indexed RAG over knowledge/PulseKnowledge.md) ---
-// ~24MB / ~10,000 official SOTI help articles covering MobiControl, SOTI Connect,
-// SOTI XSight, Identity and more. Indexed ONCE per session (chunk split + lowercase
-// precompute), then searched instantly on every query — the previous implementation
-// re-fetched and re-lowercased all 24MB on every single send.
+// --- OFFLINE PULSE KNOWLEDGE BASE (indexed RAG over the knowledge/*.md corpus) ---
+// Multi-product: PulseKnowledge.md is a large MobiControl scrape; Connect_Knowledge.md and
+// XSight_Knowledge.md add curated, sourced SOTI Connect / XSight content so those products
+// are covered too. All files are indexed ONCE per session (chunk split + lowercase
+// precompute), then searched instantly on every query.
 const PulseKB = {
-    chunks: null,        // [{ text, lower, firstLine }]
+    chunks: null,        // [{ text, lower, firstLine, product }]
     indexing: null,      // memoized in-flight promise
+
+    // The corpus files to index, with a default product slug applied to every article in the
+    // file (the per-article title/Source detection can still override the default to '').
+    KB_FILES: [
+        { path: 'knowledge/PulseKnowledge.md', product: '' },
+        { path: 'knowledge/Connect_Knowledge.md', product: 'connect' },
+        { path: 'knowledge/XSight_Knowledge.md', product: 'xsight' }
+    ],
+
+    // Parse one corpus string into tagged article chunks and append to `out`.
+    _ingest(raw, defaultProduct, out) {
+        if (!raw) return;
+        const parts = raw.split('\n# '); // fast native chunking (vs regex on a 24MB string)
+        for (let i = 0; i < parts.length; i++) {
+            const text = parts[i].startsWith('#') ? parts[i] : '# ' + parts[i];
+            if (text.length < 30) continue;
+            const lower = text.toLowerCase();
+            const title = lower.split('\n', 1)[0] || '';
+            // Tag each article with its product. PulseKnowledge.md is scraped almost entirely
+            // from MobiControl docs, so the Source URL is a poor discriminator — the TITLE is
+            // the real signal (e.g. "# SOTI Connect ..."). Title first, then Source URL, then
+            // the file's default product. This lets a "SOTI Connect" question surface Connect
+            // articles instead of MobiControl ones that merely share a word like "enroll".
+            let product = '';
+            if (/\bxsight\b/.test(title)) product = 'xsight';
+            else if (/\bsoti connect\b/.test(title)) product = 'connect';
+            else if (/\bsoti identity\b/.test(title)) product = 'identity';
+            else {
+                const srcMatch = lower.slice(0, 400).match(/source:[^\n]*soti-(mobicontrol|connect|xsight|identity|assist|snap)/);
+                product = srcMatch ? srcMatch[1] : (defaultProduct || '');
+            }
+            out.push({ text, lower, firstLine: title, product });
+        }
+    },
 
     async ensureIndex() {
         if (this.chunks) return this.chunks;
         if (this.indexing) return this.indexing;
         this.indexing = (async () => {
-            let raw = '';
-            try {
-                const localUrl = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
-                    ? chrome.runtime.getURL('knowledge/PulseKnowledge.md')
-                    : 'knowledge/PulseKnowledge.md';
-                const res = await fetch(localUrl, { cache: 'no-store' });
-                if (res.ok) raw = await res.text();
-            } catch (e) { console.warn('PulseKB: failed to load physical PulseKnowledge.md', e); }
-            if (!raw) {
-                try {
-                    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                        const d = await chrome.storage.local.get('pulseKnowledgeData');
-                        raw = d.pulseKnowledgeData || '';
-                    } else {
-                        raw = localStorage.getItem('soti_pulse_knowledge') || '';
-                    }
-                } catch (e) { console.warn('PulseKB: failed to load offline knowledge from storage', e); }
-            }
-            if (!raw) {
-                console.log('PulseKB: no offline knowledge found. Sync via Settings.');
-                this.chunks = [];
-                return this.chunks;
-            }
             const t0 = performance.now();
-            // Fast native string chunking (1000x faster than regex lookahead on 24MB strings)
-            const parts = raw.split('\n# ');
-            raw = null; // release the 24MB source string
             const chunks = [];
-            for (let i = 0; i < parts.length; i++) {
-                const text = parts[i].startsWith('#') ? parts[i] : '# ' + parts[i];
-                if (text.length < 30) continue;
-                const lower = text.toLowerCase();
-                chunks.push({ text, lower, firstLine: lower.split('\n', 1)[0] || '' });
+            for (const file of this.KB_FILES) {
+                let raw = '';
+                try {
+                    const url = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
+                        ? chrome.runtime.getURL(file.path) : file.path;
+                    const res = await fetch(url, { cache: 'no-store' });
+                    if (res.ok) raw = await res.text();
+                } catch (e) { console.warn('PulseKB: failed to load', file.path, e); }
+                // Fallback to synced storage for the main MobiControl corpus only.
+                if (!raw && file.path.includes('PulseKnowledge')) {
+                    try {
+                        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                            const d = await chrome.storage.local.get('pulseKnowledgeData');
+                            raw = d.pulseKnowledgeData || '';
+                        } else {
+                            raw = localStorage.getItem('soti_pulse_knowledge') || '';
+                        }
+                    } catch (e) { console.warn('PulseKB: storage fallback failed', e); }
+                }
+                this._ingest(raw, file.product, chunks);
+                raw = null; // release (PulseKnowledge.md is ~24MB)
             }
-            parts.length = 0;
             this.chunks = chunks;
-            console.log(`PulseKB: indexed ${chunks.length} articles in ${Math.round(performance.now() - t0)}ms`);
+            if (!chunks.length) console.log('PulseKB: no offline knowledge found. Sync via Settings.');
+            else console.log(`PulseKB: indexed ${chunks.length} articles from ${this.KB_FILES.length} file(s) in ${Math.round(performance.now() - t0)}ms`);
             return this.chunks;
         })();
         return this.indexing;
@@ -4696,12 +5113,16 @@ const PulseKB = {
     // Score + retrieve top article excerpts. Same proven scorer as before, plus
     // product-name and log-signature bonuses for log-analysis mode.
     search(queryLower, kws, opts = {}) {
-        const { productHints = [], signatureTerms = [], maxArticles = 15, maxChars = 24000, perChunkCap = 6000 } = opts;
+        const { product = '', productHints = [], signatureTerms = [], maxArticles = 15, maxChars = 24000, perChunkCap = 6000 } = opts;
         if (!this.chunks || this.chunks.length === 0 || !kws || kws.length === 0) return [];
+        const target = (product || '').toLowerCase();          // target product SLUG (e.g. "connect")
         const prodLower = productHints.map(p => (p || '').toLowerCase()).filter(Boolean);
         const sigLower = signatureTerms.map(s => (s || '').toLowerCase()).filter(s => s.length > 2);
+        const cleanQuery = queryLower.replace(/[^a-z0-9#\s]/g, ' ').replace(/\s+/g, ' ').trim();
+        const wantsEnrol = /\b(enrol|enroll|provision|work\s*managed|fully\s*managed|android)\b/.test(queryLower);
         const scored = [];
-        for (const { text, lower, firstLine } of this.chunks) {
+        for (const chunk of this.chunks) {
+            const { text, lower, firstLine } = chunk;
             let score = 0;
             let uniqueHits = 0;
             let matchedAny = false;
@@ -4711,55 +5132,70 @@ const PulseKB = {
                     score += 1;
                     uniqueHits++;
                     let regex;
-                    try { regex = new RegExp('\\b' + k + '\\b', 'ig'); } catch (e) {}
+                    try { regex = new RegExp('\\b' + k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'ig'); } catch (e) {}
                     const matches = regex ? lower.match(regex) : null;
                     if (matches && matches.length > 0) score += 1 + Math.min(matches.length, 5);
                     if (firstLine.includes(k)) score += 5; // title match bonus
                 }
             }
             if (!matchedAny) continue;
-            // Exponential bonus for matching multiple different keywords
-            score += (uniqueHits * uniqueHits * 3);
-            // Product-name bonus (title hit counts double)
+            score += (uniqueHits * uniqueHits * 3); // reward matching several distinct keywords
+            // Soft product relevance (NOT a hard filter — the KB is mostly MobiControl, so a
+            // hard gate would wipe out everything for a Connect/XSight question). Strongly
+            // favour articles whose product matches; lightly penalise a DIFFERENT explicit
+            // product so an XSight page can't answer a Connect question.
+            if (target) {
+                if (chunk.product === target) score += 40;
+                else if (chunk.product && ['xsight', 'connect', 'identity'].includes(chunk.product)) score -= 20;
+            }
             for (const p of prodLower) {
                 if (firstLine.includes(p)) score += 8;
                 else if (lower.includes(p)) score += 4;
             }
-            // Log-signature bonus (e.g. "sqlexception", "enrollment failed")
-            for (const s of sigLower) {
-                if (lower.includes(s)) score += 4;
-            }
-            // Quick reject: skip expensive phrase ops if the chunk barely matches
+            for (const s of sigLower) { if (lower.includes(s)) score += 4; }
+            // High-value enrollment token: afw#mobicontrol is THE work-managed enrolment string.
+            if (wantsEnrol && lower.includes('afw#')) score += 20;
             if (score >= 5) {
-                const cleanQuery = queryLower.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-                const cleanChunk = lower.replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ');
-                if (cleanQuery.length > 6 && cleanChunk.includes(cleanQuery)) {
-                    score += 50;
-                } else {
+                const cleanChunk = lower.replace(/[^a-z0-9#\s]/g, ' ').replace(/\s+/g, ' ');
+                if (cleanQuery.length > 6 && cleanChunk.includes(cleanQuery)) score += 50; // exact phrase
+                else {
                     if (cleanChunk.includes('work managed') && cleanQuery.includes('work managed')) score += 30;
                     if (cleanChunk.includes('android enterprise') && cleanQuery.includes('android enterprise')) score += 20;
                 }
-                // Length penalty for bloated generic pages
-                if (lower.length > 2000) score -= Math.floor((lower.length - 2000) / 500) * 2;
-                // Procedural / how-to bonus
-                if (/\b(how|step|guide|procedure|enroll)\b/i.test(queryLower)) {
-                    if (/\b(procedure|steps?|instructions?|about this task)\b/i.test(lower)) score += 25;
-                }
+                if (lower.length > 2000) score -= Math.floor((lower.length - 2000) / 500) * 2; // bloat penalty
+                if (/\b(how|step|guide|procedure|enrol)\b/.test(queryLower) && /\b(procedure|steps?|instructions?|about this task)\b/.test(lower)) score += 25;
             }
-            if (score > 0) scored.push({ text, score });
+            if (score > 0) scored.push({ text, lower, score });
         }
         scored.sort((a, b) => b.score - a.score);
         const out = [];
         let budget = maxChars;
         for (let i = 0; i < Math.min(scored.length, maxArticles); i++) {
-            let c = scored[i].text.trim();
+            const c = PulseKB._excerpt(scored[i].text, scored[i].lower, kws, perChunkCap);
             if (c.length < 30) continue;
-            if (c.length > perChunkCap) c = c.substring(0, perChunkCap) + '\n...[TRUNCATED FOR LENGTH]';
             if (budget - c.length < 0 && out.length >= Math.min(3, maxArticles)) break;
             out.push(c);
             budget -= c.length;
         }
         return out;
+    },
+
+    // Trim a long article to `cap` chars but ALWAYS keep the title and a window around the
+    // first relevant keyword (or the afw# enrolment token) — so the answer-bearing text
+    // survives instead of being cut off by a blind head-truncation.
+    _excerpt(text, lower, kws, cap) {
+        text = text.trim();
+        if (text.length <= cap) return text;
+        const nl = text.indexOf('\n');
+        const title = nl > 0 ? text.slice(0, nl + 1) : '';
+        let pos = -1;
+        const consider = i => { if (i >= 0 && (pos < 0 || i < pos)) pos = i; };
+        for (const k of kws) consider(lower.indexOf(k, title.length));
+        consider(lower.indexOf('afw#', title.length));
+        if (pos < 0) return text.slice(0, cap) + '\n…[truncated]';
+        const start = Math.max(title.length, pos - 700);
+        const body = text.slice(start, start + Math.max(200, cap - title.length));
+        return title + (start > title.length ? '…' : '') + body + (start + body.length < text.length ? '…' : '');
     }
 };
 
@@ -4947,23 +5383,43 @@ async function searchPulseAndDocs(query, msgs, ci) {
         }
             
         if (shouldDoWebSearch) {
-            const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for', 'give', 'short', 'subject', 'name', 'meeting', 'notes', 'critical', 'investigation']);
+            const stopWords = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'some', 'doing', 'doing', 'it', 'for', 'give', 'short', 'subject', 'name', 'meeting', 'notes', 'critical', 'investigation', 'soti']);
             const combinedLower = caseBlob.toLowerCase();
             // ONLY use the current query for keywords to prevent history from poisoning the search results
             let keywordParts = qLower.split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w));
             const seenKw = new Set();
             keywordParts = keywordParts.filter(w => { if (seenKw.has(w)) return false; seenKw.add(w); return true; });
-            const asksMobiControl = /\b(mobicontrol|mdm|uem|emm|enroll|enrollment|deployment server|management service|device policy|profiles?|afw#|soti agent|android enterprise|certificate|cert\b|api\s+call)\b/i.test(qLower);
-            if (asksMobiControl && !keywordParts.includes('mobicontrol')) keywordParts.unshift('mobicontrol');
+
+            // Detect which SOTI product the QUESTION is about (query first, then case info), and
+            // retrieve only that product's articles. This stops a "SOTI Connect" question from
+            // pulling MobiControl content, and vice-versa.
+            let targetProduct = '';
+            if (/\bx[\s-]?sight\b/i.test(qLower)) targetProduct = 'xsight';
+            else if (/\bconnect\b/i.test(qLower)) targetProduct = 'connect';
+            else if (/\bidentity\b/i.test(qLower)) targetProduct = 'identity';
+            else if (/\b(mobicontrol|mobi\s?control|deployment\s+server|management\s+service)\b/i.test(qLower)) targetProduct = 'mobicontrol';
+            else if (ci && ci.product) {
+                const p = String(ci.product).toLowerCase();
+                if (p.includes('xsight')) targetProduct = 'xsight';
+                else if (p.includes('connect')) targetProduct = 'connect';
+                else if (p.includes('identity')) targetProduct = 'identity';
+                else if (p.includes('mobicontrol')) targetProduct = 'mobicontrol';
+            }
+            // Only nudge MobiControl-specific terms when the question is actually MobiControl
+            // (or unspecified) — never when it explicitly names Connect/XSight/Identity.
+            if ((targetProduct === 'mobicontrol' || targetProduct === '')) {
+                if (/\b(enroll|enrolment|enrollment|afw#|android\s+enterprise|work\s+managed)\b/i.test(qLower) && !keywordParts.includes('enrollment')) keywordParts.unshift('enrollment');
+            }
             if (/\bcertificate|cert\b/i.test(qLower) && !keywordParts.includes('certificate')) keywordParts.unshift('certificate');
             const keywords = keywordParts.slice(0, 6).join('%20');
-            
+
             if (keywords) {
                 const kws = keywordParts.filter(kw => kw.length > 2);
                 await PulseKB.ensureIndex();
                 // Strict character limit prevents LLM context truncation — truncation
                 // causes the LLM to lose the system prompt and hallucinate!
                 const relevantChunks = PulseKB.search(qLower, kws, {
+                    product: targetProduct,
                     productHints: ci && ci.product ? [ci.product] : [],
                     maxArticles: 15,
                     maxChars: 24000
@@ -5372,32 +5828,52 @@ const OllamaAI = {
             // then trim the SYSTEM prompt from its END. The system prompt is ordered
             // [rules][logs][case/research], so end-trimming sacrifices the secondary
             // case/research data — never the logs, and never the file manifest.
-            const maxAllowedChars = Math.floor((ctxCeiling - numPredict - 600) * CHARS_PER_TOKEN);
+            // CRITICAL: the prompt MUST fit num_ctx with room left for the answer, otherwise
+            // Ollama truncates the prompt to fill the window and the model can only emit ~1
+            // token before hitting the limit (the "Based"/"It" single-word bug). maxAllowedChars
+            // already reserves numPredict tokens for the response.
+            // For small/CPU models in 'auto' mode we cap the PROMPT against a smaller window than
+            // num_ctx (prefill cost scales with prompt tokens, not num_ctx) so the analysis stays
+            // fast and the still-pending fetch completes before the browser drops it. num_ctx is
+            // unchanged, so the model is NOT reloaded and there is ample room for the answer.
+            const budgetCtx = (isSmall && (!LOCAL_AI_CTX_MAX || LOCAL_AI_CTX_MAX === 'auto'))
+                ? Math.min(SMALL_PROMPT_BUDGET_CTX, ctxCeiling)
+                : ctxCeiling;
+            const maxAllowedChars = Math.floor((budgetCtx - numPredict - 600) * CHARS_PER_TOKEN);
             if (totalChars > maxAllowedChars) {
+                // 1. Drop oldest history first (never system [0], never the final message).
                 while (totalChars > maxAllowedChars && messages.length > 2) {
                     const dropped = messages.splice(1, 1)[0];
                     totalChars -= (dropped.content ? dropped.content.length : 0);
                     console.warn('[Ollama Request] Dropped oldest history message to fit context budget');
                 }
-                const sysMsg = messages[0];
-                if (totalChars > maxAllowedChars && sysMsg && sysMsg.role === 'system') {
-                    const sys = sysMsg.content;
-                    const othersChars = totalChars - sys.length;
-                    const sysBudget = Math.max(1500, maxAllowedChars - othersChars);
-                    if (sys.length > sysBudget) {
-                        // Position just after the log section (logs sit early in the prompt).
-                        const logEnd = Math.max(sys.lastIndexOf('=== END:'), sys.lastIndexOf('=== END FILE'));
-                        const afterLog = logEnd !== -1 ? ((sys.indexOf('\n', logEnd) + 1) || sys.length) : 0;
-                        const manifestEnd = sys.indexOf('=== END FILE MANIFEST ===');
-                        const minKeep = manifestEnd !== -1 ? manifestEnd + 30 : Math.min(2000, sys.length);
-                        const keep = Math.max(minKeep, Math.min(sys.length, sysBudget - 60));
-                        const note = keep >= afterLog
-                            ? "\n\n[Secondary case/reference context trimmed to fit the context window.]"
-                            : "\n\n[Log snippets and secondary context trimmed to fit — all attached files are named in the manifest above.]";
-                        sysMsg.content = sys.slice(0, keep) + note;
-                        totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
-                        console.warn(`[Ollama Request] Trimmed system prompt to fit (kept ${keep}/${sys.length} chars, logs preserved: ${keep >= afterLog})`);
+                // 2. Trim the LARGEST remaining message from its END until the prompt fits. This
+                //    covers BOTH the system prompt (normal mode: logs live there) AND the final
+                //    user message (forensic mode: the log evidence lives there). Each message's
+                //    leading portion — rules / file manifest / primary root-cause anchor — is kept.
+                let guard = 0;
+                while (totalChars > maxAllowedChars && guard++ < 16) {
+                    let bigIdx = -1, bigLen = 0;
+                    for (let i = 0; i < messages.length; i++) {
+                        const L = messages[i].content ? messages[i].content.length : 0;
+                        if (L > bigLen) { bigLen = L; bigIdx = i; }
                     }
+                    if (bigIdx < 0) break;
+                    const m = messages[bigIdx];
+                    const content = m.content || '';
+                    const over = totalChars - maxAllowedChars;
+                    // Preserve the start: rules, file manifest, and the primary root-cause anchor
+                    // (which sits just before the "CHRONOLOGICAL" section in installer evidence).
+                    const manifestEnd = content.indexOf('=== END FILE MANIFEST ===');
+                    const chronoIdx = content.indexOf('--- CHRONOLOGICAL HIGH-SIGNAL');
+                    let minKeep = 1500;
+                    if (manifestEnd >= 0) minKeep = Math.min(manifestEnd + 30, 7000);
+                    if (chronoIdx >= 0) minKeep = Math.min(Math.max(minKeep, chronoIdx), 9000);
+                    const newLen = Math.max(minKeep, content.length - over - 150);
+                    if (newLen >= content.length) break; // already at floor — cannot trim further
+                    m.content = content.slice(0, newLen) + "\n\n[Evidence trimmed to fit the context window — the manifest and primary findings above are complete.]";
+                    totalChars = messages.reduce((acc, x) => acc + (x.content ? x.content.length : 0), 0);
+                    console.warn(`[Ollama Request] Trimmed message #${bigIdx} to ${newLen} chars to fit context`);
                 }
             }
 
@@ -5428,7 +5904,24 @@ const OllamaAI = {
                 })
             });
 
-            let res = await doOllamaFetch(numCtx);
+            // The fetch can reject with a bare TypeError "Failed to fetch" when the connection
+            // never completes — Ollama not running, or a long CPU prefill whose pending request
+            // got dropped. Catch it, retry once after a short pause, then surface a CLEAR,
+            // actionable message instead of the cryptic raw "Failed to fetch".
+            let res;
+            try {
+                res = await doOllamaFetch(numCtx);
+            } catch (netErr) {
+                if (netErr && netErr.name === 'AbortError') throw netErr; // user cancelled — propagate quietly
+                console.warn('[Ollama Request] fetch failed, retrying once...', netErr);
+                await new Promise(r => setTimeout(r, 800));
+                try {
+                    res = await doOllamaFetch(numCtx);
+                } catch (netErr2) {
+                    if (netErr2 && netErr2.name === 'AbortError') throw netErr2;
+                    throw new Error(`Couldn't reach the local AI at ${baseUrl}. Make sure Ollama is running (try \`ollama serve\`) and that the model "${model}" is installed. If the log is very large, the analysis can take a while on a CPU — try again, lower Context Size in Settings (⚙), or remove very large files.`);
+                }
+            }
             if (!res.ok) {
                 const err = await res.text();
                 // GPU/RAM exhaustion: retry once with a halved context window
@@ -5699,6 +6192,8 @@ async function send(overrideText = null, silent = false) {
         }
     }
 
+    _chatStick = true; // a new turn always starts pinned to the bottom; the user can scroll up while it streams
+    ensureChatScrollListener();
     addMsg('user', displayTxt, false, silent);
     const aib = addMsg('assistant', '<div class="thinking-dot"></div>', false);
     // Register the live streaming element so tab switches can re-attach it to the DOM
@@ -5706,13 +6201,19 @@ async function send(overrideText = null, silent = false) {
     
     const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
     const hasLogs = c.logs.length > 0;
-    const forensicRun = hasLogs && isLogForensicsRequest(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = hasLogs && (forensicRun || wantsLogAnalysis(txt, silent));
+    const analysisRun = hasLogs && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
+    // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
+    // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
+    // detector so RUNTIME logs (DeploymentServer.log etc.) are NOT misrouted to the MSI prompt.
+    const hasInstallerLog = hasLogs && c.logs.some(l => isMsiInstallerLog(l.name || "", l.content || ""));
+    const forensicRun = analysisRun && (isLogForensicsRequest(txt) || hasInstallerLog);
     // Version / release-notes / product question → wants live research (even with logs attached).
     const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
 
     let supportingRefSection = "";
+    let knownFixesSection = "";
     if (!isGreeting && !forensicRun) {
         if (!hasLogs || needsDeepPulse) {
             // Q&A mode (or explicit release-notes request): full online + offline research
@@ -5759,6 +6260,35 @@ async function send(overrideText = null, silent = false) {
         }
     }
 
+    // During ANY log analysis (forensic or normal, all models), look up official
+    // release-notes / resolved-issues offline that may match the detected error, so the
+    // model can cite an exact fix version + MCMR if a newer release resolves the issue.
+    // Skipped for small-model installer-forensic runs: the deterministic cause is an
+    // environment/database issue (not a product bug a newer build fixes), so the release-notes
+    // lookup is just ~1.4KB of extra prefill that slows the already CPU-bound analysis.
+    const leanInstaller = forensicRun && isSmallLocalModel() && hasInstallerLog;
+    if (analysisRun && !leanInstaller) {
+        try {
+            await PulseKB.ensureIndex();
+            const sigTerms = collectLogSignatureTerms(c.logs);
+            if (sigTerms.length) {
+                const pj = ((ci && ci.product) || (c.logs.find(l => l.panelIntel && l.panelIntel.product)?.panelIntel?.product) || '').toLowerCase();
+                let prodSlug = '';
+                if (pj.includes('xsight')) prodSlug = 'xsight';
+                else if (pj.includes('connect')) prodSlug = 'connect';
+                else if (pj.includes('identity')) prodSlug = 'identity';
+                else if (pj.includes('mobicontrol')) prodSlug = 'mobicontrol';
+                const fixKws = [...new Set(sigTerms.map(s => s.toLowerCase()).filter(s => s.length > 3).concat(['resolved', 'fixed', 'release']))].slice(0, 8);
+                const fixes = PulseKB.search((sigTerms.join(' ') + ' resolved fixed release notes').toLowerCase(), fixKws, {
+                    product: prodSlug, maxArticles: 1, maxChars: 1400, perChunkCap: 1400
+                });
+                if (fixes.length) {
+                    knownFixesSection = `[RELEASE NOTES / KNOWN FIXES — official SOTI references that may relate to this error. If one names a newer version that fixes THIS exact issue, cite the exact version and MCMR code verbatim and recommend upgrading; otherwise ignore this section.]\n${fixes[0]}`;
+                }
+            }
+        } catch (e) { console.warn('Known-fixes lookup failed', e); }
+    }
+
     try {
         let sysPrompt = "";
         let modelMessages = [];
@@ -5788,7 +6318,9 @@ async function send(overrideText = null, silent = false) {
             // minutes of prefill on a 6 tok/s CPU and is the main cause of "blank" responses.
             let corePrompt;
             if (analysisRun) {
-                corePrompt = forensicRun ? getLogForensicsSystemPrompt() : (isSmallModel ? getCompactLogPrompt() : getLeanLogPrompt());
+                corePrompt = forensicRun
+                    ? (isSmallModel ? getCompactInstallerForensicPrompt() : getLogForensicsSystemPrompt())
+                    : (isSmallModel ? getCompactLogPrompt() : getLeanLogPrompt());
             } else if (hasLogs && !needsDeepPulse) {
                 corePrompt = getConversationalPrompt();
             } else {
@@ -5820,7 +6352,10 @@ async function send(overrideText = null, silent = false) {
                 }
             }
 
-            if (analysisRun && detectedProducts.size > 0) {
+            // Skip the product-signature injection for small-model installer-forensic runs: the
+            // compact forensic prompt already carries the MSI rule and the evidence carries the
+            // deterministic cause, so the extra ~1KB of signatures is pure prefill cost (slower).
+            if (analysisRun && detectedProducts.size > 0 && !(forensicRun && isSmallModel)) {
                 const map = {
                     "MobiControl": "MobiControl.md",
                     "SOTI XSight": "XSight.md",
@@ -5882,6 +6417,9 @@ async function send(overrideText = null, silent = false) {
             if (supportingRefSection) {
                 liveDataLines.push(supportingRefSection);
             }
+            if (knownFixesSection) {
+                liveDataLines.push(knownFixesSection);
+            }
             const learnedSection = await matchLearnedInsights(txt, hasLogs ? c.logs : []);
             if (learnedSection) {
                 liveDataLines.push(learnedSection);
@@ -5901,16 +6439,52 @@ async function send(overrideText = null, silent = false) {
                 const historyChars = c.msgs.slice(-10).reduce((a, m) => a + Math.min((m.content || '').length, 4000), 0);
                 const externalOverhead = corePrompt.length + liveDataSection.length + (imgContext || '').length + historyChars + (txt || '').length + 1500;
                 if (forensicRun) {
-                    logContext = await buildLogAnalysisContext(c.logs, c.lastSentAt || 0, externalOverhead);
+                    if (isSmallModel && hasInstallerLog) {
+                        // LEAN installer-forensic context for CPU-bound models: the deterministic
+                        // root-cause analysis ONLY — no pattern profile / cross-log incident index.
+                        // Keeps the prompt small (so prefill is fast and the request finishes before
+                        // the browser drops it) AND strips the SQL-enumeration noise that misled the
+                        // model into the wrong answer. The deterministic anchor leads, so the failing
+                        // CustomAction is never trimmed away.
+                        const leanManifest = await buildFileManifest(c.logs, c.lastSentAt || 0);
+                        let leanEvidence = await buildInstallerFailureAnalysis(c.logs, { lean: true });
+                        // Environment + deterministic cause + WHY + the deduped timeline lead this
+                        // report, so a hard cap keeps the prompt bounded (fast prefill) while keeping
+                        // enough for the full triage → propagation → symptom-vs-cause report.
+                        if (leanEvidence.length > 6800) leanEvidence = leanEvidence.slice(0, 6800) + "\n[…older lines trimmed; root cause + timeline above are complete]\n";
+                        logContext = `\n\n[INSTALLER LOG ANALYSIS]` + leanManifest + leanEvidence;
+                    } else {
+                        logContext = await buildLogAnalysisContext(c.logs, c.lastSentAt || 0, externalOverhead);
+                    }
                 } else {
                     let header = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
+                    // Lead with the reported symptom (protected from end-trim) so the model correlates
+                    // the evidence with what the customer actually reported, instead of grabbing an
+                    // unrelated high-severity error.
+                    if (summaryText && summaryText !== 'NO SUMMARY PROVIDED') {
+                        header += `\n[REPORTED ISSUE / CASE SYMPTOM — correlate the evidence with THIS]: ${summaryText.slice(0, 600)}\n`;
+                    }
                     header += await buildFileManifest(c.logs, c.lastSentAt || 0);
-                    header += await buildLogPatternProfile(c.logs);
-                    header += await buildCrossLogIncidentIndex(c.logs, { patternMode: true });
-                    const snippetBudget = await computeSnippetBudget(c.logs.length, externalOverhead + header.length);
-                    const budgets = allocatePerFileBudgets(c.logs, snippetBudget, isSmallModel ? 1500 : 4000);
+                    // HAR network captures are JSON — the line scanner can't read them, so parse them
+                    // into HTTP-transaction evidence (4xx/5xx, redirects, OAuth/SSO error codes, FQDN
+                    // mismatch) and place it FIRST so it survives trimming and leads the analysis.
+                    const harLogs = c.logs.filter(l => isHarContent(l.name || "", l.content || ""));
+                    for (const l of harLogs) {
+                        try { header += buildHarAnalysis(l.content || "", l.name || "capture.har"); } catch (e) { console.warn('HAR analysis failed', e); }
+                    }
+                    // The CROSS-LOG INCIDENT INDEX carries the per-line citations (file:Line N @ ts)
+                    // the model must quote; the LOG PATTERN PROFILE is just summary counts. On
+                    // small/CPU models the prompt is end-trimmed, so put the line-numbered index
+                    // FIRST and the summary profile last — that way the citations are never the part
+                    // that gets cut (fixes "Line N/A" evidence on large runtime logs).
+                    const nonHarLogs = c.logs.filter(l => !isHarContent(l.name || "", l.content || ""));
+                    const incidentIndex = await buildCrossLogIncidentIndex(nonHarLogs, { patternMode: true });
+                    const patternProfile = await buildLogPatternProfile(nonHarLogs);
+                    header += isSmallModel ? (incidentIndex + patternProfile) : (patternProfile + incidentIndex);
+                    const snippetBudget = await computeSnippetBudget(Math.max(1, nonHarLogs.length), externalOverhead + header.length);
+                    const budgets = allocatePerFileBudgets(nonHarLogs, snippetBudget, isSmallModel ? 1500 : 4000);
                     logContext = header;
-                    for (const l of c.logs) {
+                    for (const l of nonHarLogs) {
                         logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, budgets.get(l) || 10000, l.name, l.lines)}\n=== END: ${l.name} ===`;
                     }
                 }
@@ -5926,7 +6500,7 @@ async function send(overrideText = null, silent = false) {
             // - Otherwise (conversational / Q&A): case + research data first (the answer
             //   source), then rules, then the lightweight log manifest.
             sysPrompt = forensicRun && hasLogs
-                ? scrubPII(`${corePrompt}${learnedSection ? '\n\n' + learnedSection : ''}
+                ? scrubPII(`${corePrompt}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
 
 ${imgContext}`)
                 : analysisRun
@@ -5992,17 +6566,17 @@ ${imgContext}`);
 
         const renderUpdate = () => {
             if (!pendingRender) return;
-            const chat = $('chatMsgs');
-            const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
             // Show thinking indicator if model is still in thinking phase (native reasoning field or incomplete tags in content)
-            const hasIncompleteThink = (resp.includes('<think>') && !resp.includes('</think>')) || 
+            const hasIncompleteThink = (resp.includes('<think>') && !resp.includes('</think>')) ||
                                        (resp.includes('<|think|>') && !resp.includes('<|/think|>'));
             let displayContent = sanitizeAssistantResponse(resp);
             if ((isThinking || hasIncompleteThink) && !displayContent.trim()) {
                 displayContent = '<div class="thinking-dot"></div>';
             }
             aib.innerHTML = md(displayContent);
-            if (isNearBottom) chat.scrollTop = chat.scrollHeight;
+            // Only follow the stream while the user is parked at the bottom — if they scrolled
+            // up to read, leave them be (fixes the "can't scroll up, keeps jumping down" glitch).
+            chatScrollToBottomIfSticky();
             pendingRender = false;
         };
 
@@ -6111,6 +6685,24 @@ ${imgContext}`);
     }
 }
 
+// Sticky auto-scroll: the chat follows new tokens ONLY while the user is at the bottom.
+// As soon as they scroll up, _chatStick goes false and auto-scroll stops, so they can read
+// without being yanked back down. It re-engages when they scroll back to the bottom.
+let _chatStick = true;
+function ensureChatScrollListener() {
+    const chat = $('chatMsgs');
+    if (!chat || chat._stickBound) return;
+    chat._stickBound = true;
+    chat.addEventListener('scroll', () => {
+        _chatStick = (chat.scrollHeight - chat.scrollTop - chat.clientHeight) < 140;
+    }, { passive: true });
+}
+function chatScrollToBottomIfSticky() {
+    if (!_chatStick) return;
+    const chat = $('chatMsgs');
+    if (chat) chat.scrollTop = chat.scrollHeight;
+}
+
 function addMsg(role, content, push = true, hidden = false) {
     if (push && activeCaseId) {
         const c = cases.find(x => x.id === activeCaseId);
@@ -6121,9 +6713,9 @@ function addMsg(role, content, push = true, hidden = false) {
     const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(content);
     w.appendChild(b);
     const chat = $('chatMsgs');
-    const isNearBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 100;
+    ensureChatScrollListener();
     chat.appendChild(w);
-    if (isNearBottom) chat.scrollTop = chat.scrollHeight;
+    chatScrollToBottomIfSticky();
     return b;
 }
 
@@ -7908,6 +8500,11 @@ $('chatMsgs').addEventListener('copy', (e) => {
 if (isChromeExtension() && chrome.storage?.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'local' && (changes.cases || changes.activeCaseId)) {
+            // Ignore changes WE wrote (matched by our write token) — this is the deterministic
+            // guard that stops the post-analysis reload/render glitch loop. Only reload when the
+            // change came from another window (e.g. the floating window) or has no token.
+            const incomingToken = changes._stateWriteToken && changes._stateWriteToken.newValue;
+            if (incomingToken && incomingToken === _lastWriteToken) return;
             if ([...busyMap.values()].some(Boolean) || _suppressStorageReload) return;
             loadState();
         }

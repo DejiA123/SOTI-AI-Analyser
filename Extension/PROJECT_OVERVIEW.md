@@ -67,7 +67,7 @@ prompt and talks to the AI. Section 7 walks through it line by line.
 | **`background.js`** | 29 lines | The **service worker**. Tells Chrome to open the side panel when the toolbar icon is clicked, and clears stale network rules. Tiny by design. |
 | **`content.js`** | ~324 lines | The **Salesforce scraper**. Injected into Salesforce pages; reads case fields off the page (handling Salesforce's nested "Shadow DOM") and sends them to the panel. |
 | **`manifest.json`** | ~60 lines | The extension's "ID card": its name, permissions, which URLs it may talk to, and which files load when. |
-| **`knowledge/*.md`** | — | Product knowledge. `MobiControl.md`, `Connect.md`, `XSight.md` are small curated "log signature" cheat-sheets. `PulseKnowledge.md` is a 24 MB offline copy of ~10,000 SOTI help articles. |
+| **`knowledge/*.md`** | — | Product knowledge in two layers. (1) Small "log signature" cheat-sheets injected during analysis: `MobiControl.md`, `Connect.md`, `XSight.md`. (2) The RAG corpus searched by `PulseKB`: `PulseKnowledge.md` (a 24 MB MobiControl scrape, ~10,000 articles) plus the curated, source-referenced `Connect_Knowledge.md` and `XSight_Knowledge.md`. Extend a product by appending `# Title` / `Source:` / body articles to its corpus file, or add a file to `PulseKB.KB_FILES`. |
 | **`setup_local_ai.ps1` / `.bat`** | — | One-click installer: installs Ollama, pulls the model, and sets Ollama's environment variables (CORS + speed). The `.bat` just launches the `.ps1`. |
 | **`lib/`** | — | Tesseract.js OCR engine and its WASM/model data. |
 
