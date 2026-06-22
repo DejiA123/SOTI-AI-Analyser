@@ -5999,8 +5999,8 @@ async function saveLearnedInsight(c, question, answerText, verdict, correction =
             caseName: (c && c.name) || '',
             keywords,
             signatures,
-            rootCause: (rcMatch ? rcMatch[1] : (answerText || '').slice(0, 300)).replace(/\s+/g, ' ').trim().slice(0, 400),
-            resolution: (fixMatch ? fixMatch[1] : '').replace(/\s+/g, ' ').trim().slice(0, 400),
+            rootCause: (rcMatch ? rcMatch[1] : (answerText || '').slice(0, 300)).replace(/\s+/g, ' ').replace(/^[\s*:#>\-]+/, '').trim().slice(0, 400),
+            resolution: (fixMatch ? fixMatch[1] : '').replace(/\s+/g, ' ').replace(/^[\s*:#>\-]+/, '').trim().slice(0, 400),
             verdict,
             correction: (correction || '').replace(/\s+/g, ' ').trim().slice(0, 400)
         };
