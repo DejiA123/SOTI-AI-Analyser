@@ -523,6 +523,8 @@ function switchCase(id) {
                     const w = document.createElement('div'); w.className = `msg ${m.role}`;
                     const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(m.content);
                     w.appendChild(b);
+                    // Re-attach 👍/👎 so rated answers keep their confirmation and unrated ones keep their buttons.
+                    if (m.role === 'assistant') attachFeedbackUI(b, c, m);
                     frag.appendChild(w);
                 });
                 chat.appendChild(frag);
@@ -6043,19 +6045,37 @@ async function matchLearnedInsights(txt, logs) {
 }
 
 // 👍/👎 buttons under substantial assistant answers — the entry point of the learning loop.
-function attachFeedbackUI(bubbleEl, c, question, answerText) {
+// Takes the assistant message object so the verdict is recorded on it (msg.fbState) and
+// persisted via saveState(); switchCase re-runs this on every render, so a rated answer
+// keeps showing its confirmation and an unrated one keeps its buttons across tab switches.
+function attachFeedbackUI(bubbleEl, c, msg) {
     try {
-        if (!bubbleEl || !answerText) return;
+        if (!bubbleEl || !msg) return;
+        const answerText = msg.content || '';
+        const question = msg.fbQuestion || '';
         if (answerText.length < 400 && !/root\s*cause/i.test(answerText)) return;
         const row = document.createElement('div');
         row.className = 'fb-row';
+        const done = (text) => { row.innerHTML = `<span class="fb-done">${text}</span>`; };
+
+        // Already rated (earlier render or a previous session) — show the confirmation, not buttons.
+        if (msg.fbState) {
+            done(msg.fbDone || (msg.fbState === 'corrected'
+                ? '✓ Correction learned — the AI will use this in similar future cases'
+                : '✓ Learned — this analysis will inform similar future cases'));
+            bubbleEl.appendChild(row);
+            return;
+        }
+
+        const record = (state, text) => { msg.fbState = state; msg.fbDone = text; try { saveState(); } catch (e) {} };
         row.innerHTML = `<span class="fb-hint">Was this analysis correct?</span>` +
             `<button class="fb-btn" data-v="up" title="Correct — remember this analysis for similar future cases">👍</button>` +
             `<button class="fb-btn" data-v="down" title="Wrong — teach the AI the real cause">👎</button>`;
-        const done = (msg) => { row.innerHTML = `<span class="fb-done">${msg}</span>`; };
         row.querySelector('[data-v="up"]').onclick = async () => {
             const ok = await saveLearnedInsight(c, question, answerText, 'confirmed');
-            done(ok ? '✓ Learned — this analysis will inform similar future cases' : 'Could not save feedback');
+            const text = ok ? '✓ Learned — this analysis will inform similar future cases' : 'Could not save feedback';
+            if (ok) record('confirmed', text);
+            done(text);
         };
         row.querySelector('[data-v="down"]').onclick = () => {
             row.innerHTML = `<input class="fb-input" type="text" placeholder="What was the real root cause / fix?" maxlength="400">` +
@@ -6066,7 +6086,9 @@ function attachFeedbackUI(bubbleEl, c, question, answerText) {
                 const correction = inp.value.trim();
                 if (!correction) { inp.placeholder = 'Please describe the real cause first...'; return; }
                 const ok = await saveLearnedInsight(c, question, answerText, 'corrected', correction);
-                done(ok ? '✓ Correction learned — the AI will use this in similar future cases' : 'Could not save feedback');
+                const text = ok ? '✓ Correction learned — the AI will use this in similar future cases' : 'Could not save feedback';
+                if (ok) record('corrected', text);
+                done(text);
             };
             row.querySelector('.fb-save').onclick = submit;
             inp.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
@@ -6662,10 +6684,11 @@ ${imgContext}`);
         resp = finalAnswer; // so renderUpdate shows the recovered text, not the raw stream
         renderUpdate();
 
-        c.msgs.push({ role: 'assistant', content: finalAnswer });
+        const assistantMsg = { role: 'assistant', content: finalAnswer, fbQuestion: txt };
+        c.msgs.push(assistantMsg);
         c.lastSentAt = Date.now(); // logs uploaded after this moment get flagged as NEW next send
         saveState();
-        attachFeedbackUI(aib, c, txt, finalAnswer); // 👍/👎 self-learning loop
+        attachFeedbackUI(aib, c, assistantMsg); // 👍/👎 self-learning loop (survives tab switches)
     } catch (e) { 
         if (e.name !== 'AbortError') {
             aib.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
