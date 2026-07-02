@@ -3303,22 +3303,42 @@ async function computeSnippetBudget(numFiles, overheadChars = 0) {
 }
 
 // Compact the case object for the prompt. Large/GPU models get the full case; small/CPU
-// models keep the high-value fields but cap the bulky free-text (email chain, meeting
-// notes) so the actual log evidence still fits the small context window.
+// models keep the high-value fields but cap the bulky free-text (meeting notes) so the
+// actual log evidence still fits the small context window.
+// email_chain is intentionally EXCLUDED here — it is the live state of the case, so it is
+// surfaced separately as a dedicated, prominent, plain-text [EMAIL CHAIN] section (see
+// buildEmailChainSection) instead of being buried and JSON-escaped inside this blob.
 function buildCaseContextForPrompt(ci, small) {
     if (!ci) return {};
-    if (!small) return ci;
+    if (!small) {
+        const { email_chain, ...rest } = ci;
+        return rest;
+    }
     const out = {};
     for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'issue_summary']) {
         if (ci[k]) out[k] = ci[k];
     }
-    for (const k of ['meeting_notes', 'email_chain']) {
-        const v = ci[k];
-        if (typeof v === 'string' && v.trim()) {
-            out[k] = v.length > 1500 ? v.slice(0, 1500) + ' …[trimmed for context budget]' : v;
-        }
+    const mn = ci.meeting_notes;
+    if (typeof mn === 'string' && mn.trim()) {
+        out.meeting_notes = mn.length > 1500 ? mn.slice(0, 1500) + ' …[trimmed for context budget]' : mn;
     }
     return out;
+}
+
+// The email correspondence is the LIVE state of the case and must drive "what's next" /
+// "current status" answers. It is scraped NEWEST-FIRST (the first entry is the most recent
+// message), so truncation drops the OLDEST entries and always keeps the latest exchange.
+// Surfaced as its own plain-text section (real newlines, not JSON-escaped) with an explicit
+// precedence header so the model treats it as source-of-truth over the original [ISSUE SUMMARY].
+function buildEmailChainSection(ci, small) {
+    const raw = ((ci && ci.email_chain) || '').trim();
+    if (!raw) return '';
+    const cap = small ? 6000 : 16000;
+    let chain = raw;
+    if (chain.length > cap) {
+        chain = chain.slice(0, cap).trimEnd() + '\n\n…[older emails trimmed to fit context — the NEWEST messages are shown above and are what matters for the current state]';
+    }
+    return `[EMAIL CHAIN — the live support correspondence for this case, ordered NEWEST FIRST. The FIRST entry is the most recent message and reflects the CURRENT state of the case. This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
 
 // Fair-share allocation: small files take only what they need and donate the surplus
@@ -4272,7 +4292,8 @@ RULES:
 3. Keep answers extremely short and direct (1-2 sentences). Do not add conversational fluff.
 4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.
 5. ZERO HALLUCINATION FOR GUIDES: If the user asks for step-by-step instructions or configuration steps, you MUST construct them ONLY using the EXACT TEXT provided in the [OFFLINE PULSE KNOWLEDGE MATCHES], [DEEP RESEARCH], or [DOCS SEARCH] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If these sections do not contain the specific steps, you MUST reply "I could not find a SOTI guide for this specific task in my current context." DO NOT guess or use generic Android/IT knowledge to invent steps. DO NOT combine unrelated sections.
-6. NEVER write meta-commentary about your sources or context. The following phrases are STRICTLY FORBIDDEN: "Based on the provided documentation", "Based on the provided information", "the retrieved knowledge base", "the provided context", "consult the full SOTI documentation", "contact SOTI support", "was not explicitly detailed", "you may need to consult". State the facts directly as established SOTI knowledge, with no preamble.`;
+6. NEVER write meta-commentary about your sources or context. The following phrases are STRICTLY FORBIDDEN: "Based on the provided documentation", "Based on the provided information", "the retrieved knowledge base", "the provided context", "consult the full SOTI documentation", "contact SOTI support", "was not explicitly detailed", "you may need to consult". State the facts directly as established SOTI knowledge, with no preamble.
+7. CURRENT STATE & "WHAT'S NEXT": For any question about the case status or what to do next, read [EMAIL CHAIN] from the TOP (it is ordered NEWEST FIRST) and answer from the most recent messages. [EMAIL CHAIN] OVERRIDES [ISSUE SUMMARY], which is only the original problem and may already be resolved. If the latest emails show the issue is fixed / the customer confirmed success / a meeting was cancelled, do NOT suggest old troubleshooting or a meeting — instead answer the newest open question, or confirm the fix and offer to close the case.`;
     }
     return `${TIER3_IDENTITY}
 
@@ -4296,6 +4317,7 @@ RULES YOU MUST FOLLOW:
 11. NEVER add meta-commentary about your own instructions, data sources, internal processing, or how the prompt is structured. NEVER say things like "additional details may have been omitted", "based on how you've structured them", "if there were any notable fixes they should be listed here", or "I need more context". Just present the facts directly. If the data is not available, say so briefly and move on.
 12. ZERO HALLUCINATION FOR GUIDES: For short, simple questions, answer DIRECTLY in 1 sentence. For 'How to' or configuration questions, you MUST provide a full step-by-step guide based ONLY on the EXACT TEXT in the [DEEP RESEARCH], [DOCS SEARCH], and [OFFLINE PULSE KNOWLEDGE MATCHES] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If the text does not contain the specific step-by-step guide, you MUST state exactly: "I could not find a SOTI guide for this specific task in my current context." and stop immediately. DO NOT paraphrase heavily. DO NOT combine unrelated sections.
 13. STRICT TRUTH ON RELEASE NOTES: If [RELEASE NOTES] is empty or not provided, you MUST NEVER mention release notes, MCMR codes, or resolved issues. If release notes ARE provided, you MUST present the facts, codes (e.g. MCMR-xxxxx), and descriptions EXACTLY as they are written in the [RELEASE NOTES] section. You are STRICTLY FORBIDDEN from explaining, paraphrasing, translating, or expanding them. Do NOT add extra context, versions, platforms (such as Windows 10 Mobile), root causes, update details, or explanations that do not exist word-for-word in the provided text. Present them exactly as they are and stop.
+14. CURRENT STATE & "WHAT'S NEXT" (CRITICAL): [EMAIL CHAIN] is the live correspondence, ordered NEWEST FIRST — the FIRST entry is the most recent message. When the user asks what to do next, for the current status, or to summarize where the case stands, you MUST read the [EMAIL CHAIN] from the TOP and base your answer on the most recent messages. The EMAIL CHAIN OVERRIDES [ISSUE SUMMARY]: the summary is only the ORIGINAL reported problem and is frequently already resolved or superseded by later emails. If the latest emails show the reported problem was resolved (a fix worked, the customer confirmed success, a meeting was cancelled) or the conversation has moved to a new topic, you MUST reflect that: do NOT re-recommend old troubleshooting, and do NOT propose scheduling a meeting for a problem the chain shows is already solved. Instead address the newest OPEN item — answer the customer's most recent question, or if nothing is open, confirm the resolution and offer to close the case. NEVER produce next-steps the email chain has already moved past.
 
 
 VERSIONING (always apply):
@@ -4518,6 +4540,7 @@ Answer the user's question directly and conversationally. You have the case deta
 RULES:
 - Answer the ACTUAL question asked. Do NOT output a "Log Analysis" report, headed sections, or a root-cause verdict UNLESS the user explicitly asks you to analyse the logs or find the root cause.
 - Case questions (case number, product, version, status, "summarize the case", "what's in the case info") → answer from [CASE] and [ISSUE SUMMARY].
+- Status / "what do I do next" questions → read [EMAIL CHAIN] from the TOP (it is ordered NEWEST FIRST) and answer from the most recent messages. [EMAIL CHAIN] OVERRIDES [ISSUE SUMMARY]: the summary is only the original problem and may already be resolved or superseded. If the latest emails show the issue is fixed or the conversation moved on, reflect that — do NOT re-recommend old troubleshooting or a meeting for an already-solved problem; address the newest open item or confirm the fix and offer to close.
 - Be concise, clear and helpful, in plain prose.
 - Never say "insufficient evidence" for something the case info or logs clearly contain. Only say you lack data if the specific thing asked truly isn't present.
 - If a deeper log investigation would help, briefly offer to run a full analysis (or tell the user to click "Analyse Now").`;
@@ -6001,8 +6024,8 @@ async function saveLearnedInsight(c, question, answerText, verdict, correction =
             caseName: (c && c.name) || '',
             keywords,
             signatures,
-            rootCause: (rcMatch ? rcMatch[1] : (answerText || '').slice(0, 300)).replace(/\s+/g, ' ').replace(/^[\s*:#>\-]+/, '').trim().slice(0, 400),
-            resolution: (fixMatch ? fixMatch[1] : '').replace(/\s+/g, ' ').replace(/^[\s*:#>\-]+/, '').trim().slice(0, 400),
+            rootCause: (rcMatch ? rcMatch[1] : (answerText || '').slice(0, 300)).replace(/\s+/g, ' ').trim().slice(0, 400),
+            resolution: (fixMatch ? fixMatch[1] : '').replace(/\s+/g, ' ').trim().slice(0, 400),
             verdict,
             correction: (correction || '').replace(/\s+/g, ' ').trim().slice(0, 400)
         };
@@ -6408,7 +6431,9 @@ async function send(overrideText = null, silent = false) {
             // 2) LIVE DATA / CASE CONTEXT (case info, research, learned insights).
             let liveDataSection = "";
             const liveDataLines = [];
-            liveDataLines.push(`[ISSUE SUMMARY]: ${summaryText}`);
+            liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${summaryText}`);
+            const emailChainSection = buildEmailChainSection(ci, isSmallModel);
+            if (emailChainSection) liveDataLines.push(emailChainSection);
             liveDataLines.push(`[TIME]: ${new Date().toLocaleString()}`);
             liveDataLines.push(`[CASE]: ${JSON.stringify(buildCaseContextForPrompt(ci, isSmallModel), null, 2)}`);
 
