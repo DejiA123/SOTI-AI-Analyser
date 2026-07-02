@@ -2860,6 +2860,30 @@ function wantsLogAnalysis(text, silent) {
     return /\b(analy[sz]e|analysis|root\s*cause|diagnos\w*|investigat\w*|troubleshoot\w*|forensic|what'?s\s+wrong|what\s+happened|why\s+(is|did|does|are|was|were)|find\s+the\s+(issue|problem|error|cause|root)|the\s+(error|issue|problem|failure|exception|crash))\b/.test(t);
 }
 
+// A conversational FOLLOW-UP about the assistant's PREVIOUS answer — e.g. "why do you think
+// that's the root cause?", "how did you conclude that?", "are you sure?", "explain that",
+// "what makes you say the SQL error is the cause?". These probe reasoning that was already
+// given, so they must be answered conversationally from the analysis in chat history — NOT
+// re-trigger a brand-new forensic log report. The literal words "root cause" appear in many
+// such questions, which is exactly why the plain forensic/analysis detectors misfire on them.
+function isAnalysisFollowUp(text) {
+    const t = (text || '').trim().toLowerCase();
+    if (!t) return false;
+    // "why/how/what ... you/your ... <reasoning verb>" — probing the assistant's own conclusion.
+    if (/\b(why|how|what|whats|where|when)\b/.test(t) && /\byour?\b/.test(t) &&
+        /\b(think|thought|say|said|sure|certain|confident|believe|conclu\w+|determin\w+|decid\w+|figure\w*|know|knew|mean|meant|reason\w*|assum\w+|claim\w*|stat(e|ed|ing)|pick\w*|chose|choose|arrive\w*|base\w*|got|get)\b/.test(t)) return true;
+    if (/\bare\s+you\s+(sure|certain|positive|serious|confident)\b/.test(t)) return true;
+    if (/\bhow\s+(sure|certain|confident)\s+are\s+you\b/.test(t)) return true;
+    if (/\bwhy\s+(is|are|was|were)\s+(that|this|it|those|these)\b/.test(t)) return true;   // "why is that the root cause"
+    if (/^(and\s+)?(why|how|how so|how come)\s*[?.!]*$/.test(t)) return true;               // bare "why?" / "how so?"
+    if (/^(explain|elaborate|clarify|justify|expand|go on|continue|tell me more|more detail|say more)\b/.test(t)) return true;
+    if (/\b(can|could|would|will|please)\s+you\s+(explain|elaborate|clarify|justify|expand|walk)\b/.test(t)) return true;
+    if (/\bon\s+what\s+(basis|grounds|evidence)\b/.test(t)) return true;
+    if (/\bwalk\s+me\s+through\b/.test(t)) return true;
+    if (/\b(prove\s+it|says?\s+who|how\s+do\s+you\s+figure)\b/.test(t)) return true;
+    return false;
+}
+
 function shouldUseFocusedLogPipeline(logs) {
     if (!logs || logs.length === 0) return false;
     return logs.some(log => {
@@ -4539,6 +4563,7 @@ Answer the user's question directly and conversationally. You have the case deta
 
 RULES:
 - Answer the ACTUAL question asked. Do NOT output a "Log Analysis" report, headed sections, or a root-cause verdict UNLESS the user explicitly asks you to analyse the logs or find the root cause.
+- FOLLOW-UP / "why" questions ("why do you think that's the root cause?", "how did you conclude that?", "are you sure?", "explain that"): the user is asking you to JUSTIFY the answer you ALREADY gave earlier in this conversation. Answer conversationally in a few sentences — restate your reasoning and cite the specific evidence (the exact error message, file:line, timestamp, and why it is the cause rather than a downstream symptom) that led to it. Do NOT regenerate a full forensic report, tables, or headed sections, and do NOT switch to a different root cause than the one you already gave.
 - Case questions (case number, product, version, status, "summarize the case", "what's in the case info") → answer from [CASE] and [ISSUE SUMMARY].
 - Status / "what do I do next" questions → read [EMAIL CHAIN] from the TOP (it is ordered NEWEST FIRST) and answer from the most recent messages. [EMAIL CHAIN] OVERRIDES [ISSUE SUMMARY]: the summary is only the original problem and may already be resolved or superseded. If the latest emails show the issue is fixed or the conversation moved on, reflect that — do NOT re-recommend old troubleshooting or a meeting for an already-solved problem; address the newest open item or confirm the fix and offer to close.
 - Be concise, clear and helpful, in plain prose.
@@ -6246,8 +6271,16 @@ async function send(overrideText = null, silent = false) {
     
     const isGreeting = /^(hi|hello|hey|greetings|morning|afternoon|evening|yo|sup)\b/i.test(txt.trim()) && txt.trim().split(/\s+/).length < 3;
     const hasLogs = c.logs.length > 0;
+    // A conversational follow-up about a PREVIOUS answer ("why do you think that's the root
+    // cause?", "how did you conclude that?", "are you sure?") must NOT re-trigger a fresh
+    // forensic report — the phrase "root cause" in such questions otherwise trips the analysis
+    // detectors and (on small models) even misroutes to the MSI installer prompt. Route it
+    // conversationally so the model explains its prior reasoning from history. Gated on a real
+    // prior answer existing, and never on the "Analyse Now" button (silent).
+    const hasPriorAnswer = c.msgs.some(m => m.role === 'assistant' && (m.content || '').length > 150);
+    const isAnalysisFollowUpTurn = hasLogs && hasPriorAnswer && !silent && isAnalysisFollowUp(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = hasLogs && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    const analysisRun = hasLogs && !isAnalysisFollowUpTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
