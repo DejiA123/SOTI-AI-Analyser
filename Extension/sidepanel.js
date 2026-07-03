@@ -5666,8 +5666,8 @@ async function loadLocalAISettings() {
         // Add defaults for Pulse Sync
         window.PULSE_SYNC_URL = data.pulseSyncUrl || 'https://pulse.soti.net/support/soti-mobicontrol';
         
-        // Upgrade from old default
-        if (window.PULSE_SYNC_URL === 'knowledge/PulseKnowledge.md' || window.PULSE_SYNC_URL === 'https://raw.githubusercontent.com/soti-pulse/pulse-knowledge/main/PulseKnowledge.md') {
+        // Upgrade from an old local default to the current first-party Pulse source.
+        if (window.PULSE_SYNC_URL === 'knowledge/PulseKnowledge.md') {
             window.PULSE_SYNC_URL = 'https://pulse.soti.net/support/soti-mobicontrol';
         }
         
