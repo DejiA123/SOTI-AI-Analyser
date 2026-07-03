@@ -17,8 +17,6 @@
     "https://*.soti.net/*",
     "https://*.salesforce.com/*",
     "https://*.force.com/*",
-    "https://api.allorigins.win/*",
-    "https://api.codetabs.com/*",
     "https://ollama.com/*",
     "https://github.com/*",
     "http://localhost/*",
