@@ -4586,7 +4586,11 @@ async function sotiFetch(url, timeout = 5000) {
 
     let fetchedText = null;
 
-    // Priority 1: Direct Fetch (Uses manifest permissions)
+    // FIRST-PARTY / LOCAL ONLY: fetch directly from the target, which is always a first-party
+    // SOTI site (pulse.soti.net) the extension has host permission for. NO third-party CORS
+    // proxies — if this direct fetch fails, the caller falls back to the bundled OFFLINE
+    // knowledge base (PulseKB / knowledge/*.md) rather than leaking the requested URL to an
+    // external proxy service. Keeps the app fully self-contained and private.
     try {
         const controller = new AbortController();
         const tid = setTimeout(() => controller.abort(), timeout);
@@ -4598,31 +4602,7 @@ async function sotiFetch(url, timeout = 5000) {
                 fetchedText = text;
             }
         }
-    } catch (e) { console.warn('Direct fetch failed, trying proxies...', e); }
-
-    if (!fetchedText) {
-        // Priority 2: Proxies
-        const rawProxies = [
-            `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-            `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
-        ];
-        
-        for (const p of rawProxies) {
-            try {
-                const controller = new AbortController();
-                const tid = setTimeout(() => controller.abort(), 6000);
-                const res = await fetch(p, { signal: controller.signal });
-                clearTimeout(tid);
-                if (res.ok) {
-                    const text = await res.text();
-                    if (text && text.length > 500) {
-                        fetchedText = text;
-                        break;
-                    }
-                }
-            } catch (e) { }
-        }
-    }
+    } catch (e) { console.warn('Direct Pulse fetch failed; falling back to the offline knowledge base.', e); }
 
     if (fetchedText) {
         sotiFetchCache.set(url, { text: fetchedText, timestamp: now });
@@ -7227,21 +7207,24 @@ async function handleImages(files) {
             renderImgs();
             saveState();
 
-            // Run OCR (Tesseract v5)
+            // Run OCR (Tesseract v5) — 100% LOCAL, ALWAYS. The engine, worker, WASM cores and
+            // language data are ALL loaded from the extension's own bundled lib/ folder. No CDN,
+            // no external site, ever — in standalone mode the same local lib/ files are used via
+            // relative paths (they sit next to SOTI_AI_Analyser.html). Chrome's MV3 CSP
+            // (script-src/worker-src 'self') additionally hard-blocks any remote script/worker.
             try {
                 const Lib = typeof Tesseract !== 'undefined' ? Tesseract : window.Tesseract;
                 const isExt = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id;
-                console.log('[OCR] Environment:', isExt ? 'Chrome Extension' : 'Standalone');
-                
-                const workerOpts = isExt ? {
-                    workerPath: chrome.runtime.getURL('lib/worker.min.js'),
-                    corePath: chrome.runtime.getURL('lib/'),
-                    langPath: chrome.runtime.getURL('lib/'),
+                console.log('[OCR] Environment:', isExt ? 'Chrome Extension' : 'Standalone', '— local lib/ only');
+
+                // Paths must be ABSOLUTE: the worker resolves relative corePath/langPath against
+                // its own directory (already lib/), which would double up to lib/lib/.
+                const localUrl = p => isExt ? chrome.runtime.getURL(p) : new URL(p, location.href).href;
+                const workerOpts = {
+                    workerPath: localUrl('lib/worker.min.js'),
+                    corePath: localUrl('lib/'),
+                    langPath: localUrl('lib/'),
                     workerBlobURL: false
-                } : {
-                    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/worker.min.js',
-                    corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/',
-                    langPath: 'https://tessdata.projectnaptha.com/4.0.0/'
                 };
                 console.log('[OCR] Worker options:', JSON.stringify(workerOpts));
                 
