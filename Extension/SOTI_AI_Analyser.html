@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <!-- GDPR/security: lock the app to first-party + localhost only. img-src/connect-src block
+         any exfiltration of case data to an external host (e.g. an injected <img src="http://…">),
+         even though script execution is already blocked by script-src 'self'. This mirrors the
+         manifest's extension_pages CSP so the standalone page is protected the same way. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:* https://*.soti.net https://*.salesforce.com https://*.force.com; object-src 'self'; worker-src 'self'; frame-src 'none'; base-uri 'self'; form-action 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOTI AI Analyser</title>
     <link rel="stylesheet" href="styles.css">
@@ -405,7 +410,7 @@
             </div>
 
             <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">
-                <button class="btn btn-sec" onclick="document.getElementById('mSettings').style.display='none'">Cancel</button>
+                <button type="button" class="btn btn-sec" id="btnCancelSettings">Cancel</button>
                 <button class="btn btn-ok" id="btnSaveLocalAI" style="background:var(--blue);color:#fff;border:none">Save</button>
             </div>
         </div>
