@@ -5978,13 +5978,29 @@ const OllamaAI = {
 // smarter with every verified case.
 const INSIGHT_STOPWORDS = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for', 'logs', 'log', 'analyse', 'analyze', 'please', 'case']);
 
+// GDPR storage limitation: learned insights hold case-derived text (root cause / fix /
+// correction / case name), so — like cases — they must not accumulate indefinitely. Purge any
+// older than the retention window on load and persist the purge so the data is actually deleted
+// from disk, not just hidden. (Cases use a 7-day inactivity window; insights are longer-lived
+// aggregated learning, so they get a longer, still-bounded 90-day window.)
+const INSIGHT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
 async function loadLearnedInsights() {
     try {
+        let insights = [];
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             const d = await chrome.storage.local.get('learnedInsights');
-            return Array.isArray(d.learnedInsights) ? d.learnedInsights : [];
+            insights = Array.isArray(d.learnedInsights) ? d.learnedInsights : [];
+        } else {
+            insights = JSON.parse(localStorage.getItem('soti_learned_insights') || '[]');
         }
-        return JSON.parse(localStorage.getItem('soti_learned_insights') || '[]');
+        const now = Date.now();
+        const kept = insights.filter(i => i && (now - (i.ts || now)) < INSIGHT_RETENTION_MS);
+        if (kept.length !== insights.length) {
+            console.warn(`[Security] Data retention: purged ${insights.length - kept.length} learned insight(s) older than 90 days.`);
+            await persistLearnedInsights(kept);
+        }
+        return kept;
     } catch (e) { return []; }
 }
 
@@ -7815,6 +7831,7 @@ async function openSettingsModal() {
 }
 
 $('mSettingsClose').onclick = () => $('mSettings').style.display = 'none';
+if ($('btnCancelSettings')) $('btnCancelSettings').onclick = () => $('mSettings').style.display = 'none';
 
 $('localAiUrl').oninput = () => {
     LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://127.0.0.1:11434';
