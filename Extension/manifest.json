@@ -10,7 +10,6 @@
     "scripting",
     "storage",
     "unlimitedStorage",
-    "declarativeNetRequest",
     "downloads"
   ],
   "host_permissions": [
