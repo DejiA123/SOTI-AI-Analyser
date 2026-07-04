@@ -8410,7 +8410,11 @@ if ($('btnSyncPulse')) {
         status.style.color = 'var(--txt2)';
         
         try {
-            const isPulseUrl = url.includes('pulse.soti.net');
+            // Parse the actual hostname rather than a substring match: url.includes('pulse.soti.net')
+            // would also accept a lookalike like "pulse.soti.net.attacker.example". (Chrome's
+            // host_permissions independently block non-SOTI origins, but validate here too.)
+            let isPulseUrl = false;
+            try { isPulseUrl = new URL(url).hostname === 'pulse.soti.net'; } catch (e) { isPulseUrl = false; }
             let text = "";
             
             if (isPulseUrl) {

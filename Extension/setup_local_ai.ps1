@@ -169,8 +169,12 @@ if (Test-OllamaInstalled) {
     Write-Success "Ollama is already installed."
 } else {
     Write-Header "Step 1: Install Ollama"
-    $ok = Install-OllamaOfficial
-    if (-not $ok) { $ok = Install-OllamaViaWinget }
+    # SECURITY: prefer winget first - it installs a signed, hash-verified package from the
+    # Windows Package Manager repo, so the common case does NOT fetch a remote script and pipe
+    # it into Invoke-Expression. Fall back to Ollama's official installer / setup.exe only if
+    # winget is unavailable (older Windows).
+    $ok = Install-OllamaViaWinget
+    if (-not $ok) { $ok = Install-OllamaOfficial }
     if (-not $ok) { $ok = Install-OllamaViaSetupExe }
     if (-not $ok) {
         Write-Err "Automatic install did not complete."
@@ -190,9 +194,15 @@ if (-not (Test-Path $ollamaExe)) {
 # --- Step 2: Start / verify service ---
 Write-Header "Step 2: Start Ollama"
 
-Write-Info "Configuring OLLAMA_ORIGINS=* to allow standalone browser access..."
-[System.Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "*", "User")
-$env:OLLAMA_ORIGINS = "*"
+# SECURITY: scope OLLAMA_ORIGINS to the SOTI extension + the standalone page ONLY - never "*".
+# "*" lets ANY website the analyst visits reach the local model API from the browser (a
+# drive-by localhost-service risk the security team flagged). This scoped list blocks arbitrary
+# web origins while still allowing the extension and the standalone page. For a managed rollout,
+# replace chrome-extension://* with the pinned extension ID (chrome-extension://<your-id>).
+$sotiOrigins = "chrome-extension://*,http://localhost:8765,http://127.0.0.1:8765"
+Write-Info "Configuring OLLAMA_ORIGINS to the SOTI extension + standalone page only (not '*')..."
+[System.Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", $sotiOrigins, "User")
+$env:OLLAMA_ORIGINS = $sotiOrigins
 
 # Speed: flash attention + quantized KV cache. On CPU-only / low-RAM laptops this lowers
 # memory bandwidth and can speed up inference. It does NOT change answer quality.
