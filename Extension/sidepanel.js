@@ -103,8 +103,13 @@ function md(t) {
     // markdown pass. Nothing here is templated with user/case/AI-controlled data.
     const _safeImgs = [];
     t = String(t)
-        .replace(/<img\s+src="data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[^"]*"[^>]*>/gi, (m) => {
-            _safeImgs.push(m);
+        // Preserve inline data: screenshot previews — but RECONSTRUCT the tag from only its
+        // extracted data: URI plus a fixed, safe style. We deliberately discard every other
+        // attribute on the matched tag, so a model-injected handler (e.g. onerror=, onload=) or
+        // a second javascript: src can never be smuggled past the escaper. (The CSP already
+        // blocks handler execution; this closes the gap if the CSP is ever relaxed.)
+        .replace(/<img\b[^>]*?\bsrc\s*=\s*"(data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[^"]*)"[^>]*>/gi, (m, dataUri) => {
+            _safeImgs.push(`<img src="${dataUri}" style="max-width:200px; max-height:100px; border-radius:4px; margin-bottom:8px; display:block; border:1px solid #e2e8f0;">`);
             return `%%SAFEIMG${_safeImgs.length - 1}%%`;
         })
         .replace(/<div class="thinking-dot"><\/div>/g, (m) => {
@@ -5553,10 +5558,10 @@ function updateVersionDropdowns() {
         agentOpts = []; // Identity doesn't have an 'Agent' version in this context
     }
 
-    $('sotiVer').innerHTML = '<option value="">— Select —</option>' + sotiOpts.map(v => `<option value="${v}">${v}</option>`).join('');
-    
+    $('sotiVer').innerHTML = '<option value="">— Select —</option>' + sotiOpts.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+
     if (agentOpts.length > 0) {
-        $('agentVer').innerHTML = '<option value="">— Select —</option>' + agentOpts.map(v => `<option value="${v}">${v}</option>`).join('');
+        $('agentVer').innerHTML = '<option value="">— Select —</option>' + agentOpts.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
     } else {
         $('agentVer').innerHTML = '<option value="">N/A</option>';
     }
@@ -6841,7 +6846,11 @@ function exportSession() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `SOTI_AI_Session_${$('caseNum').value || 'New'}.txt`;
+    // Sanitise the case number before it becomes a filename: keep only safe filename chars and
+    // cap the length. The browser already strips path separators from a download attribute, but
+    // this removes any other odd characters and makes the export name predictable.
+    const safeCaseNum = ($('caseNum').value || 'New').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 60) || 'New';
+    a.download = `SOTI_AI_Session_${safeCaseNum}.txt`;
     a.click();
     toast('Session exported as .txt', 's');
 }
