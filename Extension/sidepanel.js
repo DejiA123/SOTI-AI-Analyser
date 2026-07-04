@@ -91,6 +91,27 @@ function isStandalonePage() {
 
 function md(t) {
     if (!t) return "";
+    // SECURITY (defence-in-depth on top of the CSP): md() output goes to innerHTML, and its
+    // input can include untrusted text (a scraped case/email, OCR text, or the local model's
+    // echo of that content). HTML-escape the input BEFORE applying markdown so no injected tag
+    // (<img src="http…"> beacon, <script>, <iframe>, event handler) can ever render — the CSP
+    // already blocks execution/exfiltration, this closes the gap if the CSP is ever relaxed.
+    // The app's OWN inline previews (self-contained base64 data: images for attached
+    // screenshots) and its OWN static UI markup (the "thinking…" loading spinner, injected as
+    // literal HTML while a response streams) are the only trusted HTML this function ever
+    // receives — set them aside so escaping doesn't destroy them, then restore after the
+    // markdown pass. Nothing here is templated with user/case/AI-controlled data.
+    const _safeImgs = [];
+    t = String(t)
+        .replace(/<img\s+src="data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[^"]*"[^>]*>/gi, (m) => {
+            _safeImgs.push(m);
+            return `%%SAFEIMG${_safeImgs.length - 1}%%`;
+        })
+        .replace(/<div class="thinking-dot"><\/div>/g, (m) => {
+            _safeImgs.push(m);
+            return `%%SAFEIMG${_safeImgs.length - 1}%%`;
+        });
+    t = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     let html = t.trim()
         // 1. Fix token-mashing where AI forgets spaces around bold tags (e.g. the**Android**tab)
         .replace(/([A-Za-z0-9.,])\*\*/g, '$1 **')
@@ -124,6 +145,8 @@ function md(t) {
         .replace(/^\s*(\d+\.)\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
         .replace(/^\s*[•*+-]\s+(.*)$/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>');
         
+    // Restore the app's own inline image previews that were protected before escaping.
+    html = html.replace(/%%SAFEIMG(\d+)%%/g, (m, i) => _safeImgs[+i] || '');
     // Clean up any stray leading/trailing breaks that might have been injected
     return html.replace(/^(<br>|<div style="margin-bottom:18px"><\/div>|\s)+/, '').replace(/(<br>|<div style="margin-bottom:18px"><\/div>|\s)+$/, '');
 }
@@ -272,7 +295,7 @@ async function saveState() {
     try {
         if (!syncActiveCaseCiFromForm()) return;
 
-        // Stamp the active case as "touched now" so the 7-day inactivity retention clock
+        // Stamp the active case as "touched now" so the 30-day inactivity retention clock
         // resets whenever the user works on it (saveState runs on edits, attaches, sends).
         const _activeCase = cases.find(x => x.id === activeCaseId);
         if (_activeCase) _activeCase.updatedAt = Date.now();
@@ -388,19 +411,19 @@ async function loadState() {
                 }
             });
 
-            // DATA RETENTION: auto-purge cases (and their stored logs) after 7 days of
+            // DATA RETENTION: auto-purge cases (and their stored logs) after 30 days of
             // INACTIVITY. Sensitive customer logs shouldn't sit on disk longer than needed.
             // Keyed on last activity (updatedAt/lastSentAt), not creation time, so a case you
             // keep working on survives and only genuinely idle cases are cleared.
-            const RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days of inactivity
+            const RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days of inactivity
             const now = Date.now();
             const before = cases.length;
             const lastTouch = c => c.updatedAt || c.lastSentAt || c.createdAt || now;
             cases = cases.filter(c => (now - lastTouch(c)) < RETENTION_MS);
             const purged = before - cases.length;
             if (purged > 0) {
-                console.warn(`[Security] Data retention: purged ${purged} case(s) idle for over 7 days.`);
-                toast(`${purged} idle case(s) auto-cleared (7-day retention policy)`, 'w', 5000);
+                console.warn(`[Security] Data retention: purged ${purged} case(s) idle for over 30 days.`);
+                toast(`${purged} idle case(s) auto-cleared (30-day retention policy)`, 'w', 5000);
                 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
                     chrome.storage.local.set({ cases, _stateWriteToken: _newWriteToken() });
                 }
@@ -4298,10 +4321,6 @@ const SCRUB_MAPS = {
     custCount: 0
 };
 
-function scrubPII(s) {
-    // Zero scrubbing for Local AI - private on-device execution does not require data redaction.
-    return s;
-}
 
 // Shared Tier-3 identity used by every prompt mode — the AI's core persona.
 const TIER3_IDENTITY = `You are the SOTI Tier-3 AI Analyser — a senior escalation engineer for the entire SOTI ONE Suite with expert-level command of SOTI MobiControl (UEM: Management/Deployment Server architecture, SQL backend, device enrollment, profiles, packages, agents for Android/iOS/Windows/macOS/Linux/Zebra), SOTI Connect (IoT & printer management, MQTT broker, device rules), SOTI XSight (advanced diagnostics, live remote support, operational intelligence dashboards), and SOTI Identity (SSO/IdP, SAML, user management). You analyse with forensic precision, cite exact evidence, and never guess.`;
@@ -5981,7 +6000,7 @@ const INSIGHT_STOPWORDS = new Set(['what', 'where', 'how', 'when', 'there', 'is'
 // GDPR storage limitation: learned insights hold case-derived text (root cause / fix /
 // correction / case name), so — like cases — they must not accumulate indefinitely. Purge any
 // older than the retention window on load and persist the purge so the data is actually deleted
-// from disk, not just hidden. (Cases use a 7-day inactivity window; insights are longer-lived
+// from disk, not just hidden. (Cases use a 30-day inactivity window; insights are longer-lived
 // aggregated learning, so they get a longer, still-bounded 90-day window.)
 const INSIGHT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
@@ -6576,28 +6595,28 @@ async function send(overrideText = null, silent = false) {
             // - Otherwise (conversational / Q&A): case + research data first (the answer
             //   source), then rules, then the lightweight log manifest.
             sysPrompt = forensicRun && hasLogs
-                ? scrubPII(`${corePrompt}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
+                ? `${corePrompt}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
 
-${imgContext}`)
+${imgContext}`
                 : analysisRun
-                    ? scrubPII(`${corePrompt}
+                    ? `${corePrompt}
 
 ${logContext}
 
 ${imgContext}
 
-${liveDataSection}`)
-                    : scrubPII(`${liveDataSection}
+${liveDataSection}`
+                    : `${liveDataSection}
 
 ${corePrompt}
 
 ${logContext}
 
-${imgContext}`);
+${imgContext}`;
 
             // Store ONLY the clean user text in history — never log dumps. Keeping history
             // light is what lets newly added logs always fit the context on later sends.
-            userMsgForModel = scrubPII(txt) + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
+            userMsgForModel = txt + (imgContext && !(forensicRun && hasLogs) ? `\n\n(Extracted Image Data via OCR):\n${imgContext}` : "");
 
             if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
                 c.msgs[c.msgs.length - 1].content = userMsgForModel;
@@ -6610,7 +6629,7 @@ ${imgContext}`);
             if (forensicRun && hasLogs && history.length > 0) {
                 // Forensic mode: the log payload travels in the FINAL user message only
                 // (ephemeral — rebuilt fresh each send, never persisted to history).
-                history[history.length - 1] = { role: 'user', content: scrubPII(`${logContext}\n\n${txt}`) };
+                history[history.length - 1] = { role: 'user', content: `${logContext}\n\n${txt}` };
             }
             modelMessages = [{ role: 'system', content: sysPrompt }, ...history];
         }
@@ -7685,7 +7704,7 @@ Otherwise, why was L3/SME not consulted: Consulted SOTI AI Analyser`;
 - PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
 - YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
 
-    const userPrompt = scrubPII(`### SOURCE DATA FOR ANALYSIS:
+    const userPrompt = `### SOURCE DATA FOR ANALYSIS:
 - Case Number: ${caseNum}
 - Account/Customer: ${account} / ${customer}
 - Product: ${product}
@@ -7704,7 +7723,7 @@ ${parsedLogFacts}
 ${chatCtx}
 
 ### OFFICIAL SOTI JIRA TEMPLATE (FILL THIS OUT):
-${JIRA_TEMPLATE}`);
+${JIRA_TEMPLATE}`;
 
     try {
         if (!LOCAL_AI_MODEL) {
