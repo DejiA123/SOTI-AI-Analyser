@@ -1,9 +1,9 @@
 # SOTI AI Analyser — Security & Data-Protection Assessment
 
 **Audience:** SOTI internal security / data-protection review, prior to global rollout.
-**Scope:** Chrome MV3 extension in this repository (`sidepanel.js`, `background.js`, `content.js`, `manifest.json`, bundled `lib/` and `knowledge/`).
-**Status:** Code-level technical assessment. It is a strong input to — **not a replacement for** — an independent security review and penetration test.
-**Last updated:** 2026-07-03.
+**Scope:** Chrome MV3 extension in this repository (`sidepanel.js`, `background.js`, `content.js`, `manifest.json`, bundled `lib/` and `knowledge/`) **and the bundled offline installer** (`setup_local_ai.bat` / `setup_local_ai.ps1`).
+**Status:** Code-level assessment **plus a dynamic penetration test** (§14). Still a strong input to — **not a replacement for** — an independent security review of the packed/signed artefact.
+**Last updated:** 2026-07-04.
 
 ---
 
@@ -170,9 +170,42 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 - Removed the misleading no-op `scrubPII()` wrapper.
 - Removed the unused `declarativeNetRequest` permission and its dead service-worker code.
 - Extended case retention to 30 days; added 90-day retention purge for learned insights.
+- **Scoped `OLLAMA_ORIGINS`** in the installer from `*` to the extension + standalone origins only (see §14.1).
+- **Made winget (verified package) the primary Ollama install path** ahead of the remote-script installer (see §14.2).
+- **Hardened the Pulse-sync domain check** from a substring match to strict hostname parsing (see §14.4).
 
 ---
 
 ## 13. Scope & disclaimer
 
-This assessment covers the extension source in this repository at the stated date. It does **not** cover: the security of the Ollama installation or host OS, Salesforce-side access controls, physical/endpoint security, or the organisational GDPR programme. It is an engineering assessment and must be validated by the security team's own review and an independent penetration test before global rollout.
+This assessment covers the extension source in this repository at the stated date. It does **not** cover: the security of the host OS, Salesforce-side access controls, physical/endpoint security, or the organisational GDPR programme. It is an engineering assessment and must be validated by the security team's own review and an independent penetration test of the packed/signed artefact before global rollout.
+
+---
+
+## 14. Penetration test — findings & resolutions
+
+A dynamic pentest was performed against the running application (live browser: network capture, CSP-violation instrumentation, 14 HTML-injection payloads, ReDoS timing) **and** against a live local Ollama instance. Findings and their resolutions:
+
+### 14.1 [HIGH → RESOLVED] Local Ollama API exposed to any website (permissive CORS)
+- **Found:** the installer set `OLLAMA_ORIGINS=*`, disabling Ollama's CORS protection. Proven live — a browser page at an unrelated origin (`http://127.0.0.1:8765`, not the extension) successfully called `POST /api/chat` on the local model and received `Access-Control-Allow-Origin: *`. Any website the analyst visits could reach the local model.
+- **Resolved:** `setup_local_ai.ps1` now sets `OLLAMA_ORIGINS="chrome-extension://*,http://localhost:8765,http://127.0.0.1:8765"` — the extension and standalone page only.
+- **Verified:** on a temporary scoped instance, arbitrary web origins (`evil.example.com`, `random-ad-network.com`, `attacker.local`) receive **no** `Access-Control-Allow-Origin` header (browser denies them), while the extension and standalone origins are allowed.
+- **For managed rollout:** replace `chrome-extension://*` with the pinned extension ID (`chrome-extension://<id>`).
+
+### 14.2 [HIGH → MITIGATED] Unverified remote code execution in the installer
+- **Found:** the installer fetched `https://ollama.com/install.ps1` and ran it via `Invoke-Expression` with no integrity check ("fetch-and-eval"), with full user privileges outside the browser sandbox.
+- **Mitigated:** the installer now tries **winget first** (`winget install Ollama.Ollama` — a signed, hash-verified package), so the common case never fetch-and-evals. The official script remains only as a fallback for machines without winget.
+- **Residual (accept-risk):** the fallback still trusts `ollama.com` over HTTPS (the vendor's own documented method). For a locked-down rollout, pre-stage a vetted Ollama installer via managed software deployment instead of per-machine internet fetch.
+
+### 14.3 [MEDIUM] No encryption at rest — unchanged, open by prior decision (see §9.1).
+
+### 14.4 [LOW → RESOLVED] Weak substring domain check
+- **Found:** `isPulseUrl = url.includes('pulse.soti.net')` would also accept `pulse.soti.net.attacker.example`.
+- **Resolved:** now `new URL(url).hostname === 'pulse.soti.net'`. **Verified:** real Pulse URLs accepted; subdomain-spoof, path-spoof, and credential-spoof (`pulse.soti.net@attacker.example`) all rejected. (Chrome `host_permissions` remain an independent second layer.)
+
+### 14.5 Controls that held under active attack (verified, no change needed)
+- **14 HTML-injection payloads** (external `<img>` beacon, SVG `onload`, `<script>`, meta-refresh, form-action hijack, `object`/`embed`, `<base href>`, CSS `@import`, `javascript:` URI, `onerror`, `data:` URI script, iframe `srcdoc`) — **all neutralised** by `md()` escaping; none reached the DOM as a live element.
+- **CSP as an independent second layer** — with escaping deliberately bypassed (raw `innerHTML`), the external image beacon was still **blocked** (`securitypolicyviolation`, `img-src`, `enforce`) and SVG `onload` did **not** execute.
+- **ReDoS** — all 506 regex literals scanned; the one flagged pattern ran in 4 ms against a 300 KB pathological payload. No catastrophic backtracking.
+- **No** `eval`/`new Function`/dynamic-string timers in app code; **no** hardcoded secrets; download filenames are hardcoded (no path traversal); tab/case names use `.textContent`.
+- **Network egress** during full normal usage: only `127.0.0.1:11434` (Ollama), `pulse.soti.net` (first-party), and local files.
