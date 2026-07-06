@@ -7457,6 +7457,73 @@ $('btnPop').onclick = () => {
 
 
 
+// --- JIRA "Log Analysis" sourcing ---------------------------------------------------------
+// The JIRA report's Log Analysis field MUST mirror the forensic analysis the AI already
+// produced in this case's conversation (its "Chronological Triage" table), NOT a separately
+// re-derived set of events. Previously the JIRA builder recomputed high-signal events from
+// scratch, so the report showed unrelated lines (SIGABRT / SyncML / Vpp reminders) instead of
+// the actual root-cause events the forensic report surfaced (keystore2 OUT_OF_KEYS,
+// UnspecificError, IllegalStateException). These helpers lift the real triage table verbatim.
+
+// Pull the data rows of the "Chronological Triage" table out of a forensic report. Returns the
+// pipe-delimited event rows (header + markdown separator dropped) or null when no table is found.
+function extractForensicTriageTable(content) {
+    if (!content) return null;
+    const lines = content.split('\n');
+    let start = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (/chronological\s+(?:error\s+)?triage/i.test(lines[i])) { start = i; break; }
+    }
+    if (start === -1) return null;
+    const rows = [];
+    for (let i = start + 1; i < lines.length; i++) {
+        const t = lines[i].trim();
+        if (t.startsWith('|')) { rows.push(t); continue; }
+        if (rows.length > 0) break;      // table finished
+        if (t === '') continue;          // blank line(s) between heading and table
+        if (/^#{1,6}\s/.test(t)) break;  // next heading reached, no table under this one
+        if (i - start > 8) break;        // table isn't directly beneath the heading — give up
+    }
+    if (!rows.length) return null;
+    // Standard markdown table: rows[0]=header, rows[1]=separator, rest=data. Return only the
+    // data rows so the JIRA code block shows the events themselves (matches the report).
+    if (rows.length >= 2 && /^\|[\s|:-]+\|$/.test(rows[1])) {
+        const data = rows.slice(2);
+        return data.length ? data.join('\n') : null;
+    }
+    const cleaned = rows.filter(r => !/^\|[\s|:-]+\|$/.test(r));
+    return cleaned.length ? cleaned.join('\n') : null;
+}
+
+// Scan the case conversation (newest first) for the most recent forensic report and return its
+// triage table. If a forensic report exists but has no parseable table, return the whole report
+// so the JIRA still reflects the real analysis. Returns null when no forensic report is present.
+function extractForensicLogAnalysis(c) {
+    if (!c || !Array.isArray(c.msgs)) return null;
+    for (let i = c.msgs.length - 1; i >= 0; i--) {
+        const m = c.msgs[i];
+        if (!m || m.role !== 'assistant' || !m.content) continue;
+        const content = m.content;
+        if (!/(Forensic Analysis|Chronological\s+(?:Error\s+)?Triage|Propagation Path|Root Cause)/i.test(content)) continue;
+        const table = extractForensicTriageTable(content);
+        if (table) return table;
+        return content.trim();
+    }
+    return null;
+}
+
+// Deterministically force the exact analysis into the FIRST {code:java} block that follows a
+// "Log Analysis:" label, so a small local model can't paraphrase, truncate, or reorder it.
+// Uses a replacer function so `$` characters inside log messages are inserted literally.
+function injectForensicLogAnalysis(text, block) {
+    if (!text || !block) return text;
+    const re = /(Log Analysis:[^\n]*\n\s*\{code:java\}\s*\n)([\s\S]*?)(\n\s*\{code\})/i;
+    if (re.test(text)) {
+        return text.replace(re, (_m, p1, _p2, p3) => p1 + block + p3);
+    }
+    return text;
+}
+
 $('btnJira').onclick = () => {
     $('mJiraReview').style.display = 'flex';
 };
@@ -7577,6 +7644,14 @@ $('btnGenerateJira').onclick = async () => {
         rawSnippets = "[No high-signal SQL or MSI logs detected]";
     }
 
+    // Source the Log Analysis block from the forensic report the AI already produced in this
+    // conversation. Only fall back to the freshly parsed high-signal snippets when the case has
+    // no forensic report yet — that keeps the JIRA consistent with what the analyst saw on screen.
+    const forensicLogAnalysis = extractForensicLogAnalysis(c);
+    const logAnalysisBlock = (forensicLogAnalysis && forensicLogAnalysis.trim())
+        ? forensicLogAnalysis.trim()
+        : rawSnippets.trim();
+
     const prefilledAgentVer = agentVer !== 'N/A' ? agentVer : 'TBC';
     const prefilledSotiVer = sotiVer !== 'N/A' ? sotiVer : 'TBC';
     const prefilledPlatform = platform !== 'N/A' ? platform : 'TBC';
@@ -7598,7 +7673,7 @@ h3. *Known Issues:*
 h3. *Detailed Description of Business Impact:*
  * ${impact !== 'N/A' ? impact : '[AI: Generate business impact summary]'}
 
-h3. *Justification of Priority:*
+h3. *Justification of Priority:* (Please refer to [https://jira.soti.net/secure/ShowConstantsHelp.jspa?decorator=popup#PriorityLevels] for priority descriptions. It is mandatory that the Jira priority has a valid justification.)
  * [AI: Provide a clear justification for why this is ${priority} priority]
 
 h3. *Number of Devices Affected:*
@@ -7646,18 +7721,18 @@ Affected OEM Version: TBC
 
 Browser Used (If applicable): N/A
 
-*------------------------------------------------------------------------------------------------------------*
+*----------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Other SOTI Apps*{color}
 
 SOTI Surf/Settings Manager/HUB version: N/A
 
-*------------------------------------------------------------------------------------------------------------*
+*----------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Troubleshooting Steps:*{color}
 
 *Workarounds Suggested:*
  * [AI: List workarounds attempted or suggested based on context]
 
-*------------------------------------------------------------------------------------------------------------*
+*----------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Issue Reproduction*{color}
 
 Repro Steps: PLEASE OUTLINE THE STEPS IN DETAIL
@@ -7671,11 +7746,8 @@ Results: [AI: Describe results of repro attempts if any]
 
 Screenshot and video of the issue: TBC
 
-*------------------------------------------------------------------------------------------------------------*
+*----------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Log Details*{color}
- * If each log file <15 MB, attach directly to the ticket
- * If log file >15 MB, share log location under S:\\CustomerData
- * If SFTP is needed, please share link and use Password State to share the credentials
 
 *Detailed Time Stamps and Time zone (device and end-user) of the repro steps:* TBC
 
@@ -7685,10 +7757,14 @@ Name of the log file: ${prefilledLogNames}
 
 Log Analysis:
 {code:java}
-${rawSnippets.trim()}
+${logAnalysisBlock}
 {code}
 
-*------------------------------------------------------------------------------------------------------------*
+Keyword for better formatting and visibility
+{code:java}
+ {code}
+
+*----------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*L3/SME Engineer*{color}
 
 Name: TBC
@@ -7706,11 +7782,13 @@ Otherwise, why was L3/SME not consulted: Consulted SOTI AI Analyser`;
 3. For BACKGROUND -> Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
 5. For Troubleshooting Steps and L3/SME Engineer Analysis: Formulate a highly detailed, professional engineering analysis explaining the likely root cause and mechanics of the failure based on the notes and logs.
+6. REPRODUCE EVERY SECTION AND EVERY FIELD LABEL of the template in order. Do NOT drop any field (e.g. Plug-in version, Affected Model, Browser Used), any section header, or the L3/SME Engineer block. If you have no value for a field, keep the field and leave its pre-filled value (TBC / N/A) intact.
 
 ### FORMATTING RULES:
 - OUTPUT ONLY the completed SOTI JIRA template.
 - DO NOT include any preamble, introduction, or concluding remarks.
 - PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
+- The template contains TWO {code:java} blocks: the "Log Analysis" block and the "Keyword for better formatting and visibility" block. Keep BOTH. Copy the Log Analysis code block VERBATIM — do not edit, summarise, reorder, or re-derive the log events inside it. Leave the "Keyword" code block empty.
 - YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
 
     const userPrompt = `### SOURCE DATA FOR ANALYSIS:
@@ -7785,6 +7863,9 @@ ${JIRA_TEMPLATE}`;
         }
         // Strip any <think>...</think> blocks from the response
         filled = filled.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+        // Guarantee the Log Analysis block is the forensic analysis verbatim, even if the model
+        // paraphrased or truncated it while filling the template.
+        filled = injectForensicLogAnalysis(filled, logAnalysisBlock);
         $('mGen').style.display = 'none';
         if (!filled) return toast('JIRA generation failed', 'e');
         $('jiraTa').value = filled;
