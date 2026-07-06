@@ -1,12 +1,5 @@
 # SOTI AI Analyser — Security & Data-Protection Assessment
 
-**Audience:** SOTI internal security / data-protection review, prior to global rollout.
-**Scope:** Chrome MV3 extension in this repository (`sidepanel.js`, `background.js`, `content.js`, `manifest.json`, bundled `lib/` and `knowledge/`) **and the bundled offline installer** (`setup_local_ai.bat` / `setup_local_ai.ps1`).
-**Status:** Code-level assessment **plus a dynamic penetration test** (§14). Still a strong input to — **not a replacement for** — an independent security review of the packed/signed artefact.
-**Last updated:** 2026-07-04.
-
----
-
 ## 1. Executive summary
 
 The application has a **privacy-favourable, local-first architecture**:
