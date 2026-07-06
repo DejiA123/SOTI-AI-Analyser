@@ -7524,6 +7524,82 @@ function injectForensicLogAnalysis(text, block) {
     return text;
 }
 
+// ---------------------------------------------------------------------------
+// JIRA "Log Analysis" block — deterministic evidence, never conversational text
+// ---------------------------------------------------------------------------
+// The Log Analysis section of a JIRA ticket MUST contain the forensic Chronological
+// Triage table (| Timestamp | Location | Event |) produced by log analysis — NOT
+// whatever the latest assistant turn happened to be (a case summary, an "are you
+// sure?" reply). Left to the LLM, the model grabs the most recent "analysis-like"
+// text from the chat history and drops it into the code block, which is exactly the
+// bug being fixed. These two helpers pull the real triage table out of the last
+// forensic report and force it into the generated ticket regardless of the model.
+
+// Pull the DATA rows of the most recent "Chronological Triage" table from the
+// conversation. Returns the rows joined by newlines, or null if no forensic report
+// with a triage table exists in this case.
+function extractForensicTriageForJira(c) {
+    if (!c || !Array.isArray(c.msgs)) return null;
+
+    const isTableRow      = (row) => /^\s*\|.*\|\s*$/.test(row);
+    const isSeparatorRow  = (row) => /^\s*\|[\s:\-|]+\|?\s*$/.test(row);
+    const isTriageHeader   = (row) => /\btimestamp\b/i.test(row) && /\b(event|location)\b/i.test(row);
+
+    for (let i = c.msgs.length - 1; i >= 0; i--) {
+        const m = c.msgs[i];
+        if (!m || m.role !== 'assistant' || typeof m.content !== 'string') continue;
+        const lines = m.content.split('\n');
+
+        // Anchor on the "Chronological Triage" heading; otherwise fall back to any
+        // table whose header row is the triage signature (Timestamp + Event/Location).
+        let startIdx = -1;
+        const headingIdx = lines.findIndex(l => /chronological\s+triage/i.test(l));
+        if (headingIdx !== -1) {
+            startIdx = headingIdx + 1;
+        } else {
+            const hdrIdx = lines.findIndex(isTriageHeader);
+            if (hdrIdx === -1) continue; // no triage table in this message
+            startIdx = hdrIdx;
+        }
+
+        // Skip forward to the first table row, then collect the contiguous | block.
+        let j = startIdx;
+        while (j < lines.length && !isTableRow(lines[j])) j++;
+        const rows = [];
+        while (j < lines.length && isTableRow(lines[j])) {
+            rows.push(lines[j].trim());
+            j++;
+        }
+
+        // Keep only real data rows: drop the header (Timestamp/Event) and separator (---).
+        const dataRows = rows.filter(r => !isSeparatorRow(r) && !isTriageHeader(r));
+        if (dataRows.length > 0) return dataRows.join('\n');
+    }
+    return null;
+}
+
+// Overwrite whatever the model produced inside the JIRA "Log Analysis:" code block
+// with our verified evidence. This is the guarantee — the model is never trusted to
+// preserve this block. `logAnalysisContent` is the deterministic triage/evidence text.
+function enforceJiraLogAnalysis(jira, logAnalysisContent) {
+    if (!jira || !logAnalysisContent) return jira;
+    const block = `Log Analysis:\n{code:java}\n${logAnalysisContent}\n{code}`;
+
+    // Primary: replace "Log Analysis:" plus the immediately following {code...}...{code}
+    // block (first closing {code} wins, so a later code block is left untouched).
+    const rx = /Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
+    if (rx.test(jira)) return jira.replace(rx, block);
+
+    // Fallback: the model dropped the code block. Replace from "Log Analysis:" up to
+    // the next section separator / heading so nothing else is disturbed.
+    const rx2 = /Log Analysis:[\s\S]*?(?=\r?\n\*-{3,}|\r?\nh1\.|\r?\n\*\{color|$)/;
+    if (/Log Analysis:/.test(jira)) return jira.replace(rx2, block + '\n');
+
+    return jira;
+}
+
+
+
 $('btnJira').onclick = () => {
     $('mJiraReview').style.display = 'flex';
 };
@@ -7644,23 +7720,20 @@ $('btnGenerateJira').onclick = async () => {
         rawSnippets = "[No high-signal SQL or MSI logs detected]";
     }
 
-    // Source the Log Analysis block from the forensic report the AI already produced in this
-    // conversation. Only fall back to the freshly parsed high-signal snippets when the case has
-    // no forensic report yet — that keeps the JIRA consistent with what the analyst saw on screen.
-    const forensicLogAnalysis = extractForensicLogAnalysis(c);
-    const logAnalysisBlock = (forensicLogAnalysis && forensicLogAnalysis.trim())
-        ? forensicLogAnalysis.trim()
-        : rawSnippets.trim();
+ 
+    // The Log Analysis block is deterministic evidence, never model prose. Prefer the
+    // Chronological Triage table from the most recent forensic report; fall back to the
+    // parsed raw snippets when no forensic analysis has been run in this case.
+    const logAnalysisContent = extractForensicTriageForJira(c) || rawSnippets.trim();
+
+
 
     const prefilledAgentVer = agentVer !== 'N/A' ? agentVer : 'TBC';
     const prefilledSotiVer = sotiVer !== 'N/A' ? sotiVer : 'TBC';
     const prefilledPlatform = platform !== 'N/A' ? platform : 'TBC';
     const prefilledLogNames = c.logs.length > 0 ? c.logs.map(l => l.name).join(', ') : 'N/A';
 
-    const JIRA_TEMPLATE = `*{color:#de350b}Requirements for the Jira Filing: [https://wiki.soti.net/index.php?title=Artifacts_Required_for_Jira]{color}*
-
-*{color:#de350b}Please fill in all the details.{color}*
-h1. {color:#4c9aff}*Background*{color}
+    const JIRA_TEMPLATE = `
 h3. *Description of Issue:*
  * [AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]
 
@@ -7757,7 +7830,7 @@ Name of the log file: ${prefilledLogNames}
 
 Log Analysis:
 {code:java}
-${logAnalysisBlock}
+${logAnalysisContent}
 {code}
 
 Keyword for better formatting and visibility
@@ -7769,16 +7842,16 @@ h1. {color:#4c9aff}*L3/SME Engineer*{color}
 
 Name: TBC
 
-Analysis:
-[AI: Write a professional, detailed engineering analysis explaining the failure mechanics]
+Analysis: TBC
 
-Otherwise, why was L3/SME not consulted: Consulted SOTI AI Analyser`;
+Otherwise, why was L3/SME not consulted: TBC`;
 
     const systemPrompt = `You are a SOTI Tier 3 Support AI. Your task is to refine and fill in the OFFICIAL SOTI JIRA TEMPLATE using the provided Source Data.
 
 ### CRITICAL INSTRUCTIONS:
 1. Replace all placeholders (like "[AI: ...]") with intelligent, detailed technical text generated from the notes, case summary, conversation history, and repro steps.
 2. DO NOT modify or remove the pre-filled values in the template (such as SQL Version, Server OS Version, Agent Version, Name of the log file, or the raw log snippets inside the code block) unless you have more specific information to update them with.
+2a. The "Log Analysis:" {code:java} block is VERBATIM forensic evidence (a Timestamp | Location | Event table). Reproduce it EXACTLY as given. NEVER replace it with a case summary, a chat answer, prose, or your own analysis — that content belongs in the L3/SME Engineer Analysis section, not the Log Analysis code block.
 3. For BACKGROUND -> Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
 5. For Troubleshooting Steps and L3/SME Engineer Analysis: Formulate a highly detailed, professional engineering analysis explaining the likely root cause and mechanics of the failure based on the notes and logs.
@@ -7788,8 +7861,8 @@ Otherwise, why was L3/SME not consulted: Consulted SOTI AI Analyser`;
 - OUTPUT ONLY the completed SOTI JIRA template.
 - DO NOT include any preamble, introduction, or concluding remarks.
 - PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
-- The template contains TWO {code:java} blocks: the "Log Analysis" block and the "Keyword for better formatting and visibility" block. Keep BOTH. Copy the Log Analysis code block VERBATIM — do not edit, summarise, reorder, or re-derive the log events inside it. Leave the "Keyword" code block empty.
-- YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
+- The template contains TWO {code:java} blocks: the "Log Analysis" block and the "Keyword for better formatting and visibility" block. Keep BOTH. Copy the Log Analysis code block VERBATIM — do not edit, summarise, reorder, or re-derive the log events inside it. Leave the "Keyword" code block empty.`;
+//- YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
 
     const userPrompt = `### SOURCE DATA FOR ANALYSIS:
 - Case Number: ${caseNum}
@@ -7863,9 +7936,10 @@ ${JIRA_TEMPLATE}`;
         }
         // Strip any <think>...</think> blocks from the response
         filled = filled.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
-        // Guarantee the Log Analysis block is the forensic analysis verbatim, even if the model
-        // paraphrased or truncated it while filling the template.
-        filled = injectForensicLogAnalysis(filled, logAnalysisBlock);
+        // Deterministically force the Log Analysis code block back to the verified forensic
+        // evidence. The model is never trusted to preserve it — this is what stops the block
+        // from being filled with a case summary / "are you sure?" reply instead of the triage.
+        filled = enforceJiraLogAnalysis(filled, logAnalysisContent);
         $('mGen').style.display = 'none';
         if (!filled) return toast('JIRA generation failed', 'e');
         $('jiraTa').value = filled;
