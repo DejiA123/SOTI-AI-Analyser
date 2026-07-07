@@ -7448,6 +7448,215 @@ $('btnPop').onclick = () => {
 
 
 
+// ---------------------------------------------------------------------------
+// JIRA "Log Analysis" block — deterministic evidence, never conversational text
+// ---------------------------------------------------------------------------
+// The Log Analysis section of a JIRA ticket MUST contain the forensic Chronological
+// Triage table (| Timestamp | Location | Event |) produced by log analysis — NOT
+// whatever the latest assistant turn happened to be (a case summary, an "are you
+// sure?" reply). Left to the LLM, the model grabs the most recent "analysis-like"
+// text from the chat history and drops it into the code block, which is exactly the
+// bug being fixed. These two helpers pull the real triage table out of the last
+// forensic report and force it into the generated ticket regardless of the model.
+
+// Pull the DATA rows of the most recent "Chronological Triage" table from the
+// conversation. Returns the rows joined by newlines, or null if no forensic report
+// with a triage table exists in this case.
+function extractForensicTriageForJira(c) {
+    if (!c || !Array.isArray(c.msgs)) return null;
+
+    const isTableRow      = (row) => /^\s*\|.*\|\s*$/.test(row);
+    const isSeparatorRow  = (row) => /^\s*\|[\s:\-|]+\|?\s*$/.test(row);
+    const isTriageHeader   = (row) => /\btimestamp\b/i.test(row) && /\b(event|location)\b/i.test(row);
+
+    for (let i = c.msgs.length - 1; i >= 0; i--) {
+        const m = c.msgs[i];
+        if (!m || m.role !== 'assistant' || typeof m.content !== 'string') continue;
+        const lines = m.content.split('\n');
+
+        // Anchor on the "Chronological Triage" heading; otherwise fall back to any
+        // table whose header row is the triage signature (Timestamp + Event/Location).
+        let startIdx = -1;
+        const headingIdx = lines.findIndex(l => /chronological\s+triage/i.test(l));
+        if (headingIdx !== -1) {
+            startIdx = headingIdx + 1;
+        } else {
+            const hdrIdx = lines.findIndex(isTriageHeader);
+            if (hdrIdx === -1) continue; // no triage table in this message
+            startIdx = hdrIdx;
+        }
+
+        // Skip forward to the first table row, then collect the contiguous | block.
+        let j = startIdx;
+        while (j < lines.length && !isTableRow(lines[j])) j++;
+        const rows = [];
+        while (j < lines.length && isTableRow(lines[j])) {
+            rows.push(lines[j].trim());
+            j++;
+        }
+
+        // Keep only real data rows: drop the header (Timestamp/Event) and separator (---).
+        const dataRows = rows.filter(r => !isSeparatorRow(r) && !isTriageHeader(r));
+        if (dataRows.length > 0) return dataRows.join('\n');
+    }
+    return null;
+}
+
+// Overwrite whatever the model produced inside the JIRA "Log Analysis:" code block
+// with our verified evidence. This is the guarantee — the model is never trusted to
+// preserve this block. `logAnalysisContent` is the deterministic triage/evidence text.
+function enforceJiraLogAnalysis(jira, logAnalysisContent) {
+    if (!jira || !logAnalysisContent) return jira;
+    const block = `Log Analysis:\n{code:java}\n${logAnalysisContent}\n{code}`;
+
+    // Primary: replace "Log Analysis:" plus the immediately following {code...}...{code}
+    // block (first closing {code} wins, so a later code block is left untouched).
+    const rx = /Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
+    if (rx.test(jira)) return jira.replace(rx, block);
+
+    // Fallback: the model dropped the code block. Replace from "Log Analysis:" up to
+    // the next section separator / heading so nothing else is disturbed.
+    const rx2 = /Log Analysis:[\s\S]*?(?=\r?\n\*-{3,}|\r?\nh1\.|\r?\n\*\{color|$)/;
+    if (/Log Analysis:/.test(jira)) return jira.replace(rx2, block + '\n');
+
+    return jira;
+}
+
+// Pull the single most salient error keyword out of each Log Analysis row — the token an
+// engineer would grep for (an exception class, an error constant, a quoted error value).
+// Feeds the JIRA "Keyword for better formatting and visibility" block. Deterministic: one
+// keyword per row, de-duplicated, order preserved. Returns "" when nothing matches.
+function extractLogAnalysisKeywords(logAnalysisContent) {
+    if (!logAnalysisContent) return "";
+
+    // The Event column is everything after the 2nd pipe in a "| ts | loc | event |" row;
+    // for non-table lines, use the whole line.
+    const eventOf = (line) => {
+        const inner = line.replace(/^\s*\|/, '').replace(/\|\s*$/, '');
+        const parts = inner.split('|');
+        return (parts.length >= 3 ? parts.slice(2).join('|') : line).trim();
+    };
+
+    // First pattern that matches an Event wins (highest signal first).
+    const patterns = [
+        /\b([a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+\.[A-Z][A-Za-z0-9]+)\b/, // java.lang.IllegalStateException
+        /"Error"\s*:\s*"([^"]+)"/i,                                     // "Error":"UnspecificError"
+        /r#([A-Za-z_][A-Za-z0-9_]{2,})/,                               // Error::Rc(r#OUT_OF_KEYS_PERMANENT_ERROR)
+        /\b([A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+)\b/,                      // OUT_OF_KEYS_PERMANENT_ERROR (ALL_CAPS)
+        /\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout|Denied|Refused))\b/, // IllegalStateException
+    ];
+
+    const seen = new Set();
+    const keywords = [];
+    for (const raw of logAnalysisContent.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        const event = eventOf(line);
+        for (const rx of patterns) {
+            const m = event.match(rx);
+            if (m && m[1]) {
+                const kw = m[1].trim();
+                if (!seen.has(kw)) { seen.add(kw); keywords.push(kw); }
+                break; // one keyword per row
+            }
+        }
+    }
+    return keywords.join('\n');
+}
+
+// Post-generation guards for the two fields the model must never freelance:
+//  - the "Keyword for better formatting and visibility" block (forced to the extracted keywords)
+//  - the L3/SME "Analysis:" field (forced to TBC — an engineer fills it, not the AI)
+function enforceJiraKeywordBlock(jira, keywordContent) {
+    if (!jira) return jira;
+    const block = `Keyword for better formatting and visibility\n{code:java}\n${keywordContent || ''}\n{code}`;
+    const rx = /Keyword for better formatting and visibility\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
+    if (rx.test(jira)) return jira.replace(rx, block);
+    // Block missing — insert it right after the Log Analysis code block.
+    const laRx = /(Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\})/;
+    if (laRx.test(jira)) return jira.replace(laRx, `$1\n\n${block}`);
+    return jira;
+}
+
+// The trailing L3/SME Engineer section is entirely static (an L3 engineer fills it, not the AI).
+// Kept as a single source of truth used by both the template and the reconstruction guard below.
+function getJiraL3SmeSection() {
+    return `*------------------------------------------------------------------------------------------------------------*
+h1. {color:#4c9aff}*L3/SME Engineer*{color}
+
+Name: TBC
+
+Analysis: TBC
+
+Otherwise, why was L3/SME not consulted: TBC`;
+}
+
+// Guarantee the L3/SME section exists and its Analysis stays TBC. Small local models sometimes
+// DROP this all-TBC section entirely (they were told not to write an analysis there), so if the
+// heading is missing we append the canonical section; if it is present we force Analysis to TBC.
+function ensureJiraL3Section(jira) {
+    if (!jira) return jira;
+    if (/L3\/SME Engineer/.test(jira)) {
+        // Present — force everything between "Analysis:" and "Otherwise, why..." to TBC, and
+        // force the "Otherwise, why..." value to TBC as well so neither field can drift.
+        const rx = /(L3\/SME Engineer[\s\S]*?\bAnalysis\s*:)[\s\S]*?(?=\r?\n[ \t]*Otherwise, why was L3\/SME not consulted)/;
+        if (rx.test(jira)) jira = jira.replace(rx, '$1 TBC\n');
+        jira = jira.replace(/(Otherwise, why was L3\/SME not consulted:)[^\n]*/, '$1 TBC');
+        return jira;
+    }
+    // Missing entirely — append the canonical section (dropping any dangling trailing separator).
+    const base = jira.replace(/\s+$/, '').replace(/\n?\*-{3,}\*\s*$/, '').replace(/\s+$/, '');
+    return base + '\n\n' + getJiraL3SmeSection() + '\n';
+}
+
+// Name the log files actually in play. Prefer the case's uploaded logs; otherwise recover the
+// filenames referenced in the forensic evidence (triage rows + report) so the field never shows
+// "N/A" when the logs were analysed from pasted content rather than uploaded as files.
+function deriveJiraLogNames(c, logAnalysisContent) {
+    if (c && Array.isArray(c.logs) && c.logs.length > 0) {
+        const names = c.logs.map(l => l && l.name).filter(Boolean);
+        if (names.length) return names.join(', ');
+    }
+    const found = new Set();
+    const scan = (text) => {
+        if (!text) return;
+        const rx = /\b([A-Za-z0-9][A-Za-z0-9_.-]*\.log)\b/g;
+        let m;
+        while ((m = rx.exec(text)) !== null) found.add(m[1]);
+    };
+    scan(logAnalysisContent);
+    if (c && Array.isArray(c.msgs)) {
+        // Newest forensic report that references log files.
+        for (let i = c.msgs.length - 1; i >= 0; i--) {
+            const mm = c.msgs[i];
+            if (mm && mm.role === 'assistant' && /Chronological\s+Triage|\.log\b/i.test(mm.content || '')) {
+                scan(mm.content);
+                break;
+            }
+        }
+    }
+    return found.size > 0 ? [...found].join(', ') : 'N/A';
+}
+
+// The official template intentionally drops the Jira-wiki preamble, the Background heading, the
+// log-size handling notes, and the "outline the steps" repro placeholder. Strip them if the model
+// re-emits them from memory, and turn any leftover "[AI: ...]" placeholder into TBC so a raw
+// instruction never ships in the ticket.
+function cleanupJiraOutput(jira) {
+    if (!jira) return jira;
+    return jira
+        .replace(/\*\{color:#de350b\}Requirements for the Jira Filing:[^\n]*\r?\n?/gi, '')
+        .replace(/\*\{color:#de350b\}Please fill in all the details\.\{color\}\*[^\n]*\r?\n?/gi, '')
+        .replace(/^[ \t]*h1\.\s*\{color:#4c9aff\}\*Background\*\{color\}[ \t]*\r?\n?/gim, '')
+        .replace(/^[ \t]*\*\s*If each log file\b[^\n]*\r?\n?/gim, '')
+        .replace(/^[ \t]*\*\s*If log file\b[^\n]*\r?\n?/gim, '')
+        .replace(/^[ \t]*\*\s*If SFTP is needed\b[^\n]*\r?\n?/gim, '')
+        .replace(/[ \t]*PLEASE OUTLINE THE STEPS IN DETAIL[ \t]*/gi, '')
+        .replace(/\[AI:[^\]]*\]/g, 'TBC')
+        .replace(/^\s+/, '')          // drop leading blank lines left by the removed preamble
+        .replace(/\n{3,}/g, '\n\n');  // collapse gaps left by removed lines
+}
+
 $('btnJira').onclick = () => {
     $('mJiraReview').style.display = 'flex';
 };
@@ -7568,16 +7777,19 @@ $('btnGenerateJira').onclick = async () => {
         rawSnippets = "[No high-signal SQL or MSI logs detected]";
     }
 
+    // The Log Analysis block is deterministic evidence, never model prose. Prefer the
+    // Chronological Triage table from the most recent forensic report; fall back to the
+    // parsed raw snippets when no forensic analysis has been run in this case.
+    const logAnalysisContent = extractForensicTriageForJira(c) || rawSnippets.trim();
+    // The "Keyword for better formatting" block is the grep-able error tokens from those rows.
+    const keywordContent = extractLogAnalysisKeywords(logAnalysisContent);
+
     const prefilledAgentVer = agentVer !== 'N/A' ? agentVer : 'TBC';
     const prefilledSotiVer = sotiVer !== 'N/A' ? sotiVer : 'TBC';
     const prefilledPlatform = platform !== 'N/A' ? platform : 'TBC';
-    const prefilledLogNames = c.logs.length > 0 ? c.logs.map(l => l.name).join(', ') : 'N/A';
+    const prefilledLogNames = deriveJiraLogNames(c, logAnalysisContent);
 
-    const JIRA_TEMPLATE = `*{color:#de350b}Requirements for the Jira Filing: [https://wiki.soti.net/index.php?title=Artifacts_Required_for_Jira]{color}*
-
-*{color:#de350b}Please fill in all the details.{color}*
-h1. {color:#4c9aff}*Background*{color}
-h3. *Description of Issue:*
+    const JIRA_TEMPLATE = `h3. *Description of Issue:*
  * [AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]
 
 h3. *Expected Behavior:*
@@ -7651,22 +7863,18 @@ h1. {color:#4c9aff}*Troubleshooting Steps:*{color}
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Issue Reproduction*{color}
 
-Repro Steps: PLEASE OUTLINE THE STEPS IN DETAIL
-${repro !== 'N/A' ? repro : ' # Step 1\n # Step 2'}
+Repro Steps: ${repro !== 'N/A' ? repro : 'TBC'}
 
 Is the issue reproducible in-house?: TBC
 
 Repro Environment Details: TBC
 
-Results: [AI: Describe results of repro attempts if any]
+Results: TBC
 
 Screenshot and video of the issue: TBC
 
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Log Details*{color}
- * If each log file <15 MB, attach directly to the ticket
- * If log file >15 MB, share log location under S:\\CustomerData
- * If SFTP is needed, please share link and use Password State to share the credentials
 
 *Detailed Time Stamps and Time zone (device and end-user) of the repro steps:* TBC
 
@@ -7676,33 +7884,33 @@ Name of the log file: ${prefilledLogNames}
 
 Log Analysis:
 {code:java}
-${rawSnippets.trim()}
+${logAnalysisContent}
 {code}
 
-*------------------------------------------------------------------------------------------------------------*
-h1. {color:#4c9aff}*L3/SME Engineer*{color}
+Keyword for better formatting and visibility
+{code:java}
+${keywordContent}
+{code}
 
-Name: TBC
-
-Analysis:
-[AI: Write a professional, detailed engineering analysis explaining the failure mechanics]
-
-Otherwise, why was L3/SME not consulted: Consulted SOTI AI Analyser`;
+${getJiraL3SmeSection()}`;
 
     const systemPrompt = `You are a SOTI Tier 3 Support AI. Your task is to refine and fill in the OFFICIAL SOTI JIRA TEMPLATE using the provided Source Data.
 
 ### CRITICAL INSTRUCTIONS:
 1. Replace all placeholders (like "[AI: ...]") with intelligent, detailed technical text generated from the notes, case summary, conversation history, and repro steps.
 2. DO NOT modify or remove the pre-filled values in the template (such as SQL Version, Server OS Version, Agent Version, Name of the log file, or the raw log snippets inside the code block) unless you have more specific information to update them with.
-3. For BACKGROUND -> Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
+2a. The "Log Analysis:" {code:java} block AND the "Keyword for better formatting and visibility" {code:java} block are VERBATIM pre-filled evidence. Reproduce BOTH exactly as given. NEVER replace the Log Analysis block with a case summary, a chat answer, or prose, and NEVER edit the keyword list.
+2b. ALWAYS reproduce the entire "L3/SME Engineer" section (heading, Name, Analysis, and the "Otherwise, why was L3/SME not consulted" line). Leave its "Analysis:" field EXACTLY as "Analysis: TBC" — do NOT write an analysis there and do NOT drop the section; an L3 engineer fills it, not you.
+3. For Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
-5. For Troubleshooting Steps and L3/SME Engineer Analysis: Formulate a highly detailed, professional engineering analysis explaining the likely root cause and mechanics of the failure based on the notes and logs.
+5. For Troubleshooting Steps (Workarounds Suggested): List concrete workarounds/investigation steps from the notes and logs. Do NOT write an L3/SME engineering analysis anywhere — that field stays TBC (see 2b).
+6. Output the template EXACTLY as structured. Do NOT add a "Requirements for the Jira Filing" line, a "Please fill in all the details" line, a "Background" heading, log-file size/SFTP handling notes, or a "PLEASE OUTLINE THE STEPS IN DETAIL" line — these are intentionally omitted.
 
 ### FORMATTING RULES:
 - OUTPUT ONLY the completed SOTI JIRA template.
 - DO NOT include any preamble, introduction, or concluding remarks.
 - PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
-- YOUR RESPONSE MUST START WITH: "*{color:#de350b}Requirements for the Jira Filing:"`;
+- YOUR RESPONSE MUST START WITH: "h3. *Description of Issue:*"`;
 
     const userPrompt = `### SOURCE DATA FOR ANALYSIS:
 - Case Number: ${caseNum}
@@ -7776,6 +7984,17 @@ ${JIRA_TEMPLATE}`;
         }
         // Strip any <think>...</think> blocks from the response
         filled = filled.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+        // Deterministically force the model-owned-but-must-not-freelance fields:
+        //  - Log Analysis block back to the verified forensic evidence (stops it being filled
+        //    with a case summary / "are you sure?" reply instead of the triage).
+        //  - Keyword block to the extracted error tokens.
+        //  - L3/SME Analysis back to TBC.
+        filled = enforceJiraLogAnalysis(filled, logAnalysisContent);
+        filled = enforceJiraKeywordBlock(filled, keywordContent);
+        filled = ensureJiraL3Section(filled);
+        // Strip any boilerplate the model re-added (preamble, Background heading, log-size notes,
+        // "outline the steps") and neutralise leftover [AI: ...] placeholders.
+        filled = cleanupJiraOutput(filled);
         $('mGen').style.display = 'none';
         if (!filled) return toast('JIRA generation failed', 'e');
         $('jiraTa').value = filled;
