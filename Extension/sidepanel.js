@@ -5873,10 +5873,11 @@ const OllamaAI = {
             const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token (conservative → num_ctx stays generous, prompt never overflows)
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
 
-            // If the payload exceeds the context ceiling: drop oldest HISTORY messages first,
-            // then trim the SYSTEM prompt from its END. The system prompt is ordered
-            // [rules][logs][case/research], so end-trimming sacrifices the secondary
-            // case/research data — never the logs, and never the file manifest.
+            // If the payload exceeds the context ceiling: drop only the OLDEST history (the most
+            // recent turns are protected for conversational memory), then trim the SYSTEM prompt
+            // from its END. The system prompt is ordered [rules][logs][case/research], so
+            // end-trimming sacrifices the secondary case/research data — never the logs, never the
+            // file manifest, and never the recent conversation.
             // CRITICAL: the prompt MUST fit num_ctx with room left for the answer, otherwise
             // Ollama truncates the prompt to fill the window and the model can only emit ~1
             // token before hitting the limit (the "Based"/"It" single-word bug). maxAllowedChars
@@ -5890,11 +5891,20 @@ const OllamaAI = {
                 : ctxCeiling;
             const maxAllowedChars = Math.floor((budgetCtx - numPredict - 600) * CHARS_PER_TOKEN);
             if (totalChars > maxAllowedChars) {
-                // 1. Drop oldest history first (never system [0], never the final message).
-                while (totalChars > maxAllowedChars && messages.length > 2) {
+                // 1. Drop OLDER history first, but PROTECT the most recent turns so the model always
+                //    keeps short-term memory / context flow (it can answer "what did I just say?" and
+                //    build on the last few exchanges). Anything that still doesn't fit is taken out of
+                //    the bulky system prompt (persona + case info + email chain + RAG) by the end-trim
+                //    pass below — NOT by wiping the conversation. Without this guard a filled-in Case
+                //    Info / email chain fills the whole small-model budget, every prior turn was
+                //    dropped, and the AI behaved as if each message were the first one in the chat.
+                const RECENT_TURNS_PROTECTED = 8; // keep ~4 user+assistant exchanges verbatim
+                let droppable = messages.length - 1 - RECENT_TURNS_PROTECTED; // never touch system[0] or the last N
+                while (totalChars > maxAllowedChars && droppable > 0) {
                     const dropped = messages.splice(1, 1)[0];
                     totalChars -= (dropped.content ? dropped.content.length : 0);
-                    console.warn('[Ollama Request] Dropped oldest history message to fit context budget');
+                    droppable--;
+                    console.warn('[Ollama Request] Dropped an older history message to fit context budget');
                 }
                 // 2. Trim the LARGEST remaining message from its END until the prompt fits. This
                 //    covers BOTH the system prompt (normal mode: logs live there) AND the final
