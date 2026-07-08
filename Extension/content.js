@@ -159,6 +159,7 @@ function getFieldValue(labelEl) {
         const valueEl = fieldComponent.querySelector(
             'lightning-formatted-text, ' +
             'lightning-formatted-name, ' +
+            'lightning-formatted-number, ' +      // formula/number fields (e.g. Case Age in days)
             'lightning-formatted-url a, ' +
             'a[data-refid="recordId"], ' +
             'a[href*="/lightning/r/"], ' +
@@ -197,6 +198,7 @@ function scrapeSalesforce() {
         currentVersion: '',
         product: '',
         licenseType: '',
+        caseAge: '',
         emailChain: ''
     };
 
@@ -235,6 +237,9 @@ function scrapeSalesforce() {
         }
         if (text.includes('license type') && !data.licenseType) {
             data.licenseType = getFieldValue(label);
+        }
+        if (text.includes('case age') && !data.caseAge) {
+            data.caseAge = getFieldValue(label);
         }
     });
 

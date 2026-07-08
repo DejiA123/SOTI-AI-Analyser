@@ -231,8 +231,8 @@ function sanitizeAssistantResponse(text) {
 
 function getDefaultCI() {
     return {
-        caseNum: '', sotiVer: '', platform: '', agentVer: '',
-        scrubAccount: '', scrubCustomer: '', 
+        caseNum: '', sotiVer: '', platform: '', agentVer: '', caseAge: '',
+        scrubAccount: '', scrubCustomer: '',
         meetingNotes: 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:',
         issueSummary: '', product: '', emailChain: '',
         jiraExpected: '', jiraImpact: '', jiraPriority: 'Medium', jiraRepro: ''
@@ -271,6 +271,7 @@ function buildCaseCiFromForm() {
         sotiVer: $('sotiVer').value,
         platform: $('platform').value,
         agentVer: $('agentVer').value,
+        caseAge: $('caseAge').value,
         scrubAccount: $('scrubAccount').value,
         scrubCustomer: $('scrubCustomer').value,
         meetingNotes: $('meetingNotes').value,
@@ -540,6 +541,7 @@ function switchCase(id) {
         $('sotiVer').value = c.ci.sotiVer || '';
         $('platform').value = c.ci.platform || '';
         $('agentVer').value = c.ci.agentVer || '';
+        $('caseAge').value = c.ci.caseAge || '';
         $('scrubAccount').value = c.ci.scrubAccount || '';
         $('scrubCustomer').value = c.ci.scrubCustomer || '';
         $('meetingNotes').value = c.ci.meetingNotes || '';
@@ -3390,7 +3392,7 @@ function buildCaseContextForPrompt(ci, small) {
         return rest;
     }
     const out = {};
-    for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'issue_summary']) {
+    for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'case_age_days', 'issue_summary']) {
         if (ci[k]) out[k] = ci[k];
     }
     const mn = ci.meeting_notes;
@@ -4479,8 +4481,8 @@ function updateFieldValidation(id) {
 
 function updateAllValidations() {
     [
-        'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 
-        'agentVer', 'platform', 'enviro', 'dsCfg', 'affDev', 
+        'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer',
+        'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
         'issueSummary', 'meetingNotes', 'emailChain',
         'jiraExpected', 'jiraImpact', 'jiraRepro'
     ].forEach(updateFieldValidation);
@@ -6483,8 +6485,9 @@ async function send(overrideText = null, silent = false) {
         case_number: $('caseNum').value, 
         soti_version: $('sotiVer').value, 
         platform: $('platform').value,
-        agent_version: $('agentVer').value, 
-        account_scrub: $('scrubAccount').value, 
+        agent_version: $('agentVer').value,
+        case_age_days: $('caseAge').value,
+        account_scrub: $('scrubAccount').value,
         meeting_notes: $('meetingNotes').value,
         product: $('product').value,
         issue_summary: $('issueSummary').value,
@@ -7080,8 +7083,8 @@ $('chatIn').oninput = function() { this.style.height = 'auto'; this.style.height
 $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
 
 [
-    'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 
-    'agentVer', 'platform', 'enviro', 'dsCfg', 'affDev', 
+    'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer',
+    'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
     'issueSummary', 'meetingNotes', 'emailChain',
     'jiraExpected', 'jiraImpact', 'jiraRepro', 'jiraPriority'
 ].forEach(id => {
@@ -7132,7 +7135,7 @@ $('btnSyncSF').onclick = async () => {
             await new Promise(r => setTimeout(r, 500));
             data = await chrome.tabs.sendMessage(tab.id, { action: "GET_SALESFORCE_DATA" });
         }
-        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType)) {
+        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.caseAge)) {
             if (data.caseNumber) $('caseNum').value = data.caseNumber;
             if (data.accountName) $('scrubAccount').value = data.accountName;
             if (data.contactName) $('scrubCustomer').value = data.contactName;
@@ -7160,8 +7163,9 @@ $('btnSyncSF').onclick = async () => {
                 if (lt.includes('cloud')) $('dsCfg').value = 'Cloud';
                  if (lt.includes('subscription')) $('dsCfg').value = 'On-Prem';
             }
+            if (data.caseAge) $('caseAge').value = data.caseAge;
             if (data.emailChain) $('emailChain').value = data.emailChain;
-            
+
             saveState();
             renderTabs();
             renderLogs();
