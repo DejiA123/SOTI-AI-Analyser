@@ -154,6 +154,22 @@ function md(t) {
     return html.replace(/^(<br>|<div style="margin-bottom:18px"><\/div>|\s)+/, '').replace(/(<br>|<div style="margin-bottom:18px"><\/div>|\s)+$/, '');
 }
 
+// Strip leaked [EMAIL CHAIN] "Message N" markers from ANY model output. The numbering is
+// internal prompt structure; user-facing text must reference emails by author/date. Handles
+// parentheticals with any short lead-in ("(Provided in Message 23)", "(see Message 3)",
+// "(Message 19)"), inline references ("as noted in Message 4 of 13"), plural lists
+// ("Messages 3 and 5"), and bare noun uses ("Message 7 shows..."). "Message" is matched
+// case-SENSITIVELY (the markers always capitalize it) so real prose like
+// "the error message 404" is never touched.
+function stripEmailChainMarkers(text) {
+    return String(text)
+        .replace(/\s*\(\s*[^()]{0,40}?Messages?\s+\d+[^()]{0,24}?\s*\)/g, "")
+        .replace(/\b(?:in|from|per|at)\s+Message\s+\d+(?:\s+of\s+\d+)?\b/g, "in the email chain")
+        .replace(/\bMessage\s+\d+\s+of\s+\d+,?\s*/g, "the message ")
+        .replace(/\bMessages\s+\d+(?:\s*(?:,|and|&|to|through|[-–])\s*\d+)*\b/g, "earlier emails")
+        .replace(/\bMessage\s+\d+\b(?!\s*(?:of|\)))/g, "an email in the chain");
+}
+
 function sanitizeAssistantResponse(text) {
     if (!text) return "";
     
@@ -187,7 +203,7 @@ function sanitizeAssistantResponse(text) {
     const strayRx = new RegExp(`\\s*${labelRx.source}(?:,\\s*|\\s+and\\s+)?\\s*`, 'gi');
     const refRx = /\b(?:for more (?:detailed )?information|reference|see)\s*,?\s*(?:at\s*)?\[(?:DEEP RESEARCH|DEEP_RESEARCH|DEEPRESEARCH|DOCS SEARCH|DOCS_SEARCH|DOCSSEARCH|PULSE SEARCH|PULSE_SEARCH|PULSESEARCH)\][^\n.]*/gi;
     
-    return cleaned
+    cleaned = cleaned
         .replace(accordingRx, "")
         .replace(strayRx, " ")
         .replace(refRx, "")
@@ -199,10 +215,6 @@ function sanitizeAssistantResponse(text) {
         .replace(/:?\s*Lines?\s+[A-Z]\b(?:\s*-\s*[A-Z]\b)?/g, "")  // ":Line N" / "Lines X-Y" placeholders
         .replace(/\(\s*timestamp\s*\)/gi, "")
         .replace(/`?\bExceptionClass\b`?/g, "the exception")
-        // Strip leaked EMAIL CHAIN markers — "Message i of N" numbering is internal prompt
-        // structure; answers must cite emails by author/date instead ("(Message 12)" → gone).
-        .replace(/\s*\((?:see\s+|from\s+|in\s+|per\s+)?Message\s+\d+(?:\s+of\s+\d+)?\)/gi, "")
-        .replace(/\bMessage\s+\d+\s+of\s+\d+,?\s*/gi, "the message ")
         // Strip any "Based on …," preamble at the very START of the answer (the user never wants
         // the response to open with "Based on the provided documentation / the logs / …").
         .replace(/^\s*[Bb]ased (?:on|upon)\b[^,.\n]{0,90}[,:]\s*/, "")
@@ -214,6 +226,7 @@ function sanitizeAssistantResponse(text) {
         .replace(/[ \t]{2,}/g, " ")
         .replace(/\n {1,}/g, "\n")
         .trim();
+    return stripEmailChainMarkers(cleaned).replace(/[ \t]{2,}/g, " ").trim();
 }
 
 function getDefaultCI() {
@@ -7843,7 +7856,7 @@ function deriveJiraLogNames(c, logAnalysisContent) {
 // instruction never ships in the ticket.
 function cleanupJiraOutput(jira) {
     if (!jira) return jira;
-    return jira
+    return stripEmailChainMarkers(jira)
         .replace(/\*\{color:#de350b\}Requirements for the Jira Filing:[^\n]*\r?\n?/gi, '')
         .replace(/\*\{color:#de350b\}Please fill in all the details\.\{color\}\*[^\n]*\r?\n?/gi, '')
         .replace(/^[ \t]*h1\.\s*\{color:#4c9aff\}\*Background\*\{color\}[ \t]*\r?\n?/gim, '')
