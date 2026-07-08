@@ -5551,6 +5551,13 @@ function updateVersionDropdowns() {
     if (prod === 'SOTI Identity') {
         sotiOpts = IDENTITY_VERSIONS;
         agentOpts = []; // Identity doesn't have an 'Agent' version in this context
+    } else {
+        // Salesforce reports the 2026.0 GA release as "2026.0", but the MobiControl
+        // release-notes scrape lists it as "2026.0.0" — so that one option never matched
+        // the value pushed by "Sync from Salesforce" and silently failed to populate.
+        // Normalize just that entry (dedup in case "2026.0" is already present) so it syncs
+        // like every other version. VERSIONS itself is left untouched.
+        sotiOpts = [...new Set(sotiOpts.map(v => v === '2026.0.0' ? '2026.0' : v))];
     }
 
     $('sotiVer').innerHTML = '<option value="">— Select —</option>' + sotiOpts.map(v => `<option value="${v}">${v}</option>`).join('');
