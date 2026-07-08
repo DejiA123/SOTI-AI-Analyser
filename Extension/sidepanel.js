@@ -199,6 +199,10 @@ function sanitizeAssistantResponse(text) {
         .replace(/:?\s*Lines?\s+[A-Z]\b(?:\s*-\s*[A-Z]\b)?/g, "")  // ":Line N" / "Lines X-Y" placeholders
         .replace(/\(\s*timestamp\s*\)/gi, "")
         .replace(/`?\bExceptionClass\b`?/g, "the exception")
+        // Strip leaked EMAIL CHAIN markers — "Message i of N" numbering is internal prompt
+        // structure; answers must cite emails by author/date instead ("(Message 12)" → gone).
+        .replace(/\s*\((?:see\s+|from\s+|in\s+|per\s+)?Message\s+\d+(?:\s+of\s+\d+)?\)/gi, "")
+        .replace(/\bMessage\s+\d+\s+of\s+\d+,?\s*/gi, "the message ")
         // Strip any "Based on …," preamble at the very START of the answer (the user never wants
         // the response to open with "Based on the provided documentation / the logs / …").
         .replace(/^\s*[Bb]ased (?:on|upon)\b[^,.\n]{0,90}[,:]\s*/, "")
@@ -3518,7 +3522,7 @@ function buildEmailChainSection(ci, small) {
         const body = chain.slice(0, Math.max(0, cap - noteFor(n).length - 8)).trimEnd();
         chain = body + noteFor((body.match(/--- Message \d+ of /g) || []).length);
     }
-    return `[EMAIL CHAIN — the live support correspondence for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author — always cite THOSE when referring to a message. This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
+    return `[EMAIL CHAIN — the live support correspondence for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
 
 // Fair-share allocation: small files take only what they need and donate the surplus
