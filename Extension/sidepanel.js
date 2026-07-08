@@ -3446,13 +3446,21 @@ function cleanEmailBody(body, sender, cutReplyTail) {
     t = t.replace(/IMPORTANT NOTICE:\s*This email is bound by SOTI[\s\S]*$/i, ' '); // truncated variant
     t = t.replace(/-\s*CONFIDENTIAL\s*-[\s\S]*?delete this email\.?/gi, ' ');
     t = t.replace(/\bBook\s+a\s+meeting\s+with\s+\w+\b/gi, ' ');
-    t = t.replace(/\bCall\s+Us\b|\bSOTI\.\s?net\b|\bDiscussion\s+Forum\b|\bLog\s+a\s+Case\s+Online\b|\bGet\s+Outlook\s+for\s+iOS\b/gi, ' ');
+    // (SOTI.net needs the lookbehind so it never matches inside a real URL like pulse.soti.net)
+    t = t.replace(/\bCall\s+Us\b|(?<![./\w-])SOTI\.\s?net\b|\bDiscussion\s+Forum\b|\bLog\s+a\s+Case\s+Online\b|\bGet\s+Outlook\s+for\s+iOS\b/gi, ' ');
     t = t.replace(/[ \t]{2,}/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    // Greeting + pleasantry openers carry zero case signal but cost real context space
+    // across a long chain ("Hi Tom,I hope you are doing well. ..." ≈ 35 chars × N messages).
+    t = t.replace(/^(?:Hi|Hello|Dear)(?:\s+@?[A-Za-z][\w.'-]*(?:\s+[A-Z][\w.'-]*)?)?\s*,\s*/, '');
+    t = t.replace(/\b(?:I hope you are doing well\.?|I hope you are well\.?|Hope you are doing (?:good|well)\.?|I hope you are too\.?|Greetings of the day,?)\s*/gi, ' ');
+    t = t.replace(/[ \t]{2,}/g, ' ').trim();
     // Signature block: everything from the sender's OWN full name onward — but only when what
     // follows the name actually looks like a signature (title/contact details) or the name
-    // sits at the very end. Signatures always follow the real content, never precede it.
+    // sits at the very end. Signatures always follow the real content, never precede it, so
+    // the LAST occurrence is used (the name can legitimately appear mid-body, e.g. in a
+    // "Book time with <name>" line).
     for (const name of senderNameVariants(sender)) {
-        const idx = t.toLowerCase().indexOf(name.toLowerCase());
+        const idx = t.toLowerCase().lastIndexOf(name.toLowerCase());
         if (idx <= 40) continue;
         const after = t.slice(idx + name.length, idx + name.length + 220);
         const sigLike = /(?:@|\bspecialist\b|\bengineer\b|\bsupport\b|\btechnical\b|\bmanager\b|\bconsultant\b|\banalyst\b|\d{3}[-.\s]?\d{3,4}|\bave\b|\bstreet\b|\bsuite\b|\bblvd\b)/i.test(after);
@@ -3514,15 +3522,31 @@ function buildEmailChainSection(ci, small) {
     const posTag = (i) => i === 0 ? ' (NEWEST — the most recent message; the CURRENT state of the case)'
         : i === n - 1 ? ' (OLDEST — the FIRST message/email of the case)' : '';
     // Labeled metadata in every marker ("Sent:"/"From:") so the model can cite each
-    // message's OWN date and author and never confuses them with the current date.
-    const marker = (e, i) => `--- Message ${i + 1} of ${n}${posTag(i)}` +
-        `${e.time ? ` | Sent: ${e.time}` : ''}${e.sender ? ` | From: ${e.sender}` : ''}${e.type ? ` | ${e.type}` : ''} ---`;
+    // message's OWN date and author and never confuses them with the current date. Markers
+    // are kept LEAN ("of N" only on the first/last) — on a 20+ message chain the marker
+    // overhead alone is what used to force lossy compaction of complete messages.
+    const marker = (e, i) => `Message ${i + 1}${(i === 0 || i === n - 1) ? ` of ${n}` : ''}${posTag(i)}` +
+        `${e.time ? ` | Sent: ${e.time}` : ''}${e.sender ? ` | From: ${e.sender}` : ''}${e.type ? ` | ${e.type}` : ''}:`;
+    // Compacted gist: never lose URLs or key identifiers to the cut — matched against the
+    // FULL text (the cut can land mid-URL, leaving an unmatchable fragment in the tail),
+    // then any reference not fully inside the kept head is appended.
+    const gistOf = (body, max) => {
+        const flat = body.replace(/\s+/g, ' ').trim();
+        if (flat.length <= max) return flat;
+        const head = flat.slice(0, max);
+        const keep = ((flat.match(/https?:\/\/[^\s<>()]+/g) || []).concat(
+            flat.match(/\b(?:Registration Code|Instance ID|Serial(?:\s+Numbers?)?|Case(?:\s+numbers?)?|Error(?:\s+codes?)?)\s*:?\s*[A-Za-z0-9][A-Za-z0-9-]{3,}/gi) || []
+        )).filter(k => !head.includes(k));
+        return head + '…' + (keep.length ? ` [also: ${keep.slice(0, 3).join(' | ')}]` : '');
+    };
     const lines = entries.map((e, i) => `${marker(e, i)}\n${e.body}`);
     let total = lines.reduce((a, l) => a + l.length + 2, 0);
     // Compact OLDEST-first (keep the two newest whole) until the chain fits the cap.
     for (let i = n - 1; i >= 2 && total > cap; i--) {
-        const gistBody = entries[i].body.replace(/\s+/g, ' ');
-        const compact = `${marker(entries[i], i)} ${gistBody.slice(0, 160)}${gistBody.length > 160 ? '…' : ''}`;
+        const compact = `${marker(entries[i], i)} ${gistOf(entries[i].body, 160)}`;
+        // The preserved-references append can make a "gist" LONGER than the original
+        // (short body, long URL) — only take the swap when it actually shrinks the line.
+        if (compact.length >= lines[i].length) continue;
         total -= (lines[i].length - compact.length);
         lines[i] = compact;
     }
@@ -3533,7 +3557,7 @@ function buildEmailChainSection(ci, small) {
         const oldest = entries[n - 1];
         const noteFor = (kept) => `\n\n…[context cap reached — the ${kept} NEWEST messages are shown above; ${n - kept} older ones are omitted. The case began with Message ${n}${oldest.time ? ` sent ${oldest.time}` : ''}${oldest.sender ? ` from ${oldest.sender}` : ''}.]`;
         const body = chain.slice(0, Math.max(0, cap - noteFor(n).length - 8)).trimEnd();
-        chain = body + noteFor((body.match(/--- Message \d+ of /g) || []).length);
+        chain = body + noteFor((body.match(/(?:^|\n)Message \d+/g) || []).length);
     }
     return `[EMAIL CHAIN — the live support correspondence for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
@@ -6684,7 +6708,9 @@ async function send(overrideText = null, silent = false) {
             liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${summaryText}`);
             const emailChainSection = buildEmailChainSection(ci, isSmallModel);
             if (emailChainSection) liveDataLines.push(emailChainSection);
-            liveDataLines.push(`[CURRENT DATE & TIME — right now, NOT the date of any email]: ${new Date().toLocaleString()}`);
+            // Month spelled out ("8 July 2026") — a numeric 08/07/2026 is ambiguous
+            // (DD/MM vs MM/DD) and the model has misread it as August 7.
+            liveDataLines.push(`[CURRENT DATE & TIME — right now, NOT the date of any email]: ${new Date().toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`);
             liveDataLines.push(`[CASE]: ${JSON.stringify(buildCaseContextForPrompt(ci, isSmallModel), null, 2)}`);
 
             if (VERSIONS.length > 0) {
