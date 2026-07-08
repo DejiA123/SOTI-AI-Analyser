@@ -3383,20 +3383,142 @@ function buildCaseContextForPrompt(ci, small) {
     return out;
 }
 
+// ============================ EMAIL CHAIN → PROMPT ============================
+// A raw Salesforce email-chain scrape is ~70–90% boilerplate: every reply quotes the ENTIRE
+// previous email ("From: … Sent: … Subject: …" tails that duplicate messages which already
+// have their own feed entries), plus signature icon links, legal disclaimers, Proofpoint
+// external-sender banners and tracking-wrapped URLs. Under the small-model context cap that
+// noise used to consume the whole email budget and silently truncate the OLDER HALF of the
+// correspondence — the model then invented a timeline for messages it never saw. These
+// helpers strip ONLY provable boilerplate so the ENTIRE chain (every actual message) fits.
+
+// Name variants used to find the sender's own signature block ("Donaldson, Geoffrey" signs
+// as "Geoffrey Donaldson"). Short names are excluded — too likely to appear in real prose.
+function senderNameVariants(sender) {
+    const s = (sender || '').trim();
+    if (!s) return [];
+    const v = [s];
+    const m = s.match(/^([^,]+),\s*(.+)$/);
+    if (m) v.push(`${m[2].trim()} ${m[1].trim()}`);
+    return v.filter(x => x.length >= 8);
+}
+
+// Strip boilerplate from ONE message body. cutReplyTail is true only when each message is
+// its own feed entry (scraper format) — there the quoted "From:… Sent:…" tail duplicates a
+// message that already exists elsewhere in the chain, so cutting it loses nothing.
+function cleanEmailBody(body, sender, cutReplyTail) {
+    let t = String(body || '');
+    if (cutReplyTail) {
+        const tail = t.search(/(?:^|[\n\s])(?:-{3,}\s*Original Message\s*-{3,}|From:\s?[^\n]{0,160}?\bSent:\s)/i);
+        if (tail > 10) t = t.slice(0, tail); // only cut when a real body precedes the tail
+    }
+    // Proofpoint / mail-scanner banners and external-sender warnings
+    t = t.replace(/ZjQcmQRYFpfptBannerStart[\s\S]*?ZjQcmQRYFpfptBannerEnd/gi, ' ');
+    t = t.replace(/ZjQcmQRYFpfptBanner(?:Start|End)/gi, ' ');
+    t = t.replace(/\*{2,}\s*EXTERNAL EMAIL[^*]{0,300}\*{2,}/gi, ' ');
+    t = t.replace(/External Sender\s+This message came from outside (?:our|the) organization\.?\s*(?:Please use caution before acting on the message\.?)?/gi, ' ');
+    // Inline images: signature icons (marker followed by a link) are noise; a standalone
+    // marker is a real attachment (e.g. a screenshot) and is kept as a short note.
+    t = t.replace(/\[Inline image name:[^\]]*\]\s*<https?:\/\/[^>]*>/gi, ' ');
+    t = t.replace(/\[Inline image name:\s*([^\]]*)\]/gi, '[image attached: $1]');
+    // Link wrappers and tracking-rewritten URLs
+    t = t.replace(/<(?:https?|mailto|tel):[^>]*>/gi, ' ');
+    t = t.replace(/https?:\/\/urldefense[^\s>]+/gi, ' ');
+    // Legal disclaimers and footer link bars
+    t = t.replace(/IMPORTANT NOTICE:[\s\S]*?related thereto\.?/gi, ' ');
+    t = t.replace(/IMPORTANT NOTICE:\s*This email is bound by SOTI[\s\S]*$/i, ' '); // truncated variant
+    t = t.replace(/-\s*CONFIDENTIAL\s*-[\s\S]*?delete this email\.?/gi, ' ');
+    t = t.replace(/\bBook\s+a\s+meeting\s+with\s+\w+\b/gi, ' ');
+    t = t.replace(/\bCall\s+Us\b|\bSOTI\.\s?net\b|\bDiscussion\s+Forum\b|\bLog\s+a\s+Case\s+Online\b|\bGet\s+Outlook\s+for\s+iOS\b/gi, ' ');
+    t = t.replace(/[ \t]{2,}/g, ' ').replace(/\s*\n\s*/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    // Signature block: everything from the sender's OWN full name onward — but only when what
+    // follows the name actually looks like a signature (title/contact details) or the name
+    // sits at the very end. Signatures always follow the real content, never precede it.
+    for (const name of senderNameVariants(sender)) {
+        const idx = t.toLowerCase().indexOf(name.toLowerCase());
+        if (idx <= 40) continue;
+        const after = t.slice(idx + name.length, idx + name.length + 220);
+        const sigLike = /(?:@|\bspecialist\b|\bengineer\b|\bsupport\b|\btechnical\b|\bmanager\b|\bconsultant\b|\banalyst\b|\d{3}[-.\s]?\d{3,4}|\bave\b|\bstreet\b|\bsuite\b|\bblvd\b)/i.test(after);
+        if (sigLike || idx >= t.length * 0.75) { t = t.slice(0, idx).trim(); break; }
+    }
+    // Drop a now-dangling closer ("Warm regards," with the name stripped after it)
+    const closerStripped = t.replace(/(?:warm regards|kind regards|best regards|regards|thanks|thank you|sincerely|cheers)[\s,!.]*$/i, '').trim();
+    if (closerStripped.length >= 20) t = closerStripped;
+    return t.trim();
+}
+
+// Split a raw chain into ordered entries {header, sender, body}. Handles the scraper format
+// ("[time] [TYPE] Sender:\nbody" joined by ==== separators), the fallback scrape (bodies
+// only), and a manually pasted Outlook-style thread (split at each "From:… Sent:…" header,
+// so older quoted messages become entries instead of being cut away).
+function parseEmailChainEntries(raw) {
+    const HEADER_RE = /^\s*\[([^\][]{4,80})\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?([^:\n]{1,80}):\s?/;
+    const parts = raw.split(/\n?={20,}\n?/).map(p => p.trim()).filter(Boolean);
+    if (parts.length === 1 && !HEADER_RE.test(parts[0])) {
+        // Single pasted blob: split into messages at quoted-reply headers (Outlook style,
+        // newest first — same order as the scraper) instead of treating them as one body.
+        const pieces = parts[0].split(/(?=(?:^|\n)From:\s?[^\n]{0,160}?\bSent:\s)/).map(p => p.trim()).filter(Boolean);
+        if (pieces.length > 1) {
+            return pieces.map(p => {
+                const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/);
+                const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Subject:|\n|$)/);
+                return { time: sm ? sm[1].trim() : '', type: '', sender: m ? m[1].trim() : '', body: p };
+            });
+        }
+    }
+    return parts.map(p => {
+        const m = p.match(HEADER_RE);
+        if (!m) return { time: '', type: '', sender: '', body: p };
+        return {
+            time: m[1].trim(),
+            type: (m[2] || '').trim(),
+            sender: m[3].trim(),
+            body: p.slice(m[0].length)
+        };
+    });
+}
+
 // The email correspondence is the LIVE state of the case and must drive "what's next" /
 // "current status" answers. It is scraped NEWEST-FIRST (the first entry is the most recent
-// message), so truncation drops the OLDEST entries and always keeps the latest exchange.
-// Surfaced as its own plain-text section (real newlines, not JSON-escaped) with an explicit
-// precedence header so the model treats it as source-of-truth over the original [ISSUE SUMMARY].
+// message). Every entry is cleaned of boilerplate and numbered ("Message i of N") with
+// explicit NEWEST/OLDEST tags, so the WHOLE chain fits the prompt and ordering questions
+// ("what was the first email?") are unambiguous. If a cleaned chain still exceeds the cap,
+// the OLDEST entries are compacted to one-line gists — never silently dropped.
 function buildEmailChainSection(ci, small) {
     const raw = ((ci && ci.email_chain) || '').trim();
     if (!raw) return '';
     const cap = small ? 6000 : 16000;
-    let chain = raw;
-    if (chain.length > cap) {
-        chain = chain.slice(0, cap).trimEnd() + '\n\n…[older emails trimmed to fit context — the NEWEST messages are shown above and are what matters for the current state]';
+    const scraperFormat = /={20,}/.test(raw) || /^\s*\[[^\][]{4,80}\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?[^:\n]{1,80}:/.test(raw);
+    const entries = parseEmailChainEntries(raw)
+        .map(e => ({ ...e, body: cleanEmailBody(e.body, e.sender, scraperFormat) }))
+        .filter(e => e.body || e.sender || e.time);
+    const n = entries.length;
+    if (!n) return '';
+    const posTag = (i) => i === 0 ? ' (NEWEST — the most recent message; the CURRENT state of the case)'
+        : i === n - 1 ? ' (OLDEST — the FIRST message/email of the case)' : '';
+    // Labeled metadata in every marker ("Sent:"/"From:") so the model can cite each
+    // message's OWN date and author and never confuses them with the current date.
+    const marker = (e, i) => `--- Message ${i + 1} of ${n}${posTag(i)}` +
+        `${e.time ? ` | Sent: ${e.time}` : ''}${e.sender ? ` | From: ${e.sender}` : ''}${e.type ? ` | ${e.type}` : ''} ---`;
+    const lines = entries.map((e, i) => `${marker(e, i)}\n${e.body}`);
+    let total = lines.reduce((a, l) => a + l.length + 2, 0);
+    // Compact OLDEST-first (keep the two newest whole) until the chain fits the cap.
+    for (let i = n - 1; i >= 2 && total > cap; i--) {
+        const gistBody = entries[i].body.replace(/\s+/g, ' ');
+        const compact = `${marker(entries[i], i)} ${gistBody.slice(0, 160)}${gistBody.length > 160 ? '…' : ''}`;
+        total -= (lines[i].length - compact.length);
+        lines[i] = compact;
     }
-    return `[EMAIL CHAIN — the live support correspondence for this case, ordered NEWEST FIRST. The FIRST entry is the most recent message and reflects the CURRENT state of the case. This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
+    let chain = lines.join('\n\n');
+    if (chain.length > cap) {
+        // Even when the cap forces a cut, the model is told exactly how many older messages
+        // were dropped and where the case began — it never mistakes the cut for the start.
+        const oldest = entries[n - 1];
+        const noteFor = (kept) => `\n\n…[context cap reached — the ${kept} NEWEST messages are shown above; ${n - kept} older ones are omitted. The case began with Message ${n}${oldest.time ? ` sent ${oldest.time}` : ''}${oldest.sender ? ` from ${oldest.sender}` : ''}.]`;
+        const body = chain.slice(0, Math.max(0, cap - noteFor(n).length - 8)).trimEnd();
+        chain = body + noteFor((body.match(/--- Message \d+ of /g) || []).length);
+    }
+    return `[EMAIL CHAIN — the live support correspondence for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author — always cite THOSE when referring to a message. This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
 
 // Fair-share allocation: small files take only what they need and donate the surplus
@@ -6545,7 +6667,7 @@ async function send(overrideText = null, silent = false) {
             liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${summaryText}`);
             const emailChainSection = buildEmailChainSection(ci, isSmallModel);
             if (emailChainSection) liveDataLines.push(emailChainSection);
-            liveDataLines.push(`[TIME]: ${new Date().toLocaleString()}`);
+            liveDataLines.push(`[CURRENT DATE & TIME — right now, NOT the date of any email]: ${new Date().toLocaleString()}`);
             liveDataLines.push(`[CASE]: ${JSON.stringify(buildCaseContextForPrompt(ci, isSmallModel), null, 2)}`);
 
             if (VERSIONS.length > 0) {
