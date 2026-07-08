@@ -38,6 +38,9 @@
  * ============================================================================ */
 /* SOTI AI Analyser - Elite Sidepanel Engine */
 const $ = id => document.getElementById(id);
+// Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
+// exact line after reloading the extension, Chrome is still running an old cached copy.
+console.log('%c[SOTI AI Analyser] build 2.4.9 — SOTI Version live product-switch fix (boot onchange clobber resolved: MobiControl 2026.0.0 / XSight 2026.0)', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -530,6 +533,14 @@ function switchCase(id) {
         $('jiraImpact').value = c.ci.jiraImpact || '';
         $('jiraPriority').value = c.ci.jiraPriority || 'Medium';
         $('jiraRepro').value = c.ci.jiraRepro || '';
+
+        // Rebuild the version dropdowns for the restored product (e.g. so MobiControl shows
+        // "2026.0.0" while XSight shows "2026.0"). Setting .value above doesn't fire the
+        // product 'onchange', and updateVersionDropdowns() rebuilds the <option> lists, so
+        // re-apply the saved version selections afterward.
+        updateVersionDropdowns();
+        $('sotiVer').value = c.ci.sotiVer || '';
+        $('agentVer').value = c.ci.agentVer || '';
 
         // Re-render Chat
         const chat = $('chatMsgs');
@@ -5543,6 +5554,27 @@ async function fetchLatestSOTIVersions() {
     }
 }
 
+// The 2026.0 GA build is written two ways across SOTI: MobiControl/Connect/SNAP list it as
+// "2026.0.0"; SOTI XSight and Salesforce use "2026.0". Map one format to the other.
+function equivalentSotiVersion(v) {
+    if (v === '2026.0.0') return '2026.0';
+    if (v === '2026.0') return '2026.0.0';
+    return '';
+}
+
+// Select `desired` in a version <select>, falling back to its format-equivalent (above) when
+// the exact string isn't an option for the currently selected product. Used both when
+// rebuilding the dropdowns and when applying a value pushed programmatically (Salesforce sync).
+function applyVersionSelection(selectId, desired) {
+    if (!desired) return;
+    const el = $(selectId);
+    if (!el) return;
+    const opts = Array.from(el.options || []).map(o => o.value);
+    if (opts.includes(desired)) { el.value = desired; return; }
+    const alt = equivalentSotiVersion(desired);
+    if (alt && opts.includes(alt)) el.value = alt;
+}
+
 function updateVersionDropdowns() {
     const prod = $('product').value;
     let sotiOpts = VERSIONS;
@@ -5551,31 +5583,45 @@ function updateVersionDropdowns() {
     if (prod === 'SOTI Identity') {
         sotiOpts = IDENTITY_VERSIONS;
         agentOpts = []; // Identity doesn't have an 'Agent' version in this context
-    } else {
-        // Salesforce reports the 2026.0 GA release as "2026.0", but the MobiControl
-        // release-notes scrape lists it as "2026.0.0" — so that one option never matched
-        // the value pushed by "Sync from Salesforce" and silently failed to populate.
-        // Normalize just that entry (dedup in case "2026.0" is already present) so it syncs
-        // like every other version. VERSIONS itself is left untouched.
+    } else if (prod === 'SOTI XSight') {
+        // SOTI XSight must show the 2-part "2026.0" so the value matches what
+        // "Sync from Salesforce" pushes for XSight. The MobiControl release-notes scrape
+        // (reused here) lists the GA build as "2026.0.0", so fold that entry down to
+        // "2026.0" and dedup. VERSIONS itself is left untouched.
         sotiOpts = [...new Set(sotiOpts.map(v => v === '2026.0.0' ? '2026.0' : v))];
+    } else {
+        // Every other product (MobiControl, Connect, SNAP) uses the full release-notes
+        // format: the 2026.0 GA build must read "2026.0.0". Fold any 2-part "2026.0" up to
+        // "2026.0.0" and dedup, so it's correct even if the scrape or cache holds the short
+        // form. VERSIONS itself is left untouched.
+        sotiOpts = [...new Set(sotiOpts.map(v => v === '2026.0' ? '2026.0.0' : v))];
     }
 
+    // Preserve the current selections across the rebuild. The live Pulse fetch calls this a
+    // few seconds after load (and again when release blocks arrive); without re-applying the
+    // value, that async rebuild silently wipes the restored/selected version — which looked
+    // like "I have to keep reloading before the SOTI Version sticks". Re-apply if still a
+    // valid option; if the product changed so the old value no longer applies, it clears.
+    const prevSoti = $('sotiVer').value;
+    const prevAgent = $('agentVer').value;
+
     $('sotiVer').innerHTML = '<option value="">— Select —</option>' + sotiOpts.map(v => `<option value="${v}">${v}</option>`).join('');
-    
+    // Re-apply the prior selection, mapping the 2026.0 GA build across formats when the
+    // product changed (e.g. "2026.0.0" -> "2026.0" when you pick XSight) so it updates in
+    // real time instead of blanking out.
+    applyVersionSelection('sotiVer', prevSoti);
+
     if (agentOpts.length > 0) {
         $('agentVer').innerHTML = '<option value="">— Select —</option>' + agentOpts.map(v => `<option value="${v}">${v}</option>`).join('');
+        applyVersionSelection('agentVer', prevAgent);
     } else {
         $('agentVer').innerHTML = '<option value="">N/A</option>';
     }
 }
 
-$('product').onchange = () => {
-    syncActiveCaseCiFromForm();
-    updateVersionDropdowns();
-    updateFieldValidation('product');
-    if (_saveStateTimer) clearTimeout(_saveStateTimer);
-    saveState();
-};
+// NOTE: do NOT assign $('product').onchange here — the BOOT section's generic field-wiring
+// loop (search "el.onchange = onFieldCommit") runs later and would silently overwrite it.
+// That loop is where the product-change → updateVersionDropdowns() rebuild lives.
 
 // --- AI ENGINE (LOCAL — OLLAMA) ---
 let LOCAL_AI_URL = 'http://127.0.0.1:11434';
@@ -6887,6 +6933,11 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
         const onFieldCommit = () => {
             if (_switching) return; // Don't process field events during tab switch
             syncActiveCaseCiFromForm();
+            // Product drives the SOTI/Agent Version option lists (and the 2026.0 GA build's
+            // format: "2026.0.0" for MobiControl, "2026.0" for XSight). This boot loop
+            // OVERWRITES any earlier $('product').onchange, so the rebuild must happen HERE
+            // or a live product change never refreshes the version dropdown.
+            if (id === 'product') updateVersionDropdowns();
             updateFieldValidation(id);
             if (id === 'caseNum') renderTabs();
             if (id === 'caseNum' || id === 'issueSummary') renderLogs();
@@ -6928,12 +6979,17 @@ $('btnSyncSF').onclick = async () => {
             if (summary) {
                 $('issueSummary').value = summary;
             }
-            if (data.currentVersion) $('sotiVer').value = data.currentVersion;
             if (data.product) {
                 const options = Array.from($('product').options).map(o => o.text);
                 const match = options.find(o => o.toLowerCase().includes(data.product.toLowerCase()));
                 if (match) $('product').value = match;
             }
+            // A programmatic product change doesn't fire 'onchange', so rebuild the SOTI
+            // Version list for the synced product, then apply the synced version — mapping
+            // "2026.0" <-> "2026.0.0" to the format that product uses. Without this the field
+            // only refreshes when the panel is reopened.
+            updateVersionDropdowns();
+            if (data.currentVersion) applyVersionSelection('sotiVer', data.currentVersion);
             if (data.licenseType) {
                 const lt = data.licenseType.toLowerCase();
                 if (lt.includes('cloud')) $('dsCfg').value = 'Cloud';
