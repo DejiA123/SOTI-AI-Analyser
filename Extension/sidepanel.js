@@ -7202,16 +7202,38 @@ const renderLogs = () => {
     none.textContent = hasCaseInfo ? 'Upload logs if available for deeper analysis.' : 'No files uploaded yet.';
     none.style.display = c.logs.length > 0 ? 'none' : 'block';
     const frag = document.createDocumentFragment();
+    // ZIP uploads are stored as one log entry per inner file (the AI analyses each),
+    // but the panel shows a single row per ZIP so the list mirrors what was attached.
+    const rows = [];
+    const zipRows = new Map();
     c.logs.forEach((f, i) => {
+        if (f.sourceZip) {
+            let row = zipRows.get(f.sourceZip);
+            if (!row) {
+                row = { name: f.sourceZip, isZip: true, indices: [], inner: [] };
+                zipRows.set(f.sourceZip, row);
+                rows.push(row);
+            }
+            row.indices.push(i);
+            row.inner.push(f.name.startsWith(f.sourceZip + '/') ? f.name.slice(f.sourceZip.length + 1) : f.name);
+        } else {
+            rows.push({ name: f.name, isZip: false, indices: [i], inner: [] });
+        }
+    });
+    rows.forEach(row => {
+        const label = row.isZip
+            ? `${row.name} (${row.indices.length} file${row.indices.length === 1 ? '' : 's'})`
+            : row.name;
+        const tooltip = row.isZip ? `${row.name}\n${row.inner.join('\n')}` : row.name;
         const item = document.createElement('div');
         item.className = 'log-item';
-        item.title = f.name;
+        item.title = tooltip;
         item.innerHTML = `
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
-            <span class="log-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
-            <button class="log-del" data-index="${i}">×</button>`;
-        
-        item.querySelector('.log-del').addEventListener('click', () => removeLog(i));
+            <span class="log-name" title="${escapeHtml(tooltip)}">${escapeHtml(label)}</span>
+            <button class="log-del">×</button>`;
+
+        item.querySelector('.log-del').addEventListener('click', () => removeLog(row.indices));
         frag.appendChild(item);
     });
     list.innerHTML = '';
@@ -7224,9 +7246,12 @@ const renderLogs = () => {
     if (guide) guide.style.display = c.logs.length > 0 ? 'none' : 'block';
 };
 
-const removeLog = (i) => {
+const removeLog = (indices) => {
     const c = cases.find(x => x.id === activeCaseId);
-    if (c) c.logs.splice(i, 1);
+    if (c) {
+        const sorted = (Array.isArray(indices) ? indices : [indices]).slice().sort((a, b) => b - a);
+        sorted.forEach(i => c.logs.splice(i, 1));
+    }
     renderLogs();
     saveState();
 };
@@ -7389,7 +7414,12 @@ const handleFiles = async (files) => {
                     };
                     await getLogPanelIntel(log);
                     c.logs.push(log);
-                    added.push(entry.name);
+                }
+                // ZIPs land as one attachment in the chat note, not one line per inner file
+                if (entries[0].sourceZip) {
+                    added.push(`${f.name} (${entries.length} log file${entries.length === 1 ? '' : 's'})`);
+                } else {
+                    added.push(entries[0].name);
                 }
             } catch (e) {
                 skipped.push(`${f.name}: ${e.message || e}`);
@@ -7405,7 +7435,7 @@ const handleFiles = async (files) => {
     if (added.length > 0) {
         toast('Logs uploaded', 's', 2500);
         // Visible note in the chat — also lands in history so the model knows files arrived
-        addMsg('assistant', `📎 **${added.length} log file${added.length === 1 ? '' : 's'} attached:** ${added.join(', ')}${skipped.length ? `\n\n⚠ Skipped: ${skipped.join('; ')}` : ''}`, true);
+        addMsg('assistant', `📎 **${added.length} attachment${added.length === 1 ? '' : 's'}:** ${added.join(', ')}${skipped.length ? `\n\n⚠ Skipped: ${skipped.join('; ')}` : ''}`, true);
         if ($('panelR') && $('panelR').classList.contains('collapsed') && typeof $('toggleR').onclick === 'function') {
             $('toggleR').onclick();
         }
