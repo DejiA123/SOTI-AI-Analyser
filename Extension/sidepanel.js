@@ -265,6 +265,37 @@ function _newWriteToken() {
     return _lastWriteToken;
 }
 
+// ---- STORAGE FOOTPRINT CONTROL (browser RAM / crash guard) ----
+// A log object carries huge DERIVED data in memory: lines[] (a full second copy of the
+// text) and precomputedIntel/panelIntel (per-line cache arrays whose shared default
+// objects EXPAND into a full object PER LINE when serialized). Passing raw `cases` to
+// chrome.storage.local.set made Chrome build a multi-gigabyte serialization payload right
+// after an analysis of unzipped log bundles (millions of lines), spiking the browser past
+// 7GB and crashing the tab. Storage now only ever receives the raw fields below — the
+// derived caches are rebuilt on demand. Log TEXT is persisted under a separate per-case
+// key ('caseLogs:<id>') written ONLY when that case's logs actually change, so routine
+// saves (every send / field edit) no longer re-serialize megabytes of log text either.
+const LOGS_KEY_PREFIX = 'caseLogs:';
+const _dirtyLogCases = new Set(); // case ids whose logs changed since the last persist
+function markLogsDirty(caseId) { if (caseId) _dirtyLogCases.add(caseId); }
+
+function sanitizeLogForStorage(l, withContent) {
+    const out = {
+        name: l.name || '',
+        sourceZip: l.sourceZip || '',
+        uploadedAt: l.uploadedAt || 0,
+        size: l.content ? l.content.length : 0
+    };
+    if (withContent) out.content = l.content || '';
+    return out;
+}
+
+// View of `cases` safe to hand to storage: logs reduced to raw fields (metadata-only for
+// the main state key; inline content only for the small standalone/localStorage fallback).
+function sanitizeCasesForStorage(list, inlineLogContent = false) {
+    return (list || []).map(c => ({ ...c, logs: (c.logs || []).map(l => sanitizeLogForStorage(l, inlineLogContent)) }));
+}
+
 function buildCaseCiFromForm() {
     return {
         caseNum: $('caseNum').value,
@@ -340,9 +371,17 @@ async function saveState() {
 
         _suppressStorageReload = true;
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            await chrome.storage.local.set({ cases, activeCaseId, _stateWriteToken: _newWriteToken() });
+            const payload = { cases: sanitizeCasesForStorage(cases), activeCaseId, _stateWriteToken: _newWriteToken() };
+            // Log text is persisted per-case and only when that case's logs changed
+            // (attach/remove) — one atomic set() so state and text never drift apart.
+            for (const cid of _dirtyLogCases) {
+                const dc = cases.find(x => x.id === cid);
+                if (dc) payload[LOGS_KEY_PREFIX + cid] = (dc.logs || []).map(l => sanitizeLogForStorage(l, true));
+            }
+            await chrome.storage.local.set(payload);
+            _dirtyLogCases.clear(); // only after a successful write — a failed one retries next save
         } else {
-            localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId }));
+            localStorage.setItem('soti_ai_state', JSON.stringify({ cases: sanitizeCasesForStorage(cases, true), activeCaseId }));
         }
     } catch (e) {
         console.error('CRITICAL: Save failed', e);
@@ -411,6 +450,34 @@ async function loadState() {
             activeCaseId = oldCase.id;
         } if (data.cases && data.cases.length > 0) {
             cases = data.cases;
+
+            // Rehydrate log text from the per-case 'caseLogs:<id>' keys (kept OUT of the
+            // main state so routine saves stay small). LEGACY states stored full log
+            // objects inline — content plus lines[]/panelIntel/precomputedIntel caches:
+            // keep only the raw fields and move the text to its per-case key; the derived
+            // caches are rebuilt on demand and never touch storage again.
+            let storedLogs = {};
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                try { storedLogs = await chrome.storage.local.get(cases.map(c => LOGS_KEY_PREFIX + c.id)); } catch (e) { storedLogs = {}; }
+            }
+            const migrateLegacy = {};
+            cases.forEach(c => {
+                const stored = storedLogs[LOGS_KEY_PREFIX + c.id];
+                const inline = Array.isArray(c.logs) ? c.logs : [];
+                const rawLog = l => ({ name: l.name || '', content: l.content || '', sourceZip: l.sourceZip || '', uploadedAt: l.uploadedAt || 0 });
+                if (Array.isArray(stored) && stored.length > 0) {
+                    c.logs = stored.map(rawLog);
+                } else if (inline.some(l => l && typeof l.content === 'string' && l.content)) {
+                    c.logs = inline.filter(l => l && typeof l.content === 'string' && l.content).map(rawLog);
+                    migrateLegacy[LOGS_KEY_PREFIX + c.id] = c.logs.map(l => sanitizeLogForStorage(l, true));
+                } else {
+                    c.logs = []; // metadata-only stubs with no stored text can't be analysed
+                }
+            });
+            if (Object.keys(migrateLegacy).length > 0 && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                chrome.storage.local.set({ ...migrateLegacy, _stateWriteToken: _newWriteToken() }).catch(e => console.warn('Legacy log migration write failed', e));
+            }
+
             const targetId = data.activeCaseId || cases[0].id;
             
             // Patch existing cases for missing properties
@@ -440,13 +507,16 @@ async function loadState() {
             const now = Date.now();
             const before = cases.length;
             const lastTouch = c => c.updatedAt || c.lastSentAt || c.createdAt || now;
+            const purgedCases = cases.filter(c => (now - lastTouch(c)) >= RETENTION_MS);
             cases = cases.filter(c => (now - lastTouch(c)) < RETENTION_MS);
             const purged = before - cases.length;
             if (purged > 0) {
                 console.warn(`[Security] Data retention: purged ${purged} case(s) idle for over 30 days.`);
                 toast(`${purged} idle case(s) auto-cleared (30-day retention policy)`, 'w', 5000);
                 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                    chrome.storage.local.set({ cases, _stateWriteToken: _newWriteToken() });
+                    chrome.storage.local.set({ cases: sanitizeCasesForStorage(cases), _stateWriteToken: _newWriteToken() });
+                    // Purge the per-case log text too — that's the actual customer data.
+                    chrome.storage.local.remove(purgedCases.map(c => LOGS_KEY_PREFIX + c.id)).catch(() => {});
                 }
             }
 
@@ -608,13 +678,13 @@ function switchCase(id) {
         _suppressStorageReload = true;
         requestAnimationFrame(() => {
             if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                chrome.storage.local.set({ cases, activeCaseId, _stateWriteToken: _newWriteToken() }).catch(e =>
+                chrome.storage.local.set({ cases: sanitizeCasesForStorage(cases), activeCaseId, _stateWriteToken: _newWriteToken() }).catch(e =>
                     console.error('SwitchCase save failed', e)
                 ).finally(() => {
                     setTimeout(() => { _suppressStorageReload = false; }, 80);
                 });
             } else {
-                try { localStorage.setItem('soti_ai_state', JSON.stringify({ cases, activeCaseId })); } catch(e) {}
+                try { localStorage.setItem('soti_ai_state', JSON.stringify({ cases: sanitizeCasesForStorage(cases, true), activeCaseId })); } catch(e) {}
                 setTimeout(() => { _suppressStorageReload = false; }, 80);
             }
         });
@@ -625,12 +695,18 @@ function switchCase(id) {
 
 function closeCase(id, e) {
     if (e) e.stopPropagation();
+    const removeStoredLogs = caseId => {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+            chrome.storage.local.remove(LOGS_KEY_PREFIX + caseId).catch(() => {});
+        }
+    };
     if (cases.length <= 1) {
         const c = cases[0];
         c.name = 'Case 1';
-        c.msgs = []; 
-        c.logs = []; 
+        c.msgs = [];
+        c.logs = [];
         c.ci = getDefaultCI();
+        removeStoredLogs(c.id); // the stored log text is the actual customer data — delete it now
         // Force switchCase to run even if it's already active to refresh the UI
         const oldId = activeCaseId;
         activeCaseId = null;
@@ -641,9 +717,10 @@ function closeCase(id, e) {
 
     const idx = cases.findIndex(c => c.id === id);
     if (idx === -1) return;
-    
+
     const wasActive = (activeCaseId === id);
     cases.splice(idx, 1);
+    removeStoredLogs(id);
     
     if (wasActive) {
         const nextId = cases[Math.max(0, idx - 1)].id;
@@ -7290,6 +7367,7 @@ const removeLog = (indices) => {
     if (c) {
         const sorted = (Array.isArray(indices) ? indices : [indices]).slice().sort((a, b) => b - a);
         sorted.forEach(i => c.logs.splice(i, 1));
+        markLogsDirty(c.id);
     }
     renderLogs();
     saveState();
@@ -7468,6 +7546,7 @@ const handleFiles = async (files) => {
         pendingLogUploads.set(c.id, Math.max(0, (pendingLogUploads.get(c.id) || 1) - 1));
     }
 
+    if (added.length > 0) markLogsDirty(c.id);
     renderLogs();
     saveState();
 
@@ -9069,7 +9148,17 @@ if ($('btnClearAllData')) {
             streamControllers.clear();
 
             if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                await chrome.storage.local.remove(['cases', 'activeCaseId', 'learnedInsights']);
+                // Per-case log text lives under 'caseLogs:<id>' keys — wipe those too.
+                // Prefer getKeys() (catches orphans from crashed sessions); fall back to
+                // deriving the keys from the in-memory case list on older browsers.
+                let logKeys = cases.map(c => LOGS_KEY_PREFIX + c.id);
+                try {
+                    if (typeof chrome.storage.local.getKeys === 'function') {
+                        const allKeys = await chrome.storage.local.getKeys();
+                        logKeys = allKeys.filter(k => k.startsWith(LOGS_KEY_PREFIX));
+                    }
+                } catch (e) { /* fall back to the derived list */ }
+                await chrome.storage.local.remove(['cases', 'activeCaseId', 'learnedInsights', ...logKeys]);
             }
             try {
                 localStorage.removeItem('soti_ai_state');
