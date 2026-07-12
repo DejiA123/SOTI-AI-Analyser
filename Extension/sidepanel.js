@@ -6129,13 +6129,18 @@ const OllamaAI = {
                 //    user message (forensic mode: the log evidence lives there). Each message's
                 //    leading portion — rules / file manifest / primary root-cause anchor — is kept.
                 let guard = 0;
-                while (totalChars > maxAllowedChars && guard++ < 16) {
+                // Messages already cut to their keep-floor are skipped on later passes, so the
+                // loop moves on to the next-largest message (e.g. a long history turn) instead of
+                // stalling on one at-floor message and leaving everything else untrimmed.
+                const atFloor = new Set();
+                while (totalChars > maxAllowedChars && guard++ < 24) {
                     let bigIdx = -1, bigLen = 0;
                     for (let i = 0; i < messages.length; i++) {
+                        if (atFloor.has(i)) continue;
                         const L = messages[i].content ? messages[i].content.length : 0;
                         if (L > bigLen) { bigLen = L; bigIdx = i; }
                     }
-                    if (bigIdx < 0) break;
+                    if (bigIdx < 0) break; // every message is at its floor — send as-is
                     const m = messages[bigIdx];
                     const content = m.content || '';
                     const over = totalChars - maxAllowedChars;
@@ -6147,7 +6152,8 @@ const OllamaAI = {
                     if (manifestEnd >= 0) minKeep = Math.min(manifestEnd + 30, 7000);
                     if (chronoIdx >= 0) minKeep = Math.min(Math.max(minKeep, chronoIdx), 9000);
                     const newLen = Math.max(minKeep, content.length - over - 150);
-                    if (newLen >= content.length) break; // already at floor — cannot trim further
+                    // A cut the appended notice would cancel out frees no space — floor reached.
+                    if (newLen >= content.length - 200) { atFloor.add(bigIdx); continue; }
                     m.content = content.slice(0, newLen) + "\n\n[Evidence trimmed to fit the context window — the manifest and primary findings above are complete.]";
                     totalChars = messages.reduce((acc, x) => acc + (x.content ? x.content.length : 0), 0);
                     console.warn(`[Ollama Request] Trimmed message #${bigIdx} to ${newLen} chars to fit context`);
@@ -6677,6 +6683,10 @@ async function send(overrideText = null, silent = false) {
             // Skip the product-signature injection for small-model installer-forensic runs: the
             // compact forensic prompt already carries the MSI rule and the evidence carries the
             // deterministic cause, so the extra ~1KB of signatures is pure prefill cost (slower).
+            // Kept SEPARATE from corePrompt: in the analysis prompt the signatures go AFTER the
+            // log evidence, so the emergency end-trim keep-floor (which preserves the prompt's
+            // start through the file manifest) protects rules + evidence, not rules + signatures.
+            let productSignatures = "";
             if (analysisRun && detectedProducts.size > 0 && !(forensicRun && isSmallModel)) {
                 const map = {
                     "MobiControl": "MobiControl.md",
@@ -6697,7 +6707,7 @@ async function send(overrideText = null, silent = false) {
                             // Cap for small/CPU models so the curated signatures (front of the
                             // file) fit without starving the actual log evidence of context.
                             if (isSmallModel && kb.length > 2800) kb = kb.slice(0, 2800) + '\n…[signatures trimmed]';
-                            corePrompt += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES — ${prod}:\n` + kb;
+                            productSignatures += `\n\n### PRODUCT-SPECIFIC LOG SIGNATURES — ${prod}:\n` + kb;
                         }
                     } catch (e) {
                         console.warn("Could not load knowledge for " + prod, e);
@@ -6710,7 +6720,8 @@ async function send(overrideText = null, silent = false) {
             const liveDataLines = [];
             liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${summaryText}`);
             const emailChainSection = buildEmailChainSection(ci, isSmallModel);
-            if (emailChainSection) liveDataLines.push(emailChainSection);
+            let emailChainIdx = -1;
+            if (emailChainSection) { emailChainIdx = liveDataLines.length; liveDataLines.push(emailChainSection); }
             // Month spelled out ("8 July 2026") — a numeric 08/07/2026 is ambiguous
             // (DD/MM vs MM/DD) and the model has misread it as August 7.
             liveDataLines.push(`[CURRENT DATE & TIME — right now, NOT the date of any email]: ${new Date().toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`);
@@ -6763,7 +6774,15 @@ async function send(overrideText = null, silent = false) {
             let logContext = "";
             if (analysisRun) {
                 const historyChars = c.msgs.slice(-10).reduce((a, m) => a + Math.min((m.content || '').length, 4000), 0);
-                const externalOverhead = corePrompt.length + liveDataSection.length + (imgContext || '').length + historyChars + (txt || '').length + 1500;
+                // Logs are the PRIMARY payload of an analysis run. Budget the case/research data
+                // (email chain etc.) as a bounded RESERVATION rather than its full size — a large
+                // synced email chain otherwise consumes the whole snippet budget AND pushes the
+                // evidence past the end-trim keep-floor in completions.create, so the model got an
+                // evidence-free prompt and answered "Window: N/A / no error lines provided".
+                const promptBudget = await getPromptCharBudget();
+                const liveDataReserve = Math.min(liveDataSection.length, Math.max(1200, Math.floor(promptBudget * 0.18)));
+                const fixedOverhead = corePrompt.length + productSignatures.length + (imgContext || '').length + historyChars + (txt || '').length + 1500;
+                const externalOverhead = fixedOverhead + liveDataReserve;
                 if (forensicRun) {
                     if (isSmallModel && hasInstallerLog) {
                         // LEAN installer-forensic context for CPU-bound models: the deterministic
@@ -6814,6 +6833,26 @@ async function send(overrideText = null, silent = false) {
                         logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, budgets.get(l) || 10000, l.name, l.lines)}\n=== END: ${l.name} ===`;
                     }
                 }
+                // Enforce the reservation now the evidence is sized: the case/research data only
+                // gets the room genuinely left over — never the other way round. Trim the email
+                // chain first (it is ordered NEWEST FIRST, so the newest messages survive); the
+                // reported symptom already leads the log evidence, so the analysis stays anchored.
+                const liveRoom = Math.max(liveDataReserve, promptBudget - fixedOverhead - logContext.length);
+                if (liveDataSection.length > liveRoom) {
+                    if (emailChainIdx >= 0) {
+                        const chain = liveDataLines[emailChainIdx];
+                        const chainRoom = liveRoom - (liveDataSection.length - chain.length);
+                        if (chainRoom < chain.length) {
+                            liveDataLines[emailChainIdx] = chainRoom > 400
+                                ? chain.slice(0, chainRoom) + "\n[…older emails trimmed for this log analysis — ask a case question to see the full chain]"
+                                : "[EMAIL CHAIN omitted for this log analysis to keep the evidence complete — ask a case question to see it]";
+                            liveDataSection = liveDataLines.join('\n');
+                        }
+                    }
+                    if (liveDataSection.length > liveRoom + 600) {
+                        liveDataSection = liveDataSection.slice(0, Math.max(800, liveRoom)) + "\n[…case data trimmed to keep the log evidence complete]";
+                    }
+                }
             } else if (hasLogs) {
                 logContext = `\n\n[ATTACHED LOGS — reference only; the user asked a question, not for a full analysis]`
                     + await buildFileManifest(c.logs, c.lastSentAt || 0);
@@ -6826,13 +6865,13 @@ async function send(overrideText = null, silent = false) {
             // - Otherwise (conversational / Q&A): case + research data first (the answer
             //   source), then rules, then the lightweight log manifest.
             sysPrompt = forensicRun && hasLogs
-                ? `${corePrompt}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
+                ? `${corePrompt}${productSignatures}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
 
 ${imgContext}`
                 : analysisRun
                     ? `${corePrompt}
 
-${logContext}
+${logContext}${productSignatures}
 
 ${imgContext}
 
