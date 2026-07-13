@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.4.9 — SOTI Version live product-switch fix (boot onchange clobber resolved: MobiControl 2026.0.0 / XSight 2026.0)', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.5.0 — Log Whisperer chronology overhaul: root cause must precede symptoms, chronic-noise suppression, SSO/Entra authorization-trail intelligence, per-file coverage windows, deterministic answer verification', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -904,6 +904,21 @@ function combineInstallerDateTime(baseDate, timestamp) {
     return baseDate && time && time !== "No timestamp" ? `${baseDate} ${time}` : (timestamp || "");
 }
 
+// Chronic-noise rule shared by the per-file scan: a signature repeating >=8 times across
+// >=2 hours (or >=60% of the file's covered window) is pre-existing background noise.
+function computeChronicSignatureKeys(signatureEntries, fileSpanMs) {
+    const chronic = new Set();
+    for (const [key, sig] of signatureEntries) {
+        if (sig.count < 8) continue;
+        const first = parseLogTimestampForSort(sig.firstTimestamp);
+        const last = parseLogTimestampForSort(sig.lastTimestamp);
+        if (!Number.isFinite(first) || !Number.isFinite(last)) continue;
+        const spanMs = last - first;
+        if (spanMs >= 2 * 3600000 || (fileSpanMs > 30 * 60000 && spanMs >= 0.6 * fileSpanMs)) chronic.add(key);
+    }
+    return chronic;
+}
+
 function normalizeLogSignature(text) {
     return (text || "")
         .replace(/\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:Z|[+-]\d{2}:?\d{2})?\b/g, "")
@@ -920,7 +935,7 @@ function normalizeLogSignature(text) {
 
 const EXCEPTION_CLASS_PATTERN = String.raw`((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?:Exception|Error)|[A-Za-z_]\w*(?:Exception|Error)|AggregateException|SqlException|SQLException|TimeoutException|SocketException|WebException|IOException|UnauthorizedAccessException|InvalidOperationException|NullReferenceException|OutOfMemoryException|StackOverflowException|AuthenticationException|SecurityException|TypeError|ReferenceError|RangeError|SyntaxError|ValueError|KeyError|IndexError|RuntimeError|OSError)`;
 
-const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port|sso|oauth|saml|oidc|idp|issuer|identityserver|identity|unauthor|forbidden|logon|login|redirect|authoriz|entity|token|429|403|401|404|500|502|503)\b|^\s*at\s+/i;
+const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port|sso|oauth|saml|oidc|idp|issuer|identityserver|identity|unauthor|forbidden|logon|login|redirect|authoriz|entity|token|429|403|401|404|500|502|503|permission|granted|access\s+right|accesscontrol|principal)\b|^\s*at\s+/i;
 
 const DEFAULT_LINE_CLASSIFICATION = {
     categories: [],
@@ -1020,13 +1035,13 @@ async function precomputeLogIntel(log) {
 
 
 const LOG_SIGNAL_RULES = [
-    { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|transaction|rollback|schema|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|constraint|duplicate key)\b/i },
+    { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|SQL transaction|transaction (?:log|deadlock|rollback|aborted)|database schema|schema (?:upgrade|migration|deployment) (?:failed|error)|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|duplicate key)\b/i },
     { category: 'SSO/Identity/Redirect', weight: 42, regex: /\b(No SSO entity found|SSO entity (?:is )?not found|invalid_client_configuration|request issuer\s*[:=]|wrong issuer|issuer mismatch|unknown client|client (?:not found|is unknown|is not configured)|relying party (?:not|trust)|audience (?:validation failed|mismatch)|redirect_uri|reply ?URL|ACS URL|invalid redirect|redirect loop|Too many requests|HTTP 429|\b429\b.*(?:request|limit)|IdentityServer|IdpInitiated|SAML response|authoriz(?:ation|e) (?:request )?(?:failed|invalid|error)|invalid_grant|invalid_request|access_denied)\b/i },
     { category: 'Certificate/TLS', weight: 38, regex: /\b(certificate|cert\b|SSL|TLS|handshake failed|X509|trust|chain|CRL|OCSP|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors|AuthenticationException|Schannel|PKIX|certificate verify failed|unable to get local issuer|self-signed|hostname mismatch)\b/i },
     { category: 'HTTP/Network', weight: 30, regex: /\b(HTTP\/|HTTP [45]\d\d|StatusCode|BadRequest|Unauthorized|Forbidden|NotFound|Conflict|TooManyRequests|InternalServerError|BadGateway|ServiceUnavailable|GatewayTimeout|WebException|SocketException|ConnectFailure|ConnectionReset|connection dropped|connection lost|lost connection|DNS|resolve|resolution|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|host not found|No such host|network unreachable|proxy|firewall|port \d+|connection refused|connection reset|timed out connecting|name or service not known)\b/i },
     { category: 'Service Lifecycle', weight: 24, regex: /\b(service start|service stop|starting service|stopping service|service failed|failed to start|failed to stop|restarting|OnStart|OnStop|ServiceBase|hosted service|application pool|recycl|terminated unexpectedly|process exited|crashed|crash dump|service control manager|SCM|watchdog|heartbeat lost)\b/i },
     { category: 'Memory/Thread', weight: 34, regex: /\b(OutOfMemory|StackOverflow|ThreadAbort|thread pool|GC heap|memory pressure|heap size|working set|AccessViolation|deadlock detected|hang detected|blocked thread|thread starvation|CPU spike|high CPU|resource exhausted|insufficient memory)\b/i },
-    { category: 'Auth/Permission', weight: 36, regex: /\b(Access denied|Unauthorized|forbidden|permission|credentials|credential|login|logon|authentication failed|authorization failed|token expired|invalid token|bearer|OAuth|SAML|OIDC|LDAP bind|Kerberos|NTLM|impersonat|account locked|principal|claims|MFA|passwordless|FIDO|invalid grant|invalid audience|signature validation failed)\b/i },
+    { category: 'Auth/Permission', weight: 36, regex: /\b(Access denied|Unauthorized|forbidden|permission|credentials|credential|login|logon|authentication failed|authorization failed|token expired|invalid token|bearer|OAuth|SAML|OIDC|LDAP bind|Kerberos|NTLM|impersonat|account locked|principal|claims|MFA|passwordless|FIDO|invalid grant|invalid audience|signature validation failed|AccessControlException|SecurityException|Feature permission|access right check|Granted None|Security Exception Event|Business Logic Exception)\b/i },
     { category: 'Enrollment/Agent', weight: 28, regex: /\b(DeviceEnrollmentException|enrollment failed|enrolment failed|AFW provisioning failed|Android Enterprise|QR code invalid|EMM token expired|Device already enrolled|check-in failed|check in failed|heartbeat missed|profile deployment failed|policy deployment failed|agent crash|agent error|agent failed|device check-in failed|device sync failed|package install failed|OEMConfig|managed Google Play|KME|Zero Touch)\b/i },
     { category: 'Storage/IO', weight: 30, regex: /\b(IOException|DirectoryNotFound|FileNotFound|PathTooLong|disk full|no space|access to the path|sharing violation|write failed|read failed|file locked|permission denied|cannot create file|cannot delete file|corrupt(ed)? file|I\/O error)\b/i },
     { category: 'Installer/MSI', weight: 38, regex: /\b(CustomAction|Return value 3|Return 1603|error code 1603|MainEngineThread is returning|Back from server\. Return value|Fatal error|Deploy[A-Za-z]*Database|DbUp|DeploymentEngine|PerformUpgrade|Installation failed|SetupSOTI|Location Service database deployment|Upgrade failed due to an unexpected exception|Soti\.XSight\.LocationService\.Database\.Migration)\b/i },
@@ -1040,7 +1055,10 @@ const LOG_SIGNAL_RULES = [
 ];
 
 const HIGH_SIGNAL_KEYWORDS = [
-    { label: 'fatal/critical', score: 36, regex: /\b(FATAL|CRITICAL|PANIC|SEVERE|EMERGENCY|ALERT)\b/i },
+    // Case-sensitive on purpose: severity tokens are logged in UPPERCASE. The /i version
+    // classified a harmless DBG line ("GetSignalAlertRules - returning 0 Signal alert rules")
+    // as fatal/critical because it contains the lowercase word "alert".
+    { label: 'fatal/critical', score: 36, regex: /\b(FATAL|CRITICAL|PANIC|SEVERE|EMERGENCY|ALERT)\b|\b[Ff]atal [Ee]rror\b/ },
     { label: 'exception', score: 32, regex: new RegExp(`\\b${EXCEPTION_CLASS_PATTERN}\\b|\\bUnhandled exception\\b|\\bInner Exception\\b|\\bCaused by:\\b`, 'i') },
     { label: 'explicit failure', score: 22, regex: /\b(failed|failure|fails|fatal error|cannot|can't|unable|denied|refused|rejected|blocked|aborted|crashed|faulted|corrupt|invalid|unsupported|not supported|timed out|timeout|deadlock|rollback|unreachable|unavailable|mismatch|malformed|missing|required|expired|revoked|not found)\b/i },
     { label: 'error severity', score: 18, regex: /(?:^|[\s\[({<,"'=])(?:ERR|ERROR)(?:[\s\])}:>,]|$)|\blevel\s*[:=]\s*["']?error\b|\bseverity\s*[:=]\s*["']?error\b/i },
@@ -1070,6 +1088,14 @@ function isNegatedSignalLine(line) {
 function hasRealFailureSignal(line) {
     const text = line || "";
     return /\b(SqlException|System\.Data\.SqlClient|Cannot open database|Login failed for user|ALTER DATABASE statement is not supported|Setting Recovery mode|error code 1603|MainEngineThread is returning|Return value 3|Fatal error|Installation failed|Upgrade failed due to an unexpected exception|exception has occurred in script|Location Service database deployment|SQL exception has occurred|DeploymentEngine:|Product: SOTI.*--\s+.*(?:SqlException|error|failed|ALTER DATABASE))\b/i.test(text);
+}
+
+// MobiControl authorization decision trail — the events that decide WHY a user can or cannot
+// see anything in the Web Console / XSight. "User has Granted None permission" right after a
+// directory-group association is the single most diagnostic line for an SSO/Entra permission
+// case, yet it is logged at INF level; these must never be dropped as "Info noise".
+function isPivotalAuthEvent(text) {
+    return /\b(Granted None permission|Failed access right check|Feature permission '[^']*' is denied|AccessControlException|groups association done|user principal for user .* was retrieved|has \d+ groups)\b/i.test(text || "");
 }
 
 function isMsiNoiseLine(line) {
@@ -1235,6 +1261,16 @@ function scoreRootCauseCandidate(event) {
     if (/\bUpgrade failed due to an unexpected exception\b/i.test(event.text)) score += 85;
     if (/\bLocation Service database deployment\b/i.test(event.text)) score += 75;
     if (/\b(Microsoft SQL Azure|SQL Azure|database\.windows\.net)\b/i.test(event.text)) score += 25;
+
+    // MobiControl authorization pipeline: the permission-resolution VERDICT outranks the
+    // downstream denials it produces. "Granted None permission" (the effective-rights
+    // computation after directory-group association) is the causal event; each individual
+    // "Feature permission 'X' is denied" / "Failed access right check" is its symptom.
+    if (/\bGranted None permission\b/i.test(event.text)) score += 95;
+    if (/\bFeature permission '[^']*' is denied\b/i.test(event.text)) score += 45;
+    if (/\bFailed access right check\b/i.test(event.text)) score += 35;
+    if (/\bAccessControlException\b/.test(event.text)) score += 30;
+    if (/\b(groups association done|has \d+ groups|user principal for user .* was retrieved)\b/i.test(event.text)) score += 20;
     
     // Penalty for negated signals and installation noise
     if (isNegatedSignalLine(event.text) && !event.hasException) score -= 50;
@@ -1323,31 +1359,44 @@ function detectLogSeverity(text) {
 function detectComponent(fileName, text, categories = []) {
     const file = (fileName || "").toLowerCase();
     const source = `${fileName || ""} ${text || ""}`.toLowerCase();
-    
-    // SOTI MC-specific components
-    if (categories.includes('SOTI MC/Infrastructure') || 
-        /\b(MCMR|MobiControl MC|MC Management Service|MC Services|SOTI MC Web Console|MCMC|MC Core)\b/i.test(source)) {
-        return "SOTI MC Infrastructure";
+
+    // FILE NAME FIRST: for SOTI runtime logs the file identifies the emitting service far more
+    // reliably than any word inside the line. A Management Service stack trace mentions
+    // "Soti.MobiControl.*" namespaces on every frame and would otherwise fall into a generic
+    // MC bucket that the architecture tier model can't place — which is how a late DS error
+    // once out-ranked the real MS authorization failure as "root cause".
+    if (/managementservice|(^|[\\\/_.-])ms\.log|management[_ -]?service/.test(file)) return "Management Service";
+    if (/deploymentserver|(^|[\\\/_.-])dse?\.log|deployment[_ -]?server/.test(file)) return "Deployment Server";
+    if (/identity|(^|[\\\/_.-])sso|(^|[\\\/_.-])sts/.test(file)) return "SOTI Identity";
+    if (/xsight|collector|telemetry/.test(file)) return "SOTI XSight";
+    if (/agent\b|devicelog|device[_ -]?log/.test(file)) return "Device/Agent";
+
+    // SQL/Database events keep SQL-tier ranking even inside an MS/DS log — but only when the
+    // line itself carries a real SQL signal, not just the file name.
+    if (categories.includes('SQL/Database') ||
+        /\b(sql server|sqlexception|dbinstall|sqlazure|sqlclient|sqlcommand|sqlreader|sqladapter)\b/i.test(source)) {
+        return "SQL Database";
     }
-    
+
+    // SOTI MC-specific components — mapped onto the real architecture components so the
+    // causal tier model (SQL/Identity -> MS -> DS -> Device) can reason about them.
+    if (categories.includes('SOTI MC/Infrastructure') ||
+        /\b(MCMR|MobiControl MC|MC Management Service|MC Services|SOTI MC Web Console|MCMC|MC Core)\b/i.test(source)) {
+        return "Management Service";
+    }
+
     if (categories.includes('SOTI MC/Deployment') ||
         /\b(MC Deployment Server|Deployment Manager|Content Distribution|Package Management|MC DDM)\b/i.test(source)) {
-        return "SOTI MC Deployment";
+        return "Deployment Server";
     }
-    
-    if (categories.includes('SOTI MC/Baseline') || 
+
+    if (categories.includes('SOTI MC/Baseline') ||
         /\b(Configuration Baseline|MCAU|MCSB|Baseline Engine|Compliance Management)\b/i.test(source)) {
-        return "SOTI MC Baseline";
+        return "Management Service";
     }
-    
-    // SQL/Database components
-    if (categories.includes('SQL/Database') || 
-        /\b(sql server|sqlexception|dbinstall|sqlazure|sqlclient|sqlcommand|sqlreader|sqladapter|sqladapter)\b/i.test(source)) {
-        return "SQL Database/SQL Azure";
-    }
-    
+
     // Device/Agent components
-    if (/\b(agent|ddr|device|device agent|device service|ddr collector|device communication|agent installer|mobicontrol agent)\b/i.test(source)) {
+    if (/\b(agent|ddr|device agent|device service|ddr collector|device communication|agent installer|mobicontrol agent)\b/i.test(source)) {
         return "Device/Agent";
     }
     
@@ -1372,7 +1421,7 @@ function detectComponent(fileName, text, categories = []) {
     }
     
     // Connect/Integration
-    if (/%\b(connect|connector|gateway|mqtt|iot hub|cloud connector|smtp connector|sms gateway|printer service|api gateway|sftp connector|ldap connector|mam connector)\b/i.test(source)) {
+    if (/\b(connector|mqtt|iot hub|cloud connector|smtp connector|sms gateway|printer service|api gateway|sftp connector|ldap connector|mam connector)\b/i.test(source)) {
         return "SOTI Connect";
     }
     
@@ -1421,6 +1470,19 @@ function classifyFailureKind(text, categories = [], sql = null) {
     return "Forensic event";
 }
 
+// Legacy/alias component names → canonical names used by the tier & priority maps.
+// detectComponent now emits canonical names directly, but events built before a rename
+// (or by other call sites) must never silently fall to the bottom tier again.
+function canonicalComponentName(component) {
+    const aliases = {
+        "SQL Database/SQL Azure": "SQL Database",
+        "SOTI MC Infrastructure": "Management Service",
+        "SOTI MC Deployment": "Deployment Server",
+        "SOTI MC Baseline": "Management Service"
+    };
+    return aliases[component] || component || "Unknown Component";
+}
+
 function componentPriority(component) {
     const priorities = {
         "SQL Database": 42,
@@ -1432,7 +1494,7 @@ function componentPriority(component) {
         "Device/Agent": 10,
         "Unknown Component": 0
     };
-    return priorities[component] || 0;
+    return priorities[canonicalComponentName(component)] || 0;
 }
 
 function scoreCausalCandidate(item) {
@@ -1463,7 +1525,7 @@ function getComponentTier(component) {
         "Device/Agent": 3,
         "Unknown Component": 4
     };
-    return tiers[component] ?? 4;
+    return tiers[canonicalComponentName(component)] ?? 4;
 }
 
 function formatDuration(ms) {
@@ -1542,6 +1604,41 @@ function getCausalEdge(upstream, downstream) {
         score += 22;
         reasons.push("auth/permission failure plausibly blocks the downstream operation");
     }
+    if (/\bGranted None permission\b/i.test(upstreamText) && /\b(denied|Failed access right check|AccessControlException|Unauthorized|forbidden)\b/i.test(downstreamText)) {
+        score += 40;
+        reasons.push("permission resolution granted NO effective rights, so every later access check for this user must fail");
+        // The verdict poisons the whole session — a denial hours later is still its direct
+        // consequence, so cancel the long-delta decay that would otherwise break this edge.
+        if (Number.isFinite(delta) && delta > 3600000) score += 24;
+    }
+
+    // Same user principal on both ends is strong causal glue for authorization chains
+    // ("user principal 19" verdict -> "user: 19" denial).
+    const principalOf = t => {
+        const m = (t || "").match(/\buser principal (\d+)\b|\buser:\s*(\d+)\b/i);
+        return m ? (m[1] || m[2]) : "";
+    };
+    const upPrincipal = principalOf(upstreamText);
+    if (upPrincipal && upPrincipal === principalOf(downstreamText)) {
+        score += 25;
+        reasons.push(`both events concern the same user principal ${upPrincipal}`);
+    }
+
+    // Version/build complaints are self-contained startup checks — they are never a
+    // CONSEQUENCE of an authorization verdict, so break that tempting-but-wrong link.
+    if (upstream.categories?.includes('Auth/Permission')
+        && (downstream.categories?.includes('Version/Compatibility') || /\b(build number|Please upgrade|version mismatch)\b/i.test(downstreamText))) {
+        score -= 45;
+    }
+
+    // A USER-scoped authorization event (it names a user principal) only propagates to other
+    // auth/permission events — one user's missing rights cannot break another service's
+    // internal machinery, no matter how close in time or how "upstream" the component is.
+    if (upPrincipal && upstream.categories?.includes('Auth/Permission')
+        && !downstream.categories?.includes('Auth/Permission')
+        && !/\b(unauthorized|forbidden|denied|permission|access right|token|login|logon|auth)\b/i.test(downstreamText)) {
+        score -= 60;
+    }
     if (/\b(caused by|because|due to|inner exception|timeout expired|deadlock|login failed)\b/i.test(upstreamText)) {
         score += 12;
         reasons.push("upstream text contains explicit causal wording");
@@ -1586,6 +1683,16 @@ function getPropagationPath(root, all) {
 }
 
 function chooseArchitectRoot(all) {
+    // Temporal anchor: the strongest event on the timeline is the failure the report must
+    // explain. A root cause must exist AT or BEFORE that moment — an event that happens
+    // minutes AFTER the primary failure cluster cannot have caused it, no matter how loud
+    // its own error text is (e.g. a DS build-number complaint logged 8 minutes after the
+    // MS permission denials it was once blamed for).
+    const primarySymptom = all
+        .filter(item => Number.isFinite(item.sortTime))
+        .reduce((best, item) => (!best || item.causalScore > best.causalScore) ? item : best, null);
+    const anchorTime = primarySymptom ? primarySymptom.sortTime : Number.NaN;
+
     const candidates = all.map(item => {
         const propagation = getPropagationPath(item, all);
         const incomingScore = all
@@ -1593,7 +1700,10 @@ function chooseArchitectRoot(all) {
             .filter(Boolean)
             .reduce((max, edge) => Math.max(max, edge.score), 0);
         const symptomPenalty = item.component === "Device/Agent" ? 35 : item.component === "Deployment Server" ? 18 : 0;
-        const total = item.causalScore + (propagation.score * 0.55) - (incomingScore * 0.65) - symptomPenalty;
+        const latenessPenalty = (Number.isFinite(anchorTime) && Number.isFinite(item.sortTime) && item.sortTime > anchorTime + 60000)
+            ? 90
+            : 0;
+        const total = item.causalScore + (propagation.score * 0.55) - (incomingScore * 0.65) - symptomPenalty - latenessPenalty;
         return { item, propagation, incomingScore, total };
     });
 
@@ -1661,7 +1771,7 @@ function buildDominoAnalysis(events, blocks) {
     });
 
     const all = [...normalizedEvents, ...normalizedBlocks]
-        .filter(item => item.severity !== "Info" || item.sql || item.innermostException)
+        .filter(item => item.severity !== "Info" || item.sql || item.innermostException || isPivotalAuthEvent(item.text))
         .sort((a, b) => {
             if (a.sortTime !== b.sortTime) return a.sortTime - b.sortTime;
             if (a.file !== b.file) return a.file.localeCompare(b.file);
@@ -1671,9 +1781,29 @@ function buildDominoAnalysis(events, blocks) {
     if (all.length === 0) return { report: "", root: null };
 
     const architectChoice = chooseArchitectRoot(all);
-    const root = architectChoice ? architectChoice.item : all[0];
+    let root = architectChoice ? architectChoice.item : all[0];
+    let propagation = architectChoice ? architectChoice.propagation : getPropagationPath(root, all);
+
+    // AUTHORIZATION-VERDICT RE-ANCHOR: when the strongest candidate is a permission DENIAL
+    // (AccessControlException / "Feature permission 'X' is denied" / "Failed access right
+    // check"), the denial is only where the verdict first HURT. The actual first domino is
+    // the earlier permission-resolution verdict "User has Granted None permission" — the
+    // moment the user's directory groups resolved to no effective SOTI rights. Re-anchor the
+    // chain there when such a verdict exists at or before the denial.
+    let reanchoredFrom = null;
+    if (root && /\b(Feature permission '[^']*' is denied|Failed access right check|AccessControlException)\b/i.test(root.text || "")) {
+        const verdict = all
+            .filter(item => /\bGranted None permission\b/i.test(item.text || ""))
+            .filter(item => !Number.isFinite(item.sortTime) || !Number.isFinite(root.sortTime) || item.sortTime <= root.sortTime + 1000)
+            .sort((a, b) => (a.sortTime ?? Infinity) - (b.sortTime ?? Infinity) || (a.line || 0) - (b.line || 0))[0];
+        if (verdict && verdict !== root) {
+            reanchoredFrom = root;
+            root = verdict;
+            propagation = getPropagationPath(root, all);
+        }
+    }
+
     const rootIndex = all.findIndex(item => item === root);
-    const propagation = architectChoice ? architectChoice.propagation : getPropagationPath(root, all);
     const downstream = propagation.path.slice(1);
     const preRoot = all.slice(0, Math.max(0, rootIndex)).slice(-5);
 
@@ -1689,6 +1819,9 @@ function buildDominoAnalysis(events, blocks) {
         });
     }
 
+    if (reanchoredFrom) {
+        report += `Root re-anchored: the strongest candidate was the permission DENIAL at ${formatIncidentLocation(reanchoredFrom)}, but a denial is a consequence — the first domino is the permission-resolution VERDICT below ("Granted None permission" = the user's directory groups resolved to NO effective SOTI rights). Every subsequent access check for that session must fail.\n`;
+    }
     report += `Selected primary causal candidate:\n`;
     report += `- ${formatIncidentLocation(root)} | ${root.component} | ${root.severity} | ${root.failureKind} | causal score ${root.causalScore}\n`;
     if (root.innermostException) report += `  Innermost exception: ${root.innermostException}\n`;
@@ -2335,6 +2468,17 @@ function isExceptionContinuationLine(line) {
         || /^\s*$/.test(line);
 }
 
+// Exception banner/continuation lines ("* Exception: ... *", stack frames) carry no timestamp
+// of their own. Without inheritance they sort to +Infinity — i.e. AFTER every real event —
+// which silently breaks every chronology-based causal decision. Walk back to the nearest
+// timestamped line so the event keeps its true position on the master timeline.
+function nearestTimestampAt(timestampCache, idx, maxBack = 60) {
+    for (let i = idx; i >= 0 && i >= idx - maxBack; i--) {
+        if (timestampCache[i]) return timestampCache[i];
+    }
+    return "";
+}
+
 async function extractExceptionBlocksFromLog(log) {
     await precomputeLogIntel(log);
     const name = log.name || "Unknown log";
@@ -2392,12 +2536,13 @@ async function extractExceptionBlocksFromLog(log) {
         if (sql) categories.add('SQL/Database');
         if (classes.length > 0) categories.add('Exception');
 
+        const blockTimestamp = timestampCache[start] || nearestTimestampAt(timestampCache, start);
         blocks.push({
             file: name,
             startLine: start + 1,
             endLine: start + blockLines.length,
-            timestamp: timestampCache[start],
-            sortTime: parseLogTimestampForSort(timestampCache[start]),
+            timestamp: blockTimestamp,
+            sortTime: parseLogTimestampForSort(blockTimestamp),
             categories: Array.from(categories),
             exceptionChain: classes,
             outerException: classes[0] || "",
@@ -2443,11 +2588,27 @@ function bumpSignalMap(map, key, sample) {
         firstTimestamp: sample.timestamp,
         lastTimestamp: sample.timestamp,
         file: sample.file,
+        files: new Set(),
         sample: sample.text
     };
     existing.count++;
-    existing.lastLine = sample.lineNum;
-    existing.lastTimestamp = sample.timestamp || existing.lastTimestamp;
+    existing.files.add(sample.file || "");
+    // "First" must mean first IN TIME, not first scanned: with multiple files the scan order
+    // is file order, and reporting a 17:15 DS line as the "First error severity" while the MS
+    // log had errors since midnight sent the whole analysis down the wrong path.
+    const sampleTime = parseLogTimestampForSort(sample.timestamp);
+    const firstTime = parseLogTimestampForSort(existing.firstTimestamp);
+    if (Number.isFinite(sampleTime) && (!Number.isFinite(firstTime) || sampleTime < firstTime)) {
+        existing.firstTimestamp = sample.timestamp;
+        existing.firstLine = sample.lineNum;
+        existing.file = sample.file;
+        existing.sample = sample.text;
+    }
+    const lastTime = parseLogTimestampForSort(existing.lastTimestamp);
+    if (!Number.isFinite(sampleTime) || !Number.isFinite(lastTime) || sampleTime >= lastTime) {
+        existing.lastTimestamp = sample.timestamp || existing.lastTimestamp;
+        existing.lastLine = sample.lineNum;
+    }
     if (!existing.firstTimestamp && sample.timestamp) existing.firstTimestamp = sample.timestamp;
     map.set(key, existing);
 }
@@ -2502,16 +2663,24 @@ function renderSignalSummary(summary, title = "EXCEPTION / ERROR KEYWORD SWEEP")
     if (severityRows.length > 0) {
         report += `Severity tokens: ${severityRows.map(([sev, count]) => `${sev}:${count}`).join(', ')}\n`;
     }
+    // "Earliest" is chronological (bumpSignalMap keeps the earliest-timestamped sample), and
+    // line ranges are never blended across files — the old "file:Lines 1497-71723" style mixed
+    // two different logs into one nonsensical citation.
+    const formatSignalRow = row => {
+        const multiFile = row.files && row.files.size > 1 ? ` | spans ${row.files.size} files` : "";
+        const firstLoc = `${row.file ? `${row.file}:` : ""}Line ${row.firstLine}`;
+        return `${row.count}x | earliest at ${firstLoc}${row.firstTimestamp ? ` @ ${row.firstTimestamp}` : ""}${multiFile} | ${row.sample}`;
+    };
     if (exceptionRows.length > 0) {
         report += `Exception classes:\n`;
         exceptionRows.forEach(([cls, row]) => {
-            report += `- ${cls}: ${row.count}x | ${row.file ? `${row.file}:` : ""}Lines ${row.firstLine}-${row.lastLine}${row.firstTimestamp ? ` | First ${row.firstTimestamp}` : ""} | ${row.sample}\n`;
+            report += `- ${cls}: ${formatSignalRow(row)}\n`;
         });
     }
     if (keywordRows.length > 0) {
         report += `High-signal keywords:\n`;
         keywordRows.forEach(([keyword, row]) => {
-            report += `- ${keyword}: ${row.count}x | ${row.file ? `${row.file}:` : ""}Lines ${row.firstLine}-${row.lastLine}${row.firstTimestamp ? ` | First ${row.firstTimestamp}` : ""} | ${row.sample}\n`;
+            report += `- ${keyword}: ${formatSignalRow(row)}\n`;
         });
     }
     if (highSignalRows.length > 0) {
@@ -3799,6 +3968,92 @@ function validateForensicAIResponse(text, logs) {
     return true;
 }
 
+const REPORT_TIMESTAMP_RE = /\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?\b/g;
+
+// Remove exact-duplicate markdown table rows (same trimmed "| ... |" line repeated). A triage
+// table listing the identical event twice is always a generation artifact, never evidence.
+function dedupeReportTableRows(text) {
+    const seen = new Set();
+    return (text || "").split('\n').filter(line => {
+        const trimmed = line.trim();
+        if (!(trimmed.startsWith('|') && trimmed.endsWith('|'))) return true;
+        if (/^\|[\s:|-]+\|$/.test(trimmed)) return true; // separator rows may legitimately repeat per table
+        if (seen.has(trimmed)) return false;
+        seen.add(trimmed);
+        return true;
+    }).join('\n');
+}
+
+// Deterministic post-verification of an AI log-analysis answer. Never rewrites the analysis —
+// it removes duplicate table rows and APPENDS a visible auto-verification warning when the
+// answer contradicts the evidence in a machine-checkable way:
+//   1. the propagation chain runs backwards in time (an "effect" earlier than its "cause"),
+//   2. the stated Root Cause is later than the earliest failure in its own triage table,
+//   3. a cited timestamp does not exist in any attached log (hallucination guard).
+function postValidateForensicAnswer(text, logs) {
+    if (!text || !logs || logs.length === 0) return text;
+    let out = dedupeReportTableRows(text);
+    const notes = [];
+
+    const parseTs = ts => parseLogTimestampForSort(ts);
+
+    // --- 1) Propagation chain must never go backwards in time ---
+    const propMatch = out.match(/#+\s*(?:\d+\.\s*)?(?:THE\s+)?Propagation Path[\s\S]*?(?=\n#+\s|\n\*\*Root Cause|$)/i);
+    if (propMatch) {
+        const chainTs = (propMatch[0].match(REPORT_TIMESTAMP_RE) || []).map(parseTs).filter(Number.isFinite);
+        for (let k = 1; k < chainTs.length; k++) {
+            if (chainTs[k] < chainTs[0] - 2000) {
+                notes.push(`The propagation path cites an effect EARLIER than its stated cause — a cause can never postdate its effect. Re-check the root cause against the INCIDENT ONSET timeline.`);
+                break;
+            }
+        }
+    }
+
+    // --- 2) Root Cause must not postdate the earliest failure in the triage table ---
+    const rootMatch = out.match(/\*\*\s*Root Cause\s*:?\s*\*\*([^\n]*)/i) || out.match(/^>?\s*\*\*ROOT CAUSE\*\*\s*:?([^\n]*)/im);
+    if (rootMatch) {
+        const rootTsRaw = (rootMatch[1].match(REPORT_TIMESTAMP_RE) || [])[0];
+        const rootTs = rootTsRaw ? parseTs(rootTsRaw) : NaN;
+        const tableTs = out.split('\n')
+            .filter(l => l.trim().startsWith('|') && !/^\|[\s:|-]+\|$/.test(l.trim()))
+            .map(l => (l.match(REPORT_TIMESTAMP_RE) || [])[0])
+            .filter(Boolean)
+            .map(parseTs)
+            .filter(Number.isFinite);
+        if (Number.isFinite(rootTs) && tableTs.length > 0 && rootTs > Math.min(...tableTs) + 2000) {
+            notes.push(`The stated Root Cause (${rootTsRaw}) is LATER than the earliest failure cited in the triage table — a later event cannot cause an earlier failure. The true root cause is at or before the first failure.`);
+        }
+    }
+
+    // --- 3) Every cited timestamp must exist in the attached logs ---
+    // Report timestamps are always normalized to "YYYY-MM-DD HH:MM:SS.mmm" (space-separated),
+    // but the SOURCE bytes are not: HAR files store "YYYY-MM-DDTHH:MM:SS.mmmZ" (ISO 8601 with a
+    // literal T and Z, per buildHarAnalysis's own `.replace('T', ' ').replace(/Z$/, '')`). A raw
+    // substring match against the space form alone therefore flags every correctly-cited HAR
+    // timestamp as "hallucinated". Check every real on-disk representation before giving up.
+    const cited = [...new Set(out.match(REPORT_TIMESTAMP_RE) || [])].slice(0, 40);
+    const missing = [];
+    for (const ts of cited) {
+        const secondsPrefix = ts.replace(/\.\d{1,3}$/, "");
+        const isoTs = ts.replace(' ', 'T');
+        const isoSecondsPrefix = secondsPrefix.replace(' ', 'T');
+        const found = logs.some(l => {
+            const content = l.content || "";
+            return content.includes(ts) || content.includes(secondsPrefix)
+                || content.includes(isoTs) || content.includes(isoSecondsPrefix);
+        });
+        if (!found) missing.push(ts);
+    }
+    if (missing.length > 0) {
+        notes.push(`Timestamp${missing.length > 1 ? "s" : ""} ${missing.slice(0, 3).join(", ")} ${missing.length > 1 ? "were" : "was"} NOT found in the attached logs — treat the associated claim${missing.length > 1 ? "s" : ""} as unverified.`);
+    }
+
+    if (notes.length > 0) {
+        out += `\n\n> ⚠️ **Auto-verification (deterministic cross-check against the logs):**\n${notes.map(n => `> - ${n}`).join('\n')}`;
+    }
+    return out;
+}
+
 function buildFocusedRawCoverage(content, lines, focusLineNums) {
     const headSize = 8000;
     const tailSize = 25000;
@@ -3878,6 +4133,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
     const categoryCounts = {};
     const signalSummary = createSignalSummary();
     const installerReport = await buildInstallerFailureAnalysis(logs);
+    const fileWindows = []; // { file, firstTimestamp, lastTimestamp, spanMs, lineCount }
     let totalLines = 0;
     let totalChars = 0;
 
@@ -3892,6 +4148,22 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         await precomputeLogIntel(log);
         const { prefilteredIndices, intelCache, timestampCache, signatureCache } = log.precomputedIntel;
 
+        // Per-file covered time window: which part of the incident can this file even see?
+        // (A DS log that only covers the final 3 minutes cannot contain the cause of an MS
+        // failure that happened 8 minutes earlier — the report must make that visible.)
+        let firstTs = "", lastTs = "";
+        for (let t = 0; t < timestampCache.length; t++) { if (timestampCache[t]) { firstTs = timestampCache[t]; break; } }
+        for (let t = timestampCache.length - 1; t >= 0; t--) { if (timestampCache[t]) { lastTs = timestampCache[t]; break; } }
+        const winStart = parseLogTimestampForSort(firstTs);
+        const winEnd = parseLogTimestampForSort(lastTs);
+        fileWindows.push({
+            file: name,
+            firstTimestamp: firstTs,
+            lastTimestamp: lastTs,
+            spanMs: (Number.isFinite(winStart) && Number.isFinite(winEnd)) ? Math.max(0, winEnd - winStart) : 0,
+            lineCount: lines.length
+        });
+
         // Safety cap (per log): a data-export CSV can have 100k+ "forensic" rows; we only use the
         // earliest ~35 + top ~15 by score, so cap how many events we build to keep memory/CPU bounded.
         const MAX_EVENTS_PER_LOG = 6000;
@@ -3904,7 +4176,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
             const idx = prefilteredIndices[i];
             const line = lines[idx];
             const intel = intelCache[idx];
-            const timestamp = timestampCache[idx] || "";
+            const timestamp = timestampCache[idx] || nearestTimestampAt(timestampCache, idx);
 
             updateSignalSummary(signalSummary, intel, line, idx + 1, name);
             if (!intel.isForensic || intel.hasStackFrame) continue;
@@ -3916,6 +4188,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
                 timestamp,
                 sortTime: parseLogTimestampForSort(timestamp),
                 text: line.trim(),
+                sig: signatureCache[idx] || "",
                 categories: intel.categories,
                 hasException: intel.hasException,
                 severityToken: intel.severityToken,
@@ -3960,13 +4233,47 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
     }
 }
 
+    // === CHRONIC BACKGROUND-NOISE DETECTION ===
+    // A failure signature that repeats many times and spans most of the file's time window
+    // (e.g. a reminder error firing every 5 minutes since midnight) is a pre-existing chronic
+    // condition, NOT the incident trigger. Chronic events must not flood the master-timeline
+    // start (which previously began with 20 rows of midnight reminder noise) and must not
+    // out-rank the actual incident onset in root-cause ranking.
+    const windowByFile = new Map(fileWindows.map(w => [w.file, w]));
+    const chronicSigs = new Set();
+    for (const [sigKey, sig] of signatureMap.entries()) {
+        if (sig.count < 8) continue;
+        const first = parseLogTimestampForSort(sig.firstTimestamp);
+        const last = parseLogTimestampForSort(sig.lastTimestamp);
+        if (!Number.isFinite(first) || !Number.isFinite(last)) continue;
+        const spanMs = last - first;
+        const fileSpan = (windowByFile.get(sig.file) || {}).spanMs || 0;
+        if (spanMs >= 2 * 3600000 || (fileSpan > 30 * 60000 && spanMs >= 0.6 * fileSpan)) {
+            chronicSigs.add(sigKey);
+        }
+    }
+    let chronicEventCount = 0;
+    for (const event of allEvents) {
+        if (event.sig && chronicSigs.has(`${event.file}::${event.sig}`)) {
+            event.chronic = true;
+            event.score = Math.max(0, event.score - 60);
+            chronicEventCount++;
+        }
+    }
+
     const byTime = [...allEvents].sort((a, b) => {
         if (a.sortTime !== b.sortTime) return a.sortTime - b.sortTime;
         if (a.file !== b.file) return a.file.localeCompare(b.file);
         return a.lineNum - b.lineNum;
     });
     const byScore = [...allEvents].sort((a, b) => b.score - a.score || a.sortTime - b.sortTime || a.lineNum - b.lineNum);
-    const earliest = byTime.slice(0, 35);
+    // Master timeline start = INCIDENT ONSET: the earliest NON-chronic events that carry real
+    // failure weight (ERR/WRN severity, an exception, or a high candidate score) — not DBG/INF
+    // chatter. Fall back progressively when a log has nothing stronger.
+    const nonChronicByTime = byTime.filter(e => !e.chronic);
+    const onsetPool = nonChronicByTime.filter(e =>
+        e.hasException || /^(FATAL|CRITICAL|PANIC|SEVERE|ERROR|WARN)$/.test(e.severityToken || "") || e.score >= 90);
+    const earliest = (onsetPool.length > 0 ? onsetPool : (nonChronicByTime.length > 0 ? nonChronicByTime : byTime)).slice(0, 35);
     const topRootCandidates = byScore.slice(0, 15);
     const sqlEvents = allEvents.filter(e => e.categories.includes('SQL/Database'))
         .sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)
@@ -3991,9 +4298,10 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
     // highest-signal candidates. On a big/noisy log (tens of thousands of events) passing everything
     // was minutes of CPU (the multi-file/large-log "hang"); the top few hundred by score still
     // contain the real root and its downstream chain.
-    const dominoEvents = allEvents.length > 400
-        ? [...allEvents].sort((a, b) => b.score - a.score).slice(0, 400)
-        : allEvents;
+    const dominoCandidatePool = allEvents.some(e => !e.chronic) ? allEvents.filter(e => !e.chronic) : allEvents;
+    const dominoEvents = dominoCandidatePool.length > 400
+        ? [...dominoCandidatePool].sort((a, b) => b.score - a.score).slice(0, 400)
+        : dominoCandidatePool;
     const dominoBlocks = exceptionBlocks.length > 200
         ? [...exceptionBlocks].sort((a, b) => b.score - a.score).slice(0, 200)
         : exceptionBlocks;
@@ -4068,6 +4376,22 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
 
     report += `Detected ${allEvents.length} forensic event(s) across all logs.\n`;
     report += `Parsed ${exceptionBlocks.length} exception/SQL block(s) with stack/inner-exception intelligence.\n`;
+    if (chronicEventCount > 0) {
+        report += `${chronicEventCount} event(s) belong to ${chronicSigs.size} CHRONIC background signature(s) (repeating across most of the log window — pre-existing noise, NOT the incident trigger). They are down-ranked and excluded from the incident-onset timeline; see MOST REPEATED DISTINCT FAILURES for their counts.\n`;
+    }
+
+    report += `\n--- LOG COVERAGE WINDOWS (what each file can and cannot witness) ---\n`;
+    fileWindows.forEach(w => {
+        report += `${w.file}: ${w.lineCount} lines, covers ${w.firstTimestamp || "unknown"} -> ${w.lastTimestamp || "unknown"}\n`;
+    });
+    const finiteWindows = fileWindows.filter(w => Number.isFinite(parseLogTimestampForSort(w.firstTimestamp)));
+    if (finiteWindows.length > 1) {
+        const latestStart = finiteWindows.reduce((a, b) => parseLogTimestampForSort(a.firstTimestamp) > parseLogTimestampForSort(b.firstTimestamp) ? a : b);
+        const earliestStart = finiteWindows.reduce((a, b) => parseLogTimestampForSort(a.firstTimestamp) < parseLogTimestampForSort(b.firstTimestamp) ? a : b);
+        if (parseLogTimestampForSort(latestStart.firstTimestamp) - parseLogTimestampForSort(earliestStart.firstTimestamp) > 5 * 60000) {
+            report += `NOTE: ${latestStart.file} only begins at ${latestStart.firstTimestamp} — it CANNOT contain the cause of anything that happened before that time. Do not name an event from it as root cause for earlier failures in ${earliestStart.file}.\n`;
+        }
+    }
 
     const cats = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1]);
     if (cats.length > 0) {
@@ -4168,7 +4492,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         const timelineEvents = largeInstallerLogs.length === logs.length
             ? earliest.filter(e => /\b(SqlException|ALTER DATABASE|Cannot open database|Login failed|Upgrade failed|Location Service database|returning 1603)\b/i.test(e.text))
             : earliest;
-        report += `\n--- EARLIEST FORENSIC EVENTS (MASTER TIMELINE START — cite as filename:Line N) ---\n`;
+        report += `\n--- INCIDENT ONSET — EARLIEST NON-ROUTINE FORENSIC EVENTS (chronic background noise excluded; master timeline starts HERE — cite as filename:Line N) ---\n`;
         timelineEvents.slice(0, patternMode ? 8 : 20).forEach(event => {
             report += `${event.file}:Line ${event.lineNum} — ${event.text}${event.timestamp ? `  (time ${event.timestamp})` : ""}\n`;
         });
@@ -4234,14 +4558,20 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     let i = 0;
     let prefilterIdx = 0;
 
+    // When the context-entry budget is exhausted we STOP CAPTURING raw context but KEEP
+    // SCANNING for candidates and signature stats. The old hard `break` made the whole-file
+    // scan silently end mid-file on noisy logs — a 72k-line MS log full of 5-minute reminder
+    // noise used up the budget by midday, so an incident at 17:07 never appeared in the report.
+    let captureExhausted = false;
+
     while (i < totalLines) {
         if (i % 2000 === 0 && i > 0) {
             await yieldIfNeeded();
         }
-        // Bound the deep scan on huge, error-dense logs: the output is budget-limited to a few KB
-        // anyway, and the cross-log incident index already supplies the high-signal map. Without
-        // this, a 60k+ line runtime log runs scoreRootCauseCandidate tens of thousands of times.
-        if (forensicEntries.length > 4000) break;
+        // Safety valve for pathological inputs (data-export CSVs where every row is "forensic"):
+        // candidates alone are cheap, but not infinitely so.
+        if (rootCandidates.length > 25000) break;
+        if (forensicEntries.length > 4000) captureExhausted = true;
 
         if (!inException) {
             // Jump to the next prefiltered index >= i
@@ -4263,6 +4593,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         updateSignalSummary(signalSummary, intel, line, i + 1, fileName);
 
         // Track error type for summary
+        let sigRepeats = 0;
         if (isForensic && !intel.hasStackFrame) {
             intel.categories.forEach(cat => { errorTypeCounts[cat] = (errorTypeCounts[cat] || 0) + 1; });
             if (firstErrorLine === null) firstErrorLine = i + 1;
@@ -4285,6 +4616,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
                 existing.lastTimestamp = timestamp || existing.lastTimestamp;
                 intel.categories.forEach(c => existing.categories.add(c));
                 signatureMap.set(sig, existing);
+                sigRepeats = existing.count;
             }
 
             rootCandidates.push({
@@ -4292,6 +4624,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
                 timestamp: timestamp,
                 sortTime: parseLogTimestampForSort(timestamp),
                 text: line.trim(),
+                sig: sig || "",
                 categories: intel.categories,
                 hasException: intel.hasException,
                 severityToken: intel.severityToken,
@@ -4310,7 +4643,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         // === EXCEPTION CHAIN TRACKER ===
         if (inException) {
             if (intel.hasStackFrame || trimmed === "" || (exceptionLinesCount < 8) || intel.hasException) {
-                if (!seenLineNums.has(i + 1)) {
+                if (!captureExhausted && !seenLineNums.has(i + 1)) {
                     forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
                     seenLineNums.add(i + 1);
                 }
@@ -4326,12 +4659,16 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         if (!inException && (intel.hasException || intel.categories.includes('SQL/Database') || intel.categories.includes('Certificate/TLS') || intel.categories.includes('Memory/Thread') || intel.categories.includes('Installer/MSI') || intel.keywordHits.some(hit => hit.score >= 30) || intel.hasStackFrame || (i < totalLines - 1 && isStackTraceLine(lines[i + 1])))) {
             inException = true;
             exceptionLinesCount = 1;
-            if (!seenLineNums.has(i + 1)) {
+            if (!captureExhausted && !seenLineNums.has(i + 1)) {
                 forensicEntries.push({ lineNum: i + 1, text: line, isError: true });
                 seenLineNums.add(i + 1);
             }
         } else if (!inException) {
-            if (isForensic) {
+            // Capture ±5 lines of raw context — but only for the first few occurrences of a
+            // signature. The 4th+ repeat of the same normalized error adds no new information
+            // and previously let periodic reminder noise exhaust the capture budget hours
+            // before the actual incident appeared in the file.
+            if (isForensic && !captureExhausted && sigRepeats <= 3) {
                 const start = Math.max(0, i - 5);
                 const end = Math.min(totalLines - 1, i + 5);
                 for (let j = start; j <= end; j++) {
@@ -4406,11 +4743,29 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         .sort((a, b) => b.count - a.count || a.firstLine - b.firstLine)
         .slice(0, 25);
 
+    // Chronic-noise dampening: signatures repeating across most of the file's window are
+    // pre-existing background failures, not the incident — they must not win the ranking.
+    {
+        let fileFirstTs = "", fileLastTs = "";
+        for (let t = 0; t < timestampCache.length; t++) { if (timestampCache[t]) { fileFirstTs = timestampCache[t]; break; } }
+        for (let t = timestampCache.length - 1; t >= 0; t--) { if (timestampCache[t]) { fileLastTs = timestampCache[t]; break; } }
+        const fs2 = parseLogTimestampForSort(fileFirstTs);
+        const fe2 = parseLogTimestampForSort(fileLastTs);
+        const fileSpanMs = (Number.isFinite(fs2) && Number.isFinite(fe2)) ? Math.max(0, fe2 - fs2) : 0;
+        const chronicKeys = computeChronicSignatureKeys(signatureMap.entries(), fileSpanMs);
+        for (const cand of rootCandidates) {
+            if (cand.sig && chronicKeys.has(cand.sig)) {
+                cand.chronic = true;
+                cand.score = Math.max(0, cand.score - 60);
+            }
+        }
+    }
+
     const rankedRootCandidates = rootCandidates
         .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
         .slice(0, 12);
     const fileDomino = buildDominoAnalysis(
-        rootCandidates.map(event => ({ ...event, file: fileName })),
+        rootCandidates.filter(e => !e.chronic).map(event => ({ ...event, file: fileName })),
         parsedBlocks
     );
 
@@ -4665,6 +5020,8 @@ YOU MUST SCAN THE ENTIRE FORENSIC INCIDENT REPORT LINE BY LINE. DO NOT SKIP ANY 
 The ROOT-CAUSE CANDIDATE RANKING is a forensic hint, not a verdict. Validate it by chronology, inner exception chains, and downstream symptoms before declaring root cause.
 The DETERMINISTIC ROOT-CAUSE HYPOTHESIS is the machine parser's strongest candidate. You MUST either confirm it with cited evidence or reject it with a stronger earlier causal event.
 The CAUSAL DOMINO ANALYSIS is mandatory evidence. It is the "Log Whisperer" layer: it lines up every event on one master timeline, scores causal edges using SOTI architecture dependencies, and separates the first domino from distracting downstream noise. Never call a later DS/Agent/Web failure the root cause if an earlier SQL/Identity/MS/certificate/auth failure explains it.
+CHRONOLOGY IS LAW: a root cause exists AT or BEFORE the first failure it explains — an event whose timestamp is AFTER the symptom cannot be its cause, full stop. Use the LOG COVERAGE WINDOWS section: a file whose window only begins at time T cannot contain the cause of failures before T. The INCIDENT ONSET section marks where the incident starts; chronic background signatures (the same error repeating all day) are pre-existing noise, never the incident trigger.
+PERMISSIONS / SSO / Entra cases: follow the authorization decision trail — SAML logon → group resolution ("has N groups", "groups association done in DB") → the permission VERDICT ("User has Granted None permission") → the denials it produces ("Failed access right check", AccessControlException "Feature permission 'X' is denied"). "Granted None permission" = the user's directory groups resolved to NO effective SOTI rights; that verdict is the cause and every later denial is its symptom.
 Installer logs require different judgement: the earliest error may be non-fatal validation, while the real root cause is usually the first deployment/custom-action failure that causes rollback/1603 — but you must prove that from cited lines, not assume it.
 
 YOU MUST OUTPUT THIS EXACT STRUCTURE:
@@ -4793,8 +5150,11 @@ EVIDENCE, in order of authority:
 3. Raw snippets (=== FILE: ... ===) — to confirm exact lines.
 
 HOW TO REASON:
+- CHRONOLOGY IS LAW: a root cause exists AT or BEFORE the first failure it explains. NEVER name an event as root cause if its timestamp is AFTER the symptom it supposedly caused — compare the timestamps before you write the verdict. Check the LOG COVERAGE WINDOWS section: a file whose window only begins at time T cannot contain the cause of anything that failed before T.
+- The INCIDENT ONSET section marks where the incident actually starts. Chronic background signatures (the same error repeating all day, e.g. every 5 minutes since midnight) are pre-existing noise, already down-ranked — do not present them as the root cause OR as the incident start.
 - Read exception chains to the INNERMOST exception. Separate the EARLIEST causal error from downstream SYMPTOMS — only the first error in a cascade is the root cause.
-- CORRELATE WITH THE CASE: if a [REPORTED ISSUE]/[ISSUE SUMMARY]/[CASE] describes a specific symptom (redirect / wrong URL / FQDN, SSO or login failure, slowness, enrollment, certificate), PRIORITIZE the evidence that matches that symptom over an unrelated high-severity error elsewhere. A "redirect to the wrong/internal FQDN" symptom points to SSO issuer / redirect-URL config — e.g. "No SSO entity found ... request issuer: <internal .local FQDN>", invalid_client_configuration, HTTP 429 — NOT an unrelated SQL constraint or device-unmap error.
+- CORRELATE WITH THE CASE: if a [REPORTED ISSUE]/[ISSUE SUMMARY]/[CASE] describes a specific symptom (redirect / wrong URL / FQDN, SSO or login failure, permissions, slowness, enrollment, certificate), PRIORITIZE the evidence that matches that symptom over an unrelated high-severity error elsewhere. A "redirect to the wrong/internal FQDN" symptom points to SSO issuer / redirect-URL config — e.g. "No SSO entity found ... request issuer: <internal .local FQDN>", invalid_client_configuration, HTTP 429 — NOT an unrelated SQL constraint or device-unmap error.
+- PERMISSIONS / SSO / Entra-Azure AD cases: the authorization decision trail is the primary evidence chain — SAML/SSO logon → directory group resolution (Graph getMemberGroups, "has N groups", "groups association done in DB") → the permission VERDICT ("checked access for user principal N. User has Granted None permission") → the denials it produces ("Failed access right check", AccessControlException "Feature permission 'X' is denied"). "Granted None permission" means the user's directory groups resolved to NO effective rights — that is the cause; each later denial is its symptom. Compare which permissions fail for the SSO user vs the local user.
 - A wrong/internal issuer or redirect URL (an internal *.local FQDN where the external host is expected) is the classic cause of an SSO redirect loop and HTTP 429 (Too Many Requests).
 - SqlException / Timeout / Deadlock / Login failed / certificate / auth failures are high-priority candidates ONLY when they fit the reported symptom.
 - The Web Console runs INSIDE the SOTI Management Service — never mention IIS.
@@ -4811,17 +5171,17 @@ OUTPUT — use these exact headings; begin directly with "## 🔍" (no "Based on
 ### 1. Chronological Triage
 | Timestamp | Location | Event |
 | --- | --- | --- |
-(4–6 rows from the evidence, earliest first: the first real error, the key failures, and the user-visible symptom — each with a real file:Line.)
+(4–6 rows from the evidence, in STRICT timestamp order, earliest first: the first real error, the key failures, and the user-visible symptom — each with a real file:Line and its real timestamp copied verbatim. NO duplicate rows. Include evidence from EVERY attached file that has events in the incident window; if a file contributes nothing relevant, state that in Environment instead of inventing a row for it.)
 
 ### 2. Propagation Path (domino effect)
-A short numbered chain: earliest causal error → downstream effects → user-visible symptom.
+A short numbered chain: earliest causal error → downstream effects → user-visible symptom. Each step's timestamp must be >= the previous step's — if your chain goes backwards in time, your root cause is wrong.
 
 ### 3. Root Cause — Symptom vs. Source
 | Finding | Classification |
 | --- | --- |
-(Mark downstream/cosmetic items as **Symptom**; mark the true cause as **ROOT CAUSE**.)
+(Mark downstream/cosmetic items as **Symptom**; mark the true cause as **ROOT CAUSE**. The ROOT CAUSE row must be the EARLIEST event of the chain — an event that happens after the failures it "explains" is a Symptom or unrelated noise, never the root cause.)
 
-**Root Cause:** one precise sentence naming the real cause (with file:Line and the exact message).
+**Root Cause:** one precise sentence naming the real cause (with file:Line, its timestamp, and the exact message).
 **Recommendation:** the specific SOTI fix (the setting/URL/issuer to correct, service to restart, SQL action, or version + MCMR if a release-notes section names one).`;
 }
 
@@ -7170,6 +7530,14 @@ ${imgContext}`;
         if (!finalAnswer.trim()) {
             console.warn('[Ollama] Empty response after recovery. resp len:', resp.length, 'thinking len:', thinkingResp.length);
             finalAnswer = "⚠️ The model returned an empty response. On a CPU-only setup a large analysis can exhaust the model's output budget before it finishes.\n\n**Try this:**\n- Lower **Context Size** in Settings (⚙) to 8K\n- Attach fewer / smaller logs, or remove very large files\n- Switch to a smaller, faster model (e.g. `gemma4:2b`)\n\nThen click **Analyse Now** again.";
+        } else if (analysisRun && hasLogs) {
+            // Deterministic post-verification: dedupe duplicated triage rows and append a
+            // visible warning when the answer contradicts the logs in a machine-checkable
+            // way (propagation running backwards in time, root cause later than its own
+            // symptoms, timestamps that don't exist in the attached files).
+            try {
+                finalAnswer = postValidateForensicAnswer(finalAnswer, c.logs);
+            } catch (e) { console.warn('Forensic post-validation failed', e); }
         }
 
         // Force the final paint (renderUpdate is a no-op when pendingRender is false, which
