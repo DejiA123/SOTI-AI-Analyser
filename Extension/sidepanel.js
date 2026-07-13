@@ -5346,6 +5346,7 @@ const PulseKB = {
     // file (the per-article title/Source detection can still override the default to '').
     KB_FILES: [
         { path: 'knowledge/PulseKnowledge.md', product: '' },
+        { path: 'knowledge/MobiControl_Knowledge.md', product: 'mobicontrol' },
         { path: 'knowledge/Connect_Knowledge.md', product: 'connect' },
         { path: 'knowledge/XSight_Knowledge.md', product: 'xsight' }
     ],
@@ -5372,7 +5373,21 @@ const PulseKB = {
                 const srcMatch = lower.slice(0, 400).match(/source:[^\n]*soti-(mobicontrol|connect|xsight|identity|assist|snap)/);
                 product = srcMatch ? srcMatch[1] : (defaultProduct || '');
             }
-            out.push({ text, lower, firstLine: title, product });
+            // The Pulse scrape holds every help article once per documentation version
+            // (?V=2024.0 … ?V=2026.1), so near-identical copies flood the top of a search and
+            // crowd the real answers out of the context budget. Key each article by
+            // title + source URL (version parameter stripped) so search() can keep only the
+            // best-scoring copy. Distinct pages that share a title (e.g. the several
+            // "SOTI MobiControl Product Notes" pages) keep distinct keys via their paths.
+            const srcLine = lower.slice(0, 500).match(/^source:\s*(\S+)/m);
+            const sourceUrl = srcLine ? srcLine[1] : '';
+            // The scraper saved the same page under several URL spellings (?V=2024.0…2026.1,
+            // T=/path vs T=path, trailing ".html#wh_topic_body") — normalize all of them to
+            // one key so every copy of an article deduplicates.
+            const dedupeKey = title + '|' + (sourceUrl
+                ? sourceUrl.replace(/#.*$/, '').replace(/\.html\b/, '').replace(/[?&]v=[^&]+/, '').replace(/([?&]t=)\/+/, '$1')
+                : String(text.length));
+            out.push({ text, lower, firstLine: title, product, sourceUrl, dedupeKey });
         }
     },
 
@@ -5448,7 +5463,7 @@ const PulseKB = {
             // product so an XSight page can't answer a Connect question.
             if (target) {
                 if (chunk.product === target) score += 40;
-                else if (chunk.product && ['xsight', 'connect', 'identity'].includes(chunk.product)) score -= 20;
+                else if (chunk.product && ['xsight', 'connect', 'identity', 'mobicontrol'].includes(chunk.product)) score -= 20;
             }
             for (const p of prodLower) {
                 if (firstLine.includes(p)) score += 8;
@@ -5464,15 +5479,25 @@ const PulseKB = {
                     if (cleanChunk.includes('work managed') && cleanQuery.includes('work managed')) score += 30;
                     if (cleanChunk.includes('android enterprise') && cleanQuery.includes('android enterprise')) score += 20;
                 }
-                if (lower.length > 2000) score -= Math.floor((lower.length - 2000) / 500) * 2; // bloat penalty
+                // Bloat penalty, CAPPED: the release-notes/product-notes articles are the
+                // longest in the corpus (~80KB) — an uncapped penalty scored them into
+                // oblivion, so "resolved issues"/version questions never saw them.
+                if (lower.length > 2000) score -= Math.min(24, Math.floor((lower.length - 2000) / 500) * 2);
                 if (/\b(how|step|guide|procedure|enrol)\b/.test(queryLower) && /\b(procedure|steps?|instructions?|about this task)\b/.test(lower)) score += 25;
             }
-            if (score > 0) scored.push({ text, lower, score });
+            if (score > 0) scored.push({ text, lower, score, key: chunk.dedupeKey });
         }
         scored.sort((a, b) => b.score - a.score);
         const out = [];
+        const seenKeys = new Set();
         let budget = maxChars;
-        for (let i = 0; i < Math.min(scored.length, maxArticles); i++) {
+        // Walk the whole ranking (not just the first maxArticles entries) so that skipping a
+        // duplicate copy of an article frees its slot for the next DISTINCT article.
+        for (let i = 0; i < scored.length && out.length < maxArticles; i++) {
+            if (scored[i].key) {
+                if (seenKeys.has(scored[i].key)) continue;
+                seenKeys.add(scored[i].key);
+            }
             const c = PulseKB._excerpt(scored[i].text, scored[i].lower, kws, perChunkCap);
             if (c.length < 30) continue;
             if (budget - c.length < 0 && out.length >= Math.min(3, maxArticles)) break;
@@ -5494,6 +5519,12 @@ const PulseKB = {
         const consider = i => { if (i >= 0 && (pos < 0 || i < pos)) pos = i; };
         for (const k of kws) consider(lower.indexOf(k, title.length));
         consider(lower.indexOf('afw#', title.length));
+        // Release-notes/product-notes pages: the payload (version headings + MCMR resolved
+        // issues) sits after a long block of scraped page chrome that also contains common
+        // keywords — anchor the excerpt on the Resolved Issues section so the answer
+        // survives the cap instead of the navigation junk.
+        const ri = lower.indexOf('resolved issues', title.length);
+        if (ri >= 0) pos = ri;
         if (pos < 0) return text.slice(0, cap) + '\n…[truncated]';
         const start = Math.max(title.length, pos - 700);
         const body = text.slice(start, start + Math.max(200, cap - title.length));
@@ -5513,11 +5544,11 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const isListingAll = /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(qLower) ||
                              /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(history);
         
-        const asksReleaseNotes = isListingAll || 
-                                 /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since)\b/i.test(qLower) ||
+        const asksReleaseNotes = isListingAll ||
+                                 /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|what\s+is\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since)\b/i.test(qLower) ||
                                  /\b(mcmr[\s-]*\d+)\b/i.test(qLower);
 
-        const isTroubleshoot = /\b(how\s+do|how\s+to|error|fail|broken|issue|troubleshoot|cannot|unable|configure|setup|install|database|sql|port|certificate|ca|disconnect|offline|enroll|license|sync|crash|freeze|slow|bug)\b/i.test(qLower) || 
+        const isTroubleshoot = /\b(how\s+do|how\s+to|error|fail|broken|issue|troubleshoot|cannot|unable|configure|setup|install|database|sql|ports?|certificate|ca|disconnect|offline|enroll|license|sync|crash|freeze|slow|bug|version|latest)\b/i.test(qLower) ||
                                (qLower.split(/\s+/).length > 6 && !asksReleaseNotes);
         
         // Only fetch release notes if explicitly requested or if investigating a hard error/bug where a known issue might exist
@@ -5713,6 +5744,12 @@ async function searchPulseAndDocs(query, msgs, ci) {
                 if (/\b(enroll|enrolment|enrollment|afw#|android\s+enterprise|work\s+managed)\b/i.test(qLower) && !keywordParts.includes('enrollment')) keywordParts.unshift('enrollment');
             }
             if (/\bcertificate|cert\b/i.test(qLower) && !keywordParts.includes('certificate')) keywordParts.unshift('certificate');
+            // Phrase/short-token keywords the plain word-split loses: "what is new" questions
+            // must surface the "What's New in SOTI MobiControl" article, and "ios" (3 letters)
+            // is dropped by the length filter even though it's the strongest signal in an
+            // iOS question.
+            if (/\bwhat('?s| is)\s+new\b/i.test(qLower) && !keywordParts.includes("what's new")) keywordParts.unshift("what's new");
+            if (/\bios\b/i.test(qLower) && !keywordParts.includes('ios')) keywordParts.unshift('ios');
             const keywords = keywordParts.slice(0, 6).join('%20');
 
             if (keywords) {
@@ -5756,6 +5793,33 @@ function extractVersionsFromDOM(html) {
     return [...versions].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
 }
 
+// OFFLINE VERSION FALLBACK: when live pulse.soti.net is unreachable (demo machine behind a
+// VPN/firewall, or fully offline), derive the version lists from the bundled release-notes
+// articles inside knowledge/PulseKnowledge.md so "what is the latest version" questions
+// still answer correctly. The console versions live in the product-notes/release-notes
+// article; the Android agent versions in the android-agent-release-notes article.
+async function deriveOfflineVersionsFromKB() {
+    const out = { console: [], agent: [] };
+    try {
+        const chunks = await PulseKB.ensureIndex();
+        if (!chunks || !chunks.length) return out;
+        const vRx = /\b20\d\d\.\d+(?:\.\d+)?\b/g;
+        const consoleVers = new Set(), agentVers = new Set();
+        for (const c of chunks) {
+            const src = c.sourceUrl || '';
+            if (src.includes('/product-notes/android-agent-release-notes')) {
+                for (const m of c.text.match(vRx) || []) agentVers.add(m);
+            } else if (src.includes('/product-notes/release-notes')) {
+                for (const m of c.text.match(vRx) || []) consoleVers.add(m);
+            }
+        }
+        const sortDesc = s => [...s].sort((x, y) => y.localeCompare(x, undefined, { numeric: true }));
+        out.console = sortDesc(consoleVers);
+        out.agent = sortDesc(agentVers);
+    } catch (e) { console.warn('Offline version derivation from KB failed', e); }
+    return out;
+}
+
 async function fetchLatestSOTIVersions() {
     const mcCatalog = await discoverPulseReleaseNoteCatalog('soti-mobicontrol');
     const consolePath = mcCatalog.find(e => e.path.includes('product-notes/release-notes'))?.path
@@ -5781,7 +5845,17 @@ async function fetchLatestSOTIVersions() {
         const identityVers = extractVersionsFromDOM(identityHtml);
         if (identityVers && identityVers.length > 0) IDENTITY_VERSIONS = identityVers;
     }
-    
+
+    // Live Pulse unreachable (and no cached copy already loaded): fall back to the versions
+    // recorded in the bundled offline knowledge base so version questions still answer.
+    if (VERSIONS.length === 0 || AGENT_VERSIONS.length === 0) {
+        try {
+            const kb = await deriveOfflineVersionsFromKB();
+            if (VERSIONS.length === 0 && kb.console.length > 0) VERSIONS = kb.console;
+            if (AGENT_VERSIONS.length === 0 && kb.agent.length > 0) AGENT_VERSIONS = kb.agent;
+        } catch (e) { console.warn('Offline version fallback failed', e); }
+    }
+
     updateVersionDropdowns();
 
     // Cache the successfully loaded versions to storage to prevent startup race conditions
