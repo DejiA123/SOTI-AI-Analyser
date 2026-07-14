@@ -4030,17 +4030,23 @@ function postValidateForensicAnswer(text, logs) {
     // but the SOURCE bytes are not: HAR files store "YYYY-MM-DDTHH:MM:SS.mmmZ" (ISO 8601 with a
     // literal T and Z, per buildHarAnalysis's own `.replace('T', ' ').replace(/Z$/, '')`). A raw
     // substring match against the space form alone therefore flags every correctly-cited HAR
-    // timestamp as "hallucinated". Check every real on-disk representation before giving up.
+    // timestamp as "hallucinated". `adb logcat -v threadtime` output goes further and never
+    // writes a year at all ("07-14 13:18:04.488"), so the report's own year (added for
+    // readability) can't appear in the source bytes either. Check every real on-disk
+    // representation, including the year-stripped logcat form, before giving up.
     const cited = [...new Set(out.match(REPORT_TIMESTAMP_RE) || [])].slice(0, 40);
     const missing = [];
     for (const ts of cited) {
         const secondsPrefix = ts.replace(/\.\d{1,3}$/, "");
         const isoTs = ts.replace(' ', 'T');
         const isoSecondsPrefix = secondsPrefix.replace(' ', 'T');
+        const noYear = ts.replace(/^\d{4}-/, "");
+        const noYearSecondsPrefix = secondsPrefix.replace(/^\d{4}-/, "");
         const found = logs.some(l => {
             const content = l.content || "";
             return content.includes(ts) || content.includes(secondsPrefix)
-                || content.includes(isoTs) || content.includes(isoSecondsPrefix);
+                || content.includes(isoTs) || content.includes(isoSecondsPrefix)
+                || content.includes(noYear) || content.includes(noYearSecondsPrefix);
         });
         if (!found) missing.push(ts);
     }
