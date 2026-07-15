@@ -8346,16 +8346,18 @@ function extractForensicTriageForJira(c) {
 function enforceJiraLogAnalysis(jira, logAnalysisContent) {
     if (!jira || !logAnalysisContent) return jira;
     const block = `Log Analysis:\n{code:java}\n${logAnalysisContent}\n{code}`;
+    // Replacer functions throughout: raw log text can contain "$&"/"$1"-style
+    // sequences that String.replace would otherwise expand.
 
     // Primary: replace "Log Analysis:" plus the immediately following {code...}...{code}
     // block (first closing {code} wins, so a later code block is left untouched).
     const rx = /Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
-    if (rx.test(jira)) return jira.replace(rx, block);
+    if (rx.test(jira)) return jira.replace(rx, () => block);
 
     // Fallback: the model dropped the code block. Replace from "Log Analysis:" up to
     // the next section separator / heading so nothing else is disturbed.
     const rx2 = /Log Analysis:[\s\S]*?(?=\r?\n\*-{3,}|\r?\nh1\.|\r?\n\*\{color|$)/;
-    if (/Log Analysis:/.test(jira)) return jira.replace(rx2, block + '\n');
+    if (/Log Analysis:/.test(jira)) return jira.replace(rx2, () => block + '\n');
 
     return jira;
 }
@@ -8402,6 +8404,328 @@ function extractLogAnalysisKeywords(logAnalysisContent) {
     return keywords.join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Primary-log selection — the JIRA ticket names ONE log file (the file that
+// actually evidences the reported issue) and its Log Analysis block quotes raw
+// verbatim lines from THAT file only. Works across plain uploads and files
+// extracted from ZIP bundles (whose names look like "bundle.zip/Logs/x.log").
+// ---------------------------------------------------------------------------
+
+// Display name for the "Name of the log file" field: the bare file name, even
+// for logs that came out of a ZIP ("report.zip/Logs/mobicontrol.log" → "mobicontrol.log").
+function jiraLogBaseName(name) {
+    if (!name) return 'N/A';
+    const parts = String(name).trim().split(/[\\/]/);
+    return parts[parts.length - 1] || String(name);
+}
+
+function jiraLogLines(log) {
+    if (!log) return [];
+    if (Array.isArray(log.lines) && log.lines.length) return log.lines;
+    if (typeof log.content === 'string' && log.content) {
+        log.lines = log.content.split('\n'); // cache — same shape precomputeLogIntel expects
+        return log.lines;
+    }
+    return [];
+}
+
+// Generic function words plus SOTI/support-prose tokens that appear in every log and
+// would otherwise let an unrelated file win on volume alone.
+const JIRA_TERM_STOPWORDS = new Set([
+    'the', 'and', 'not', 'for', 'via', 'are', 'was', 'has', 'have', 'can', 'could', 'into',
+    'when', 'then', 'than', 'they', 'them', 'this', 'that', 'with', 'from', 'will', 'would',
+    'should', 'does', 'did', 'been', 'being', 'only', 'also', 'all', 'any', 'but', 'our',
+    'out', 'per', 'how', 'why', 'what', 'which', 'yes', 'none', 'n/a', 'tbc', 'etc',
+    'os', 'id', 'ip', 'it', 'is', 'on', 'in', 'of', 'at', 'by', 'or', 'an', 'as', 'be',
+    'do', 'if', 'no', 'so', 'up', 'we', 'to', 'am', 'pm',
+    'soti', 'mobicontrol', 'android', 'device', 'devices', 'version', 'error', 'errors',
+    'log', 'logs', 'file', 'files', 'case', 'issue', 'important', 'notice', 'call', 'note'
+]);
+
+// Pull distinctive, grep-able terms out of the case description (issue summary, notes,
+// repro steps). These drive both "which log file is relevant" and "which lines to quote".
+function deriveJiraIssueTerms(issueText) {
+    const text = String(issueText || '');
+    if (!text.trim()) return [];
+    const terms = new Map();
+    const add = (term, weight) => {
+        const t = (term || '').trim();
+        if (t.length < 2 || t.length > 60 || !/[A-Za-z0-9]/.test(t)) return;
+        const k = t.toLowerCase();
+        if (JIRA_TERM_STOPWORDS.has(k)) return;
+        const prev = terms.get(k);
+        if (!prev || prev.weight < weight) terms.set(k, { term: t, weight });
+    };
+    // Quoted values ("Simbase Black", "globaldata") — the customer's exact identifiers.
+    // Quotes are paired by kind, and single quotes must not touch a word character on
+    // the outside so apostrophes ("Simbase's") never produce garbage terms.
+    for (const m of text.matchAll(/"([^"\n]{2,40})"/g)) add(m[1], 4);
+    for (const m of text.matchAll(/[“”]([^“”\n]{2,40})[“”]/g)) add(m[1], 4);
+    for (const m of text.matchAll(/(?<!\w)'([^'\n]{2,40})'(?!\w)/g)) add(m[1], 4);
+    for (const m of text.matchAll(/(?<!\w)[‘’]([^‘’\n]{2,40})[‘’](?!\w)/g)) add(m[1], 4);
+    // Dotted identifiers: exception classes, package names, hostnames.
+    for (const m of text.matchAll(/\b[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){2,}\b/g)) add(m[0], 4);
+    // Hyphen/underscore identifiers containing a digit (device names like CM-C-0015).
+    for (const m of text.matchAll(/\b[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+){1,5}\b/g)) {
+        if (/\d/.test(m[0]) && m[0].length >= 6) add(m[0], 3);
+    }
+    // ALL-CAPS acronyms (APN, ADB, SSO, MDM...).
+    for (const m of text.matchAll(/\b[A-Z][A-Z0-9]{1,9}\b/g)) add(m[0], 3);
+    // Long digit runs: device IDs, ICCIDs, MCC/MNC "numeric" values.
+    for (const m of text.matchAll(/\b\d{5,20}\b/g)) add(m[0], 1);
+    const out = [...terms.values()];
+    // Short terms match on word boundaries so "APN" never counts "APNS"/"MCMR" lines.
+    for (const t of out) {
+        if (t.term.length <= 4) {
+            try { t.rx = new RegExp('\\b' + t.term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i'); } catch (e) { /* substring fallback */ }
+        }
+        t.needle = t.term.toLowerCase();
+    }
+    return out;
+}
+
+// File:line citations inside the forensic Chronological Triage rows
+// ("DeploymentServer.log:161 — ..."), counted per bare file name.
+function parseTriageCitations(triageContent) {
+    const map = new Map();
+    if (!triageContent) return map;
+    const rx = /([A-Za-z0-9_][\w.\- ]{0,80}?\.(?:log|txt|json|xml|har|out|err|trace|csv))\s*:\s*(\d{1,8})\b/gi;
+    let m;
+    while ((m = rx.exec(triageContent)) !== null) {
+        const display = m[1].split(/[\\/ ]/).pop();
+        if (!display) continue;
+        const base = display.toLowerCase();
+        const e = map.get(base) || { base, display, count: 0, lines: [] };
+        e.count++;
+        const n = parseInt(m[2], 10);
+        if (n > 0 && e.lines.length < 50) e.lines.push(n);
+        map.set(base, e);
+    }
+    return map;
+}
+
+const JIRA_ERROR_LINE_RX = /(\bERR\b|\bFATAL\b|\bCRITICAL\b|\bSEVERE\b|Exception\b|\bfail(?:ed|ure)?\b|\bdenied\b|\bunauthori[sz]ed\b|\btime(?:d\s*)?out\b)/i;
+
+// Single pass over one log: how relevant is it to the reported issue, and which
+// exact lines carry that relevance (anchors for the evidence windows).
+function scoreJiraLogRelevance(log, issueTerms, cited) {
+    const lines = jiraLogLines(log);
+    const total = lines.length;
+    const MAX_SCAN = 1200000; // huge bundles: scan the newest slice, incidents live near the tail
+    const start = total > MAX_SCAN ? total - MAX_SCAN : 0;
+
+    const needles = issueTerms.map(t => ({ ...t, hits: 0 }));
+    const hitLines = []; // { idx, mask: [needle indices], isErr } — scored after damping
+    const MAX_HIT_LINES = 200000;
+    const errorAnchors = [];
+    let errCount = 0;
+    let tsLines = 0, sampled = 0;
+
+    for (let i = start; i < total; i++) {
+        const raw = lines[i];
+        if (!raw || raw.length < 3) continue;
+        const scan = raw.length > 800 ? raw.slice(0, 800) : raw;
+        if (sampled < 400) { sampled++; if (jiraIsNewLogEntry(scan)) tsLines++; }
+        let low = null;
+        let mask = null;
+        for (let n = 0; n < needles.length; n++) {
+            const t = needles[n];
+            const hit = t.rx ? t.rx.test(scan) : (low || (low = scan.toLowerCase())).includes(t.needle);
+            if (hit) { t.hits++; (mask || (mask = [])).push(n); }
+        }
+        const isErr = JIRA_ERROR_LINE_RX.test(scan);
+        if (isErr) {
+            errCount++;
+            if (errorAnchors.length < 4000) errorAnchors.push({ idx: i, score: /Exception\b|\bFATAL\b|\bCRITICAL\b/i.test(scan) ? 3 : 2 });
+        }
+        if (mask && hitLines.length < MAX_HIT_LINES) hitLines.push({ idx: i, mask, isErr });
+    }
+
+    // IDF-style damping: a term that floods a file (e.g. a two-letter fragment of a
+    // device name matching a busy package path on thousands of transfer lines) is not
+    // discriminative IN THAT FILE. Rare terms keep their full weight.
+    const eff = needles.map(t => t.hits > 100 ? t.weight * Math.sqrt(100 / t.hits) : t.weight);
+
+    // Threshold 3 (after damping): a single weak/flooded hit never anchors on its own,
+    // but a weak hit ON an error line still can (device ID + ERR is real evidence).
+    const termAnchors = [];
+    for (const h of hitLines) {
+        let s = 0;
+        for (const n of h.mask) s += eff[n];
+        const sc = s + (h.isErr ? 2 : 0);
+        if (s >= 1 && sc >= 3 && termAnchors.length < 5000) termAnchors.push({ idx: h.idx, score: sc });
+    }
+
+    let score = 0;
+    for (let n = 0; n < needles.length; n++) score += Math.min(needles[n].hits, 200) * eff[n];
+    if (cited) score += cited.count * 40;
+    score += Math.min(errCount, 500) * 0.05;
+    // Files with (almost) no timestamped entries — file listings, XML preference dumps —
+    // are poor JIRA evidence; strongly prefer real timestamped logs.
+    if (sampled >= 20 && tsLines / sampled < 0.05) score *= 0.15;
+
+    let anchors = termAnchors;
+    if (anchors.length > 600) {
+        anchors = [...anchors].sort((a, b) => b.score - a.score).slice(0, 600).sort((a, b) => a.idx - b.idx);
+    }
+    return {
+        score,
+        termAnchors: anchors,
+        errorAnchors: errorAnchors.slice(-600), // newest errors are the incident, oldest are noise
+        citedLines: cited ? cited.lines.slice(0, 50) : [],
+        matchedTerms: needles
+            .filter((t, n) => t.hits > 0 && eff[n] >= 3)
+            .sort((a, b) => (b.weight - a.weight) || (b.hits - a.hits))
+    };
+}
+
+// Pick THE single most relevant uploaded log for the JIRA ticket. Relevance =
+// issue-term hits (weighted) + forensic-triage citations + a small error-density
+// tiebreak. Returns null when no logs with content are attached.
+function selectPrimaryJiraLog(c, triageContent, issueText) {
+    const logs = (c && Array.isArray(c.logs)) ? c.logs.filter(l => l && (l.content || (l.lines && l.lines.length))) : [];
+    if (!logs.length) return null;
+    const issueTerms = deriveJiraIssueTerms(issueText);
+    const cited = parseTriageCitations(triageContent);
+    let best = null;
+    for (const log of logs) {
+        const rel = scoreJiraLogRelevance(log, issueTerms, cited.get(jiraLogBaseName(log.name).toLowerCase()));
+        if (!best || rel.score > best.score) best = { log, ...rel };
+    }
+    return best;
+}
+
+// New-entry detection: SOTI server logs "[2026-07-14 13:06:49.553] ...", agent logs
+// "2026-07-09T13:30:08.779Z|...", logcat "07-14 13:16:50.462 ...". Anything else is a
+// continuation line (script bodies, XML payloads, stack traces) belonging to the entry above.
+function jiraIsNewLogEntry(s) {
+    return /^(\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\d{2}-\d{2} \d{2}:\d{2}:\d{2})/.test(s || '');
+}
+
+// Build the verbatim Log Analysis evidence from ONE log: cluster the anchor lines,
+// expand each cluster to whole log entries (keeping multi-line payloads such as the
+// APN "writeprivateprofstring" script intact), then emit the strongest windows in
+// chronological order within a fixed size budget.
+function buildJiraLogEvidence(log, sel) {
+    const lines = jiraLogLines(log);
+    if (!lines.length || !sel) return '';
+
+    let anchors = (sel.termAnchors && sel.termAnchors.length) ? sel.termAnchors : [];
+    if (!anchors.length && sel.citedLines && sel.citedLines.length) {
+        anchors = sel.citedLines.map(n => ({ idx: n - 1, score: 4 })).filter(a => a.idx >= 0 && a.idx < lines.length);
+    }
+    if (!anchors.length) anchors = sel.errorAnchors || [];
+    if (!anchors.length) return '';
+
+    const sorted = [...anchors].sort((a, b) => a.idx - b.idx);
+    const clusters = [];
+    let cur = null;
+    for (const a of sorted) {
+        if (cur && a.idx - cur.end <= 8) {
+            cur.end = a.idx;
+            cur.score += a.score;
+        } else {
+            cur = { start: a.idx, end: a.idx, score: a.score };
+            clusters.push(cur);
+        }
+    }
+
+    for (const cl of clusters) {
+        let s = cl.start, guard = 0;
+        while (s > 0 && !jiraIsNewLogEntry(lines[s]) && guard++ < 15) s--;
+        cl.start = s;
+        let e = cl.end;
+        guard = 0;
+        while (e + 1 < lines.length && !jiraIsNewLogEntry(lines[e + 1]) && guard++ < 40) e++;
+        cl.end = e;
+    }
+
+    const render = (cl) => {
+        const out = [];
+        for (let i = cl.start; i <= cl.end && i < lines.length; i++) {
+            let ln = lines[i] == null ? '' : String(lines[i]);
+            if (ln.length > 400) ln = ln.slice(0, 400) + ' …';
+            out.push(ln);
+        }
+        while (out.length && !out[out.length - 1].trim()) out.pop();
+        while (out.length && !out[0].trim()) out.shift();
+        return out.join('\n');
+    };
+
+    const MAX_CHARS = 3800, MAX_LINES = 90, MAX_WINDOWS = 3;
+    const byScore = [...clusters].sort((a, b) => b.score - a.score);
+    const chosen = [];
+    let usedChars = 0, usedLines = 0, first = true;
+    for (const cl of byScore) {
+        if (chosen.length >= MAX_WINDOWS) break;
+        if (chosen.some(x => cl.start <= x.end && cl.end >= x.start)) continue;
+        let text = render(cl);
+        if (!text) continue;
+        if (text.length > MAX_CHARS - usedChars) {
+            if (!first) continue; // secondary windows must fit whole; the top window may be trimmed
+            const cut = text.lastIndexOf('\n', MAX_CHARS);
+            text = cut > 0 ? text.slice(0, cut) : text.slice(0, MAX_CHARS);
+        }
+        const lineCount = text.split('\n').length;
+        if (!first && usedLines + lineCount > MAX_LINES) continue;
+        chosen.push({ start: cl.start, end: cl.end, text });
+        usedChars += text.length;
+        usedLines += lineCount;
+        first = false;
+    }
+    chosen.sort((a, b) => a.start - b.start);
+    return chosen.map(w => w.text).join('\n...\n');
+}
+
+// No uploaded logs (analysis ran on pasted content): keep only the triage rows that
+// cite the single most-cited file, so the ticket still reports ONE log file.
+function filterTriageToPrimaryFile(triageContent) {
+    if (!triageContent) return { file: '', rows: '' };
+    const cited = parseTriageCitations(triageContent);
+    if (!cited.size) return { file: '', rows: triageContent };
+    let best = null;
+    for (const e of cited.values()) {
+        if (!best || e.count > best.count) best = e;
+    }
+    const rows = triageContent.split('\n').filter(r => r.toLowerCase().includes(best.base));
+    return { file: best.display, rows: rows.join('\n') || triageContent };
+}
+
+// First→last timestamp of the quoted evidence, for the "Detailed Time Stamps" field.
+function extractJiraEvidenceTimeWindow(text) {
+    if (!text) return '';
+    const ts = text.match(/\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?/g);
+    if (!ts || !ts.length) return '';
+    let min = ts[0], max = ts[0];
+    for (const t of ts) { // ISO-style stamps compare correctly as strings
+        if (t < min) min = t;
+        if (t > max) max = t;
+    }
+    return min === max ? min : `${min} to ${max}`;
+}
+
+// Device ID for the "DeviceID/Devid" field: prefer an ID the case description also
+// names; otherwise only fill it when the evidence mentions exactly one device.
+function extractJiraEvidenceDeviceId(evidenceText, issueText) {
+    if (!evidenceText) return '';
+    const ids = new Set();
+    for (const m of evidenceText.matchAll(/device[='"\s[\]]{1,3}(\d{8,20})/gi)) ids.add(m[1]);
+    for (const m of evidenceText.matchAll(/\[(\d{12,20})\]/g)) ids.add(m[1]);
+    if (!ids.size) return '';
+    const issue = String(issueText || '');
+    for (const id of ids) {
+        if (issue.includes(id)) return id;
+    }
+    return ids.size === 1 ? [...ids][0] : '';
+}
+
+// Force the "Name of the log file" line back to the single primary log, whatever
+// the model wrote there.
+function enforceJiraLogName(jira, name) {
+    if (!jira || !name) return jira;
+    return jira.replace(/(Name of the log file:)[^\n]*/, () => `Name of the log file: ${name}`);
+}
+
 // Post-generation guards for the two fields the model must never freelance:
 //  - the "Keyword for better formatting and visibility" block (forced to the extracted keywords)
 //  - the L3/SME "Analysis:" field (forced to TBC — an engineer fills it, not the AI)
@@ -8409,10 +8733,10 @@ function enforceJiraKeywordBlock(jira, keywordContent) {
     if (!jira) return jira;
     const block = `Keyword for better formatting and visibility\n{code:java}\n${keywordContent || ''}\n{code}`;
     const rx = /Keyword for better formatting and visibility\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
-    if (rx.test(jira)) return jira.replace(rx, block);
+    if (rx.test(jira)) return jira.replace(rx, () => block);
     // Block missing — insert it right after the Log Analysis code block.
     const laRx = /(Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\})/;
-    if (laRx.test(jira)) return jira.replace(laRx, `$1\n\n${block}`);
+    if (laRx.test(jira)) return jira.replace(laRx, (m, g1) => `${g1}\n\n${block}`);
     return jira;
 }
 
@@ -8535,14 +8859,20 @@ $('btnGenerateJira').onclick = async () => {
     const affDev     = $('affDev').value || 'N/A';
     const issue      = $('issueSummary').value || '';
     const notes      = $('meetingNotes').value || '';
-    const chatCtx    = c.msgs.slice(-20).map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
+    // Cap the chat context: the deterministic evidence rides in the template itself, so
+    // the model only needs the recent conversation for narrative fields. Uncapped forensic
+    // reports here used to balloon the prompt (and prefill time) enormously.
+    const chatCtx    = c.msgs.slice(-12).map(m => {
+        let t = (m && m.content) ? String(m.content) : '';
+        if (t.length > 3000) t = t.slice(0, 3000) + '\n…[truncated]';
+        return `[${(m.role || 'user').toUpperCase()}]: ${t}`;
+    }).join('\n\n');
 
-    // Gather pre-parsed log facts and build deep log context
+    // Gather pre-parsed log facts (cheap — panelIntel is computed once at upload time)
     let parsedLogFacts = "";
     let prefilledServerOS = "TBC";
     let prefilledSQLVersion = "TBC";
     let prefilledOSVersionSQL = "TBC";
-    let rawSnippets = "";
     if (c.logs.length > 0) {
         parsedLogFacts += "### PRE-PARSED LOG DETAILS:\n";
         for (const log of c.logs) {
@@ -8563,14 +8893,42 @@ $('btnGenerateJira').onclick = async () => {
                     }
                 }
             }
+        }
+    }
 
+    // The Log Analysis block is deterministic evidence, never model prose, and it must
+    // come from ONE log file — the single most relevant one. Pick that file by weighing
+    // issue-summary terms, forensic-triage citations, and error density, then quote raw
+    // verbatim lines from it only.
+    const triageContent = extractForensicTriageForJira(c);
+    const issueTermsText = [issue, notes, repro !== 'N/A' ? repro : ''].join('\n');
+    const primary = selectPrimaryJiraLog(c, triageContent, issueTermsText);
+
+    let logAnalysisContent = '';
+    let prefilledLogNames = 'N/A';
+    if (primary) {
+        logAnalysisContent = buildJiraLogEvidence(primary.log, primary);
+        if (logAnalysisContent) prefilledLogNames = jiraLogBaseName(primary.log.name);
+    }
+    if (!logAnalysisContent && triageContent) {
+        // No usable uploaded logs — fall back to the forensic triage rows, restricted
+        // to the single most-cited file so the ticket still names ONE log.
+        const t = filterTriageToPrimaryFile(triageContent);
+        logAnalysisContent = t.rows;
+        prefilledLogNames = t.file || deriveJiraLogNames(c, triageContent);
+    }
+    if (!logAnalysisContent) {
+        // Legacy fallback — heavy per-log parse; only paid when there is neither
+        // primary-log evidence nor a forensic triage to reuse.
+        let rawSnippets = "";
+        for (const log of c.logs) {
             await precomputeLogIntel(log);
             const { prefilteredIndices, timestampCache, intelCache } = log.precomputedIntel;
             const lines = log.lines || [];
-            
+
             const phases = await extractFailurePhases(lines, log);
             const sqlFacts = await collectDistinctSqlFacts(lines, log);
-            
+
             if (phases.length > 0 || sqlFacts.length > 0) {
                 rawSnippets += `\n--- Failure evidence from ${log.name} ---\n`;
                 if (phases.length > 0) {
@@ -8610,22 +8968,34 @@ $('btnGenerateJira').onclick = async () => {
                 }
             }
         }
-    }
-    if (!rawSnippets) {
-        rawSnippets = "[No high-signal SQL or MSI logs detected]";
+        logAnalysisContent = rawSnippets.trim() || "[No high-signal SQL or MSI logs detected]";
+        prefilledLogNames = deriveJiraLogNames(c, logAnalysisContent);
     }
 
-    // The Log Analysis block is deterministic evidence, never model prose. Prefer the
-    // Chronological Triage table from the most recent forensic report; fall back to the
-    // parsed raw snippets when no forensic analysis has been run in this case.
-    const logAnalysisContent = extractForensicTriageForJira(c) || rawSnippets.trim();
-    // The "Keyword for better formatting" block is the grep-able error tokens from those rows.
-    const keywordContent = extractLogAnalysisKeywords(logAnalysisContent);
+    // The "Keyword for better formatting" block is the grep-able error tokens from the
+    // evidence, topped up with the strongest issue terms that actually appear in it.
+    let keywordContent = extractLogAnalysisKeywords(logAnalysisContent);
+    if (primary && primary.matchedTerms && primary.matchedTerms.length) {
+        const evidenceLow = logAnalysisContent.toLowerCase();
+        const kws = keywordContent ? keywordContent.split('\n') : [];
+        const seenKw = new Set(kws.map(k => k.toLowerCase()));
+        for (const t of primary.matchedTerms) {
+            if (kws.length >= 8) break;
+            const k = t.term.toLowerCase();
+            if (t.weight >= 3 && evidenceLow.includes(k) && !seenKw.has(k)) {
+                seenKw.add(k);
+                kws.push(t.term);
+            }
+        }
+        keywordContent = kws.join('\n');
+    }
 
     const prefilledAgentVer = agentVer !== 'N/A' ? agentVer : 'TBC';
     const prefilledSotiVer = sotiVer !== 'N/A' ? sotiVer : 'TBC';
     const prefilledPlatform = platform !== 'N/A' ? platform : 'TBC';
-    const prefilledLogNames = deriveJiraLogNames(c, logAnalysisContent);
+    const evidenceWindow = extractJiraEvidenceTimeWindow(logAnalysisContent);
+    const prefilledTimeWindow = evidenceWindow ? `${evidenceWindow} (log local time; end-user timezone TBC)` : 'TBC';
+    const prefilledDeviceId = extractJiraEvidenceDeviceId(logAnalysisContent, issueTermsText) || 'TBC';
 
     const JIRA_TEMPLATE = `h3. *Description of Issue:*
  * [AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]
@@ -8714,9 +9084,9 @@ Screenshot and video of the issue: TBC
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Log Details*{color}
 
-*Detailed Time Stamps and Time zone (device and end-user) of the repro steps:* TBC
+*Detailed Time Stamps and Time zone (device and end-user) of the repro steps:* ${prefilledTimeWindow}
 
-DeviceID/Devid: TBC
+DeviceID/Devid: ${prefilledDeviceId}
 
 Name of the log file: ${prefilledLogNames}
 
@@ -8829,6 +9199,7 @@ ${JIRA_TEMPLATE}`;
         //  - L3/SME Analysis back to TBC.
         filled = enforceJiraLogAnalysis(filled, logAnalysisContent);
         filled = enforceJiraKeywordBlock(filled, keywordContent);
+        filled = enforceJiraLogName(filled, prefilledLogNames);
         filled = ensureJiraL3Section(filled);
         // Strip any boilerplate the model re-added (preamble, Background heading, log-size notes,
         // "outline the steps") and neutralise leftover [AI: ...] placeholders.
