@@ -8844,6 +8844,130 @@ function cleanupJiraOutput(jira) {
         .replace(/\n{3,}/g, '\n\n');  // collapse gaps left by removed lines
 }
 
+// --- Manual JIRA field refinement (Expected Behaviour / Business Impact / Repro Steps) ---
+// The engineer's manual notes from the review modal are DRAFT input for the model, not
+// verbatim ticket text. The template carries a rewrite placeholder instead of the raw note,
+// and these guards repair the two failure modes small local models still exhibit:
+//  - the model drops the field entirely  -> rewrite the draft in a focused call (raw draft as last resort)
+//  - the model parrots the draft word-for-word -> rewrite the draft in a focused call
+
+// Locate a template field's value: body spans from the end of the heading match to endRx.
+function findJiraSectionBody(jira, headingRx, endRx) {
+    const m = jira.match(headingRx);
+    if (!m) return null;
+    const start = m.index + m[0].length;
+    const rel = jira.slice(start).search(endRx);
+    const end = rel === -1 ? jira.length : start + rel;
+    return { start, end, body: jira.slice(start, end) };
+}
+
+// True when a field value carries no real content (empty, TBC, N/A, bullet/markup only).
+function isBlankJiraValue(s) {
+    const t = String(s || '').replace(/[\s*_\[\]•·]+/g, ' ').trim();
+    return !t || /^(?:TBC|N\/?A|None|Unknown)\.?$/i.test(t);
+}
+
+// True when the generated field is a word-for-word copy of the engineer's draft (the draft,
+// normalised, appears whole inside the normalised field). Drafts too short to judge pass.
+function jiraFieldParrotsDraft(sectionText, draft) {
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const d = norm(draft);
+    if (d.length < 25) return false;
+    return norm(sectionText).includes(d);
+}
+
+// Focused single-field rewrite. Returns the rewritten text, or '' on any failure so the
+// caller can keep what it already has — this pass must never break report generation.
+async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts) {
+    try {
+        if (!LOCAL_AI_MODEL) return '';
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const factLines = [
+            facts && facts.product && facts.product !== 'N/A' ? `Product: ${facts.product}` : '',
+            facts && facts.sotiVer && facts.sotiVer !== 'N/A' ? `MC Version: ${facts.sotiVer}` : '',
+            facts && facts.agentVer && facts.agentVer !== 'N/A' ? `Agent Version: ${facts.agentVer}` : '',
+            facts && facts.platform && facts.platform !== 'N/A' ? `Platform: ${facts.platform}` : '',
+            facts && facts.issue ? `Issue Summary: ${String(facts.issue).slice(0, 600)}` : ''
+        ].filter(Boolean).join('\n');
+        const res = await fetch(`${baseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: LOCAL_AI_MODEL,
+                messages: [
+                    { role: 'system', content: `You rewrite a support engineer's rough draft note into polished JIRA ticket text. Rules: keep every fact and constraint from the draft; fix grammar and spelling; expand shorthand into full professional sentences; you may weave in specifics from the case facts when clearly relevant; never invent facts; do NOT reuse the draft's sentences verbatim — rephrase them. ${styleHint} Output ONLY the rewritten text — no heading, no preamble, no quotes, no markup.` },
+                    { role: 'user', content: `Field: ${fieldLabel}\n\nCase facts:\n${factLines || 'N/A'}\n\nEngineer's draft:\n${draft}` }
+                ],
+                stream: false,
+                keep_alive: -1,
+                ...(isThinkingModel ? { think: false } : {}),
+                options: { num_ctx: 4096, temperature: 0.3, top_p: 0.9, repeat_penalty: 1.1, num_predict: 512 }
+            })
+        });
+        if (!res.ok) return '';
+        const data = await res.json();
+        const msg = data.message || {};
+        let out = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking || '';
+        out = out.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+        // Drop a leading echoed label ("Expected Behavior: ..." / "**Expected Behavior:**") and surrounding quotes.
+        out = out.replace(new RegExp('^\\s*[*_]*' + fieldLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[*_:\\s]*', 'i'), '');
+        out = out.replace(/^["'`]+|["'`]+$/g, '').trim();
+        return out;
+    } catch (e) {
+        console.warn('[JIRA] Manual field rewrite failed for', fieldLabel, e);
+        return '';
+    }
+}
+
+// Runs AFTER cleanupJiraOutput (so leftover "[AI: ...]" placeholders already read TBC).
+// For each field the engineer actually filled in, repair a dropped or parroted value.
+async function enforceJiraManualFields(jira, manual, facts) {
+    if (!jira || !manual) return jira;
+    const fields = [
+        {
+            key: 'expected', label: 'Expected Behavior',
+            styleHint: 'Write 1-3 complete sentences describing what should have happened.',
+            headingRx: /h3\.[^\n]*Expected\s+Behaviou?r[^\n]*/i,
+            endRx: /\r?\n(?=[ \t]*(?:h[13]\.|\*-{3,}))/,
+            indent: '\n * '
+        },
+        {
+            key: 'impact', label: 'Business Impact',
+            styleHint: 'Write a short professional paragraph describing the operational and business impact.',
+            headingRx: /h3\.[^\n]*Business\s+Impact[^\n]*/i,
+            endRx: /\r?\n(?=[ \t]*(?:h[13]\.|\*-{3,}))/,
+            indent: '\n * '
+        },
+        {
+            key: 'repro', label: 'Reproduction Steps',
+            styleHint: 'Write a clear numbered list of reproduction steps, one action per step.',
+            headingRx: /(?:^|\r?\n)[ \t]*\*?Repro\s+Steps:?\*?:?/i,
+            endRx: /\r?\n(?=[ \t]*(?:Is the issue reproducible|h[13]\.|\*-{3,}))/i,
+            indent: ' '
+        }
+    ];
+    for (const f of fields) {
+        const draft = String(manual[f.key] || '').trim();
+        if (!draft) continue;
+        const loc = findJiraSectionBody(jira, f.headingRx, f.endRx);
+        if (!loc) continue;
+        let replacement = null;
+        if (isBlankJiraValue(loc.body)) {
+            // Field dropped — never lose the engineer's note: rewrite it, else use it raw.
+            replacement = await rewriteManualJiraField(f.label, f.styleHint, draft, facts) || draft;
+        } else if (jiraFieldParrotsDraft(loc.body, draft)) {
+            const rewritten = await rewriteManualJiraField(f.label, f.styleHint, draft, facts);
+            if (rewritten && !jiraFieldParrotsDraft(rewritten, draft)) replacement = rewritten;
+        }
+        if (replacement !== null) {
+            // Splice, never String.replace — drafts/model text can contain "$&"-style sequences.
+            jira = jira.slice(0, loc.start) + f.indent + replacement.trim() + '\n' + jira.slice(loc.end);
+        }
+    }
+    return jira;
+}
+
 $('btnJira').onclick = () => {
     $('mJiraReview').style.display = 'flex';
 };
@@ -9026,13 +9150,13 @@ $('btnGenerateJira').onclick = async () => {
  * [AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]
 
 h3. *Expected Behavior:*
- * ${expected !== 'N/A' ? expected : '[AI: Generate expected behavior details]'}
+ * ${expected !== 'N/A' ? "[AI: Rewrite the engineer's DRAFT Expected Behavior from the Source Data into polished professional wording enriched with case context — keep every fact, do NOT copy the draft verbatim]" : '[AI: Generate expected behavior details]'}
 
 h3. *Known Issues:*
  * Please link known Jira tickets, if any (TBC).
 
 h3. *Detailed Description of Business Impact:*
- * ${impact !== 'N/A' ? impact : '[AI: Generate business impact summary]'}
+ * ${impact !== 'N/A' ? "[AI: Rewrite the engineer's DRAFT Business Impact from the Source Data into a professional impact statement enriched with case context — keep every fact, do NOT copy the draft verbatim]" : '[AI: Generate business impact summary]'}
 
 h3. *Justification of Priority:*
  * [AI: Provide a clear justification for why this is ${priority} priority]
@@ -9096,7 +9220,7 @@ h1. {color:#4c9aff}*Troubleshooting Steps:*{color}
 *------------------------------------------------------------------------------------------------------------*
 h1. {color:#4c9aff}*Issue Reproduction*{color}
 
-Repro Steps: ${repro !== 'N/A' ? repro : 'TBC'}
+Repro Steps: ${repro !== 'N/A' ? "[AI: Rewrite the engineer's DRAFT Repro Steps from the Source Data into a clear numbered list — keep every step and fact, do NOT copy the draft verbatim]" : 'TBC'}
 
 Is the issue reproducible in-house?: TBC
 
@@ -9137,7 +9261,8 @@ ${getJiraL3SmeSection()}`;
 3. For Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
 5. For Troubleshooting Steps (Workarounds Suggested): List concrete workarounds/investigation steps from the notes and logs. Do NOT write an L3/SME engineering analysis anywhere — that field stays TBC (see 2b).
-6. Output the template EXACTLY as structured. Do NOT add a "Requirements for the Jira Filing" line, a "Please fill in all the details" line, a "Background" heading, log-file size/SFTP handling notes, or a "PLEASE OUTLINE THE STEPS IN DETAIL" line — these are intentionally omitted.
+6. MANUAL DRAFT REFINEMENT: Source Data entries marked as "engineer's DRAFT" (Expected Behavior, Business Impact, Repro Steps) are rough notes typed by the support engineer. NEVER copy them into the ticket word-for-word. Rewrite each one as polished, professional technical text: fix grammar and spelling, expand shorthand into full sentences, and enrich with relevant specifics (product, versions, error behaviour) from the case details and conversation. Preserve every fact and constraint the engineer stated — refine the wording, never change the meaning.
+7. Output the template EXACTLY as structured. Do NOT add a "Requirements for the Jira Filing" line, a "Please fill in all the details" line, a "Background" heading, log-file size/SFTP handling notes, or a "PLEASE OUTLINE THE STEPS IN DETAIL" line — these are intentionally omitted.
 
 ### FORMATTING RULES:
 - OUTPUT ONLY the completed SOTI JIRA template.
@@ -9152,10 +9277,10 @@ ${getJiraL3SmeSection()}`;
 - Mc Version: ${sotiVer}
 - Agent: ${agentVer}
 - Platform/Env: ${platform} (${enviro})
-- Expected Behavior: ${expected}
-- Business Impact: ${impact}
+- Expected Behavior${expected !== 'N/A' ? " (engineer's DRAFT — rewrite professionally, do not copy verbatim)" : ''}: ${expected}
+- Business Impact${impact !== 'N/A' ? " (engineer's DRAFT — rewrite professionally, do not copy verbatim)" : ''}: ${impact}
 - Priority: ${priority}
-- Repro Steps: ${repro}
+- Repro Steps${repro !== 'N/A' ? " (engineer's DRAFT — rewrite professionally, do not copy verbatim)" : ''}: ${repro}
 - Notes: ${notes}
 
 ${parsedLogFacts}
@@ -9229,6 +9354,14 @@ ${JIRA_TEMPLATE}`;
         // Strip any boilerplate the model re-added (preamble, Background heading, log-size notes,
         // "outline the steps") and neutralise leftover [AI: ...] placeholders.
         filled = cleanupJiraOutput(filled);
+        // The engineer's manual Expected Behaviour / Business Impact / Repro Steps notes are
+        // draft input the model must rewrite, never parrot. Repair dropped or word-for-word
+        // copied fields with a focused rewrite pass (raw draft as last resort).
+        filled = await enforceJiraManualFields(filled, {
+            expected: expected !== 'N/A' ? expected : '',
+            impact:   impact   !== 'N/A' ? impact   : '',
+            repro:    repro    !== 'N/A' ? repro    : ''
+        }, { product, sotiVer, agentVer, platform, issue });
         $('mGen').style.display = 'none';
         if (!filled) return toast('JIRA generation failed', 'e');
         $('jiraTa').value = filled;
