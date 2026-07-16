@@ -4974,7 +4974,8 @@ RULES:
 4. For release notes, you MUST prioritize and list the resolved issues from the [RELEASE NOTES] section exactly as written. In SOTI context, "Release notes" primarily refers to "Resolved Issues" (the fixes). You must copy the MCMR codes and descriptions word-for-word. NEVER mix fixes from [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA]; if the user asked about MobiControl, only list CONSOLE DATA. If they asked about Android Agent, only list AGENT DATA. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data, explicitly state that only the provided issues are available in the current context. If there are no resolved issues for the requested product, state that none were found.
 5. ZERO HALLUCINATION FOR GUIDES: If the user asks for step-by-step instructions or configuration steps, you MUST construct them ONLY using the EXACT TEXT provided in the [OFFLINE PULSE KNOWLEDGE MATCHES], [DEEP RESEARCH], or [DOCS SEARCH] sections. You are STRICTLY FORBIDDEN from inventing steps. If a step involves the device, you must cite the exact SOTI procedure (e.g., entering afw#mobicontrol). DO NOT invent generic Android Developer steps (like USB Debugging, Developer Options, or ADB) unless explicitly stated in the SOTI text. If these sections do not contain the specific steps, you MUST reply "I could not find a SOTI guide for this specific task in my current context." DO NOT guess or use generic Android/IT knowledge to invent steps. DO NOT combine unrelated sections.
 6. NEVER write meta-commentary about your sources or context. The following phrases are STRICTLY FORBIDDEN: "Based on the provided documentation", "Based on the provided information", "the retrieved knowledge base", "the provided context", "consult the full SOTI documentation", "contact SOTI support", "was not explicitly detailed", "you may need to consult". State the facts directly as established SOTI knowledge, with no preamble.
-7. CURRENT STATE & "WHAT'S NEXT": For any question about the case status or what to do next, read [EMAIL CHAIN] from the TOP (it is ordered NEWEST FIRST) and answer from the most recent messages. [EMAIL CHAIN] OVERRIDES [ISSUE SUMMARY], which is only the original problem and may already be resolved. If the latest emails show the issue is fixed / the customer confirmed success / a meeting was cancelled, do NOT suggest old troubleshooting or a meeting — instead tell the agent how to handle the customer's newest open question, or confirm the fix and suggest the agent close the case.`;
+7. CURRENT STATE & "WHAT'S NEXT": For any question about the case status or what to do next, read [EMAIL CHAIN] from the TOP (it is ordered NEWEST FIRST) and answer from the most recent messages. [EMAIL CHAIN] OVERRIDES [ISSUE SUMMARY], which is only the original problem and may already be resolved. If the latest emails show the issue is fixed / the customer confirmed success / a meeting was cancelled, do NOT suggest old troubleshooting or a meeting — instead tell the agent how to handle the customer's newest open question, or confirm the fix and suggest the agent close the case.
+8. FIXED-IN-NEWER-VERSION (CRITICAL): When [RELEASE NOTES] contains a "FIXED IN VERSION X" section whose entry matches the customer's issue, you MUST lead with: the issue is a known bug fixed in version X, cite the MCMR code and its description verbatim, and recommend upgrading to X. The fix version is ALWAYS the version in that section's header — NEVER the customer's current version from [CASE]. Copy the version number character-for-character IN FULL every time you write it (e.g. "2026.1.0", NEVER "26.1.0"). If [RELEASE NOTES] says NO MATCHING FIX FOUND, do not mention release notes, MCMR codes, or an upgrade as the fix.`;
     }
     return `${TIER3_IDENTITY}
 
@@ -4987,7 +4988,7 @@ RULES YOU MUST FOLLOW:
    - "Android Agent" or "agent version" → use [LATEST ANDROID AGENT VERSION] (this is the device-side Android Agent)
    - "Identity" → use [LATEST IDENTITY VERSION]
    Answer in a single direct sentence, e.g. "The latest MobiControl version is X.Y.Z." Do NOT add any extra details, citations, links, or fixes unless explicitly requested. Stop generating immediately after stating the version.
-3. TROUBLESHOOTING WITH VERSIONS: If [RELEASE NOTES] are provided, use the customer's version from [CASE] to compare against them. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code. If no release notes are provided, do not mention them.
+3. TROUBLESHOOTING WITH VERSIONS: If [RELEASE NOTES] are provided, use the customer's version from [CASE] to compare against them. If the customer's issue matches a fix in a newer version, recommend upgrading and cite the specific version and MCMR code. The version a fix belongs to is ALWAYS the version named in the "FIXED IN VERSION X" / "### VERSION X" header directly above the matching entry — NEVER the customer's own version from [CASE], and NEVER a version guessed from context. If [RELEASE NOTES] says NO MATCHING FIX FOUND, or no release notes are provided, do not mention release notes or MCMR codes.
 4. When asked about release notes or what's new for a SPECIFIC version: use ONLY the blocks labeled ### VERSION X.Y.Z in [RELEASE NOTES]. NEVER mix in fixes/highlights from a different version. The release notes blocks are tagged with their source product (e.g. [SOTI PULSE CONSOLE DATA] for MobiControl, [SOTI PULSE AGENT DATA] for Android Agent). When the user asked about MobiControl, present ONLY blocks from CONSOLE DATA. When the user asked about Android Agent, present ONLY blocks from AGENT DATA. In SOTI terminology, "Release Notes" means "Resolved Issues" (the fixes). You MUST prioritize presenting the Resolved Issues explicitly. Do not blend them with Highlights. NEVER invent, guess, or hallucinate additional issues. If the user asks for more issues than are present in your data (e.g., due to pagination), state clearly that only the listed items are available in the current context. If there are no Resolved Issues for the requested version, state that none were found.
 5. When asked about features, configuration, or troubleshooting: use [DEEP RESEARCH], [PULSE SEARCH], [DOCS SEARCH], and [RELEASE NOTES] first. Only state facts that appear in those sections or in attached logs.
 6. NEVER guess with generic IT knowledge. Only use SOTI-specific information from this prompt.
@@ -5641,13 +5642,11 @@ function isLowQualityResearchArticle(text) {
 function parseRequestedVersions(query, history, ci) {
     const fromQuery = [...new Set((query.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || []))];
     if (fromQuery.length) return fromQuery;
-    const caseText = [ci?.meeting_notes, ci?.issue_summary, ci?.email_chain, history].filter(Boolean).join('\n');
-    const caseMatches = caseText.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || [];
-    const fromCase = [...new Set(caseMatches.reverse())];
-    if (fromCase.length) return fromCase;
-    const historyMatches = history.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || [];
-    const fromHistory = [...new Set(historyMatches.reverse())];
-    if (fromHistory.length) return fromHistory.slice(0, 2);
+    // The STRUCTURED case fields (soti_version / agent_version, synced from Salesforce) are
+    // checked BEFORE free-text scraping: they state the customer's actual version, whereas
+    // the email chain often name-drops other versions in passing ("2026.1.0 is the current
+    // release") — the reversed free-text scan then picked THAT as the customer's version,
+    // which silently disabled the newer-fix upgrade scan.
     const combined = `${query} ${history}`.toLowerCase();
     const asksAgent = /\b(android|agent|aea|device agent)\b/.test(combined);
     if (ci) {
@@ -5660,6 +5659,13 @@ function parseRequestedVersions(query, history, ci) {
             if (m) return [m[1]];
         }
     }
+    const caseText = [ci?.meeting_notes, ci?.issue_summary, ci?.email_chain, history].filter(Boolean).join('\n');
+    const caseMatches = caseText.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || [];
+    const fromCase = [...new Set(caseMatches.reverse())];
+    if (fromCase.length) return fromCase;
+    const historyMatches = history.match(/\b((?:20\d\d|\d{2})\.\d+(?:\.\d+)*)\b/g) || [];
+    const fromHistory = [...new Set(historyMatches.reverse())];
+    if (fromHistory.length) return fromHistory.slice(0, 2);
     return [];
 }
 
@@ -5905,7 +5911,7 @@ const PulseKB = {
         text = text.trim();
         if (text.length <= cap) return text;
         const nl = text.indexOf('\n');
-        const title = nl > 0 ? text.slice(0, nl + 1) : '';
+        let title = nl > 0 ? text.slice(0, nl + 1) : '';
         let pos = -1;
         const consider = i => { if (i >= 0 && (pos < 0 || i < pos)) pos = i; };
         for (const k of kws) consider(lower.indexOf(k, title.length));
@@ -5915,7 +5921,17 @@ const PulseKB = {
         // keywords — anchor the excerpt on the Resolved Issues section so the answer
         // survives the cap instead of the navigation junk.
         const ri = lower.indexOf('resolved issues', title.length);
-        if (ri >= 0) pos = ri;
+        if (ri >= 0) {
+            pos = ri;
+            // Label the excerpt with the version these Resolved Issues belong to (the nearest
+            // version string BEFORE the section, e.g. "…introduced in SOTI MobiControl 2026.1.0").
+            // Without this the excerpt carries MCMR codes with no version attribution, and the
+            // model guesses — in testing it consistently attributed fixes to the WRONG version.
+            const beforeVers = [...lower.slice(0, ri).matchAll(/\b20\d\d\.\d+(?:\.\d+)?\b/g)];
+            if (beforeVers.length) {
+                title += `[NOTE: the "Resolved Issues" below are fixes shipped in version ${beforeVers[beforeVers.length - 1][0]} — cite THIS version with these MCMR codes]\n`;
+            }
+        }
         if (pos < 0) return text.slice(0, cap) + '\n…[truncated]';
         const start = Math.max(title.length, pos - 700);
         const body = text.slice(start, start + Math.max(200, cap - title.length));
@@ -5942,8 +5958,11 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const isTroubleshoot = /\b(how\s+do|how\s+to|error|fail|broken|issue|troubleshoot|cannot|unable|configure|setup|install|database|sql|ports?|certificate|ca|disconnect|offline|enroll|license|sync|crash|freeze|slow|bug|version|latest)\b/i.test(qLower) ||
                                (qLower.split(/\s+/).length > 6 && !asksReleaseNotes);
         
-        // Only fetch release notes if explicitly requested or if investigating a hard error/bug where a known issue might exist
-        const shouldFetchReleaseNotes = asksReleaseNotes || /\b(error|fail|broken|crash|bug|issue)\b/i.test(qLower);
+        // Only fetch release notes if explicitly requested or if investigating a hard error/bug where a known issue might exist.
+        // Symptom vocabulary is deliberately broad ("failing"/"missing"/"cannot" etc.): during
+        // troubleshooting the release notes are how the model discovers an issue is already
+        // fixed in a newer version, so narrow trigger words silently disabled that behaviour.
+        const shouldFetchReleaseNotes = asksReleaseNotes || /\b(error|fail(?:s|ed|ing)?|broken|crash(?:es|ed|ing)?|bug|issues?|missing|cannot|can'?t|unable|not\s+work(?:ing)?|stopp?ed|problems?|disappear(?:s|ed|ing)?|blank|empty|stuck|slow)\b/i.test(qLower);
         const shouldDoWebSearch = isTroubleshoot || asksReleaseNotes;
 
         let charBudget = 0;
@@ -5962,9 +5981,24 @@ async function searchPulseAndDocs(query, msgs, ci) {
 
             for (const { url, type } of pulseSources) {
                 toast(`Fetching ${type} notes from Pulse...`, 'i');
-                
+
                 const queryVersionsEarly = parseRequestedVersions(query, history, ci);
-                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, queryVersionsEarly);
+                // TROUBLESHOOTING WITH AN OLDER CUSTOMER VERSION: the fix for the customer's
+                // issue is documented in the release notes of NEWER versions, so fetch those
+                // version pages too (capped; parallel; 15-min cached). Without this, only the
+                // newest page + the customer's own page were ever loaded, and fixes shipped in
+                // intermediate releases were invisible.
+                let fetchVersions = queryVersionsEarly;
+                if (isTroubleshoot && !isListingAll && queryVersionsEarly.length >= 1) {
+                    const knownList = type === 'Agent' ? AGENT_VERSIONS : (type === 'Identity' ? IDENTITY_VERSIONS : VERSIONS);
+                    const oldest = [...queryVersionsEarly].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0];
+                    const newer = (knownList || []).filter(v => v.localeCompare(oldest, undefined, { numeric: true }) > 0);
+                    // Cap of 10 covers every release between a ~1.5-year-old customer version and
+                    // current (e.g. 2025.0.0 → 2026.1.0 is 10 releases); pages are fetched in
+                    // parallel and cached 15 min, so the cost is one burst per session.
+                    if (newer.length) fetchVersions = [...new Set([...queryVersionsEarly, ...newer.slice(0, 10)])];
+                }
+                const pulseLoad = await fetchPulseReleaseBlocksForVersion(url, fetchVersions);
                 const blocks = pulseLoad.blocks;
                 const resolvedUrl = pulseLoad.fetchUrl;
                 if (blocks.length) {
@@ -5975,6 +6009,18 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     const queryVersions = parseRequestedVersions(query, history, ci);
                     const primaryVersion = queryVersions[0] || null;
                     const queryYears = query.match(/\b(20\d\d)\b/g) || [];
+
+                    // UPGRADE-SCAN MODE: troubleshooting a customer who runs an OLDER version.
+                    // The old strict filter kept ONLY the customer's version's notes — i.e. the
+                    // bugs already fixed IN their build — and threw away the newer versions'
+                    // Resolved Issues where the actual fix lives, so the model could never say
+                    // "fixed in X, MCMR-Y" (and mis-attributed MCMRs to the customer's version).
+                    // In this mode we instead surface the newer-version resolved-issue lines
+                    // that match the reported symptom, each under its own version header.
+                    const newestOnPage = blocks.map(b => b.version)
+                        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0] || null;
+                    const upgradeScanMode = !!primaryVersion && isTroubleshoot && !isListingAll &&
+                        newestOnPage && newestOnPage.localeCompare(primaryVersion, undefined, { numeric: true }) > 0;
                     
                     // Release Notes generic query fallback — use live Pulse version lists (no static version table)
                     if (queryVersions.length === 0 && asksReleaseNotes) {
@@ -6052,29 +6098,77 @@ async function searchPulseAndDocs(query, msgs, ci) {
                     let clean = "";
                     let includedCount = 0;
                     const highestScore = scoredBlocks[0]?.score || 0;
-                    const strictVersionFilter = !!primaryVersion;
-                    
+                    const strictVersionFilter = !!primaryVersion && !upgradeScanMode;
+
+                    if (upgradeScanMode) {
+                        // Surface newer-version Resolved Issues lines matching the reported
+                        // symptom (≥2 distinct query-keyword hits), newest version first, each
+                        // under its own explicit version header so the model attributes the fix
+                        // to the RIGHT release. The customer's own version's resolved list is
+                        // deliberately omitted: those bugs are already fixed in their build, and
+                        // including them is what caused MCMRs to be mis-attributed to the
+                        // customer's version. The instruction line is embedded in the data so it
+                        // survives even if the rules block is trimmed on small models.
+                        clean += `\n[CUSTOMER RUNS VERSION ${primaryVersion}. The fixes below shipped in NEWER versions. If one matches the customer's issue, state that the issue is fixed in that exact version, cite its MCMR code verbatim, and recommend upgrading to it. Always write the fix version IN FULL exactly as it appears in the header (e.g. "2026.1.0" — never shortened to "26.1.0"). NEVER attribute these fixes to ${primaryVersion}.]\n`;
+                        // Symptom matching uses its own token set (not queryWords): 3-letter
+                        // acronyms (APN/VPN/SQL/ADE…) are load-bearing in MDM symptom reports
+                        // but the shared >3-char filter drops them, and light stemming lets
+                        // inflections match ("widths"→"width", "restarting"→"restarted").
+                        const scanStop3 = new Set(['not', 'has', 'can', 'out', 'off', 'get', 'got', 'did', 'was', 'the', 'and', 'for', 'are', 'its', 'any', 'all', 'you', 'our', 'how', 'why', 'who', 'his', 'her', 'had', 'but', 'use', 'via', 'per', 'now', 'one', 'two', 'see', 'too', 'yet', 'own', 'due']);
+                        const scanWordVariants = [...new Set(query.toLowerCase().split(/\W+/)
+                            .filter(w => (w.length > 3 && !stopWords.has(w)) || (w.length === 3 && /^[a-z]+$/.test(w) && !scanStop3.has(w))))]
+                            .map(w => {
+                                const variants = [w];
+                                const stem = w.replace(/(ings?|ed|es|s)$/, '');
+                                if (stem.length >= 4 && stem !== w) variants.push(stem);
+                                return variants;
+                            });
+                        const newerRI = blocks
+                            .filter(b => b.type === 'Resolved Issues' && b.version.localeCompare(primaryVersion, undefined, { numeric: true }) > 0)
+                            .sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
+                        let anyMatch = false;
+                        for (const b of newerRI) {
+                            const lines = b.text.split('\n').filter(l => l.trim().startsWith('-'));
+                            const matched = lines
+                                .map(l => { const ll = l.toLowerCase(); let hits = 0; for (const vs of scanWordVariants) { if (vs.some(v => ll.includes(v))) hits++; } return { l, hits }; })
+                                .filter(x => x.hits >= 2)
+                                .sort((a, b) => b.hits - a.hits)
+                                .slice(0, 10);
+                            if (!matched.length) continue;
+                            const seg = `\n### FIXED IN VERSION ${b.version} (from the ${b.version} Resolved Issues on SOTI Pulse):\n${matched.map(x => x.l).join('\n')}\n`;
+                            if (clean.length + seg.length > localBudget) break;
+                            clean += seg;
+                            anyMatch = true;
+                            includedCount++;
+                        }
+                        if (!anyMatch) {
+                            clean += `\n[NO MATCHING FIX FOUND in the ${type} release notes: the ${type} Resolved Issues of versions newer than ${primaryVersion} contain no entry matching this symptom. Do NOT claim a ${type} fix exists, and do NOT cite ${type} MCMR codes for it. (Fixes listed under another product's data section, if any, are unaffected.)]\n`;
+                        }
+                        notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n${clean}`);
+                        toast(`✓ ${type} upgrade-fix scan loaded`, 's');
+                    } else {
+
                     if (primaryVersion) {
                         clean += `\n[USER REQUESTED VERSION: ${primaryVersion}]\n`;
                     }
-                    
+
                     const includedVersions = new Set();
                     for (const sb of scoredBlocks) {
                         if (strictVersionFilter && sb.block.version !== primaryVersion) continue;
                         if (sb.score < 0) continue;
-                        
+
                         // Limit to top 3 versions if no specific version is requested, to keep local inference fast.
                         if (!strictVersionFilter) {
                             if (!includedVersions.has(sb.block.version) && includedVersions.size >= 3) {
                                 continue;
                             }
                         }
-                        
+
                         // Skip irrelevant older blocks if we have high-scoring ones
                         if (!strictVersionFilter && sb.score === 0 && includedCount >= 2 && highestScore > 0) {
                             continue;
                         }
-                        
+
                         const formatBlock = `\n### VERSION ${sb.block.version} - ${sb.block.type.toUpperCase()}:\n${sb.block.text}\n`;
                         if (clean.length + formatBlock.length <= localBudget) {
                             clean += formatBlock;
@@ -6090,10 +6184,12 @@ async function searchPulseAndDocs(query, msgs, ci) {
                             break;
                         }
                     }
-                    
+
                     if (clean.length > 200) {
                         notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n${clean}`);
                         toast(`✓ ${type} RAG Context Loaded`, 's');
+                    }
+
                     }
                 }
             }
@@ -7404,8 +7500,12 @@ async function send(overrideText = null, silent = false) {
             // - Forensic: logs travel in the user message; system = rules + learned + images.
             // - Analysis with logs: rules + LOGS first (strongly attended, protected from
             //   end-trim), then images, then case/research data.
-            // - Otherwise (conversational / Q&A): case + research data first (the answer
-            //   source), then rules, then the lightweight log manifest.
+            // - Otherwise (conversational / Q&A): rules FIRST, then case + research data.
+            //   The end-trim in completions.create cuts the LARGEST message from its END, so
+            //   whatever comes last in the system prompt is what gets sacrificed on small
+            //   models. With data-first ordering the ENTIRE rules/identity block was deleted
+            //   whenever the research sections were large (verified on gemma4:e2b) — rules
+            //   must lead so the trim eats the tail of [DEEP RESEARCH] instead.
             sysPrompt = forensicRun && hasLogs
                 ? `${corePrompt}${productSignatures}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
 
@@ -7418,9 +7518,9 @@ ${logContext}${productSignatures}
 ${imgContext}
 
 ${liveDataSection}`
-                    : `${liveDataSection}
+                    : `${corePrompt}
 
-${corePrompt}
+${liveDataSection}
 
 ${logContext}
 
