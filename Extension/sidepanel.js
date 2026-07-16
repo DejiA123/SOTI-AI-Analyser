@@ -8844,12 +8844,16 @@ function cleanupJiraOutput(jira) {
         .replace(/\n{3,}/g, '\n\n');  // collapse gaps left by removed lines
 }
 
-// --- Manual JIRA field refinement (Expected Behaviour / Business Impact / Repro Steps) ---
-// The engineer's manual notes from the review modal are DRAFT input for the model, not
-// verbatim ticket text. The template carries a rewrite placeholder instead of the raw note,
-// and these guards repair the two failure modes small local models still exhibit:
+// --- Manual JIRA field refinement (Description of Issue / Expected Behaviour / Business Impact / Repro Steps) ---
+// The engineer's manual notes (review modal) and the Case Info Issue Summary are DRAFT
+// input for the model, not verbatim ticket text. The template carries a rewrite placeholder
+// instead of the raw note, and these guards repair the failure modes small local models
+// still exhibit:
 //  - the model drops the field entirely  -> rewrite the draft in a focused call (raw draft as last resort)
 //  - the model parrots the draft word-for-word -> rewrite the draft in a focused call
+//  - (Description of Issue only) the model ignores the Issue Summary and writes the
+//    description from somewhere else -> rewrite the summary in a focused call. The Issue
+//    Summary is the source of truth for the Description of Issue, always.
 
 // Locate a template field's value: body spans from the end of the heading match to endRx.
 function findJiraSectionBody(jira, headingRx, endRx) {
@@ -8874,6 +8878,31 @@ function jiraFieldParrotsDraft(sectionText, draft) {
     const d = norm(draft);
     if (d.length < 25) return false;
     return norm(sectionText).includes(d);
+}
+
+// True when the generated field shows no lexical grounding in its draft — the model
+// ignored the source text and wrote the section from somewhere else. Judged on the
+// draft's most distinctive terms first (quoted values, identifiers, acronyms — the
+// tokens a faithful professional rewrite always preserves), falling back to plain
+// content-word overlap for prose-only drafts. Drafts too short to judge pass.
+function jiraFieldIgnoresDraft(sectionText, draft) {
+    const section = String(sectionText || '');
+    const sectionLow = section.toLowerCase();
+    const distinct = deriveJiraIssueTerms(draft).filter(t => t.weight >= 3);
+    if (distinct.length >= 3) {
+        let hit = 0;
+        for (const t of distinct) {
+            if (t.rx ? t.rx.test(section) : sectionLow.includes(t.needle)) hit++;
+        }
+        return hit / distinct.length < 0.34;
+    }
+    const words = (s) => String(s || '').toLowerCase().match(/[a-z][a-z0-9._-]{3,}/g) || [];
+    const draftWords = [...new Set(words(draft).filter(w => !JIRA_TERM_STOPWORDS.has(w)))];
+    if (draftWords.length < 4) return false;
+    const sectionWords = new Set(words(section));
+    let hit = 0;
+    for (const w of draftWords) if (sectionWords.has(w)) hit++;
+    return hit / draftWords.length < 0.25;
 }
 
 // Focused single-field rewrite. Returns the rewritten text, or '' on any failure so the
@@ -8922,9 +8951,20 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts) {
 
 // Runs AFTER cleanupJiraOutput (so leftover "[AI: ...]" placeholders already read TBC).
 // For each field the engineer actually filled in, repair a dropped or parroted value.
-async function enforceJiraManualFields(jira, manual, facts) {
+// The 'description' entry additionally guards grounding: the Description of Issue must
+// always derive from the Case Info Issue Summary, so a description that ignores the
+// summary is rewritten from it. onProgress(done, total, label) reports real progress.
+async function enforceJiraManualFields(jira, manual, facts, onProgress) {
     if (!jira || !manual) return jira;
     const fields = [
+        {
+            key: 'description', label: 'Description of Issue',
+            styleHint: 'Write a detailed, in-depth technical description of the issue in 2-5 complete sentences: what is failing, the exact observed behaviour, and the affected components/versions. Preserve every fact from the draft.',
+            headingRx: /h3\.[^\n]*Description\s+of\s+Issue[^\n]*/i,
+            endRx: /\r?\n(?=[ \t]*(?:h[13]\.|\*-{3,}))/,
+            indent: '\n * ',
+            mustGround: true
+        },
         {
             key: 'expected', label: 'Expected Behavior',
             styleHint: 'Write 1-3 complete sentences describing what should have happened.',
@@ -8947,11 +8987,13 @@ async function enforceJiraManualFields(jira, manual, facts) {
             indent: ' '
         }
     ];
-    for (const f of fields) {
+    const active = fields.filter(f => String(manual[f.key] || '').trim());
+    let done = 0;
+    for (const f of active) {
         const draft = String(manual[f.key] || '').trim();
-        if (!draft) continue;
+        if (onProgress) onProgress(done, active.length, f.label);
         const loc = findJiraSectionBody(jira, f.headingRx, f.endRx);
-        if (!loc) continue;
+        if (!loc) { done++; continue; }
         let replacement = null;
         if (isBlankJiraValue(loc.body)) {
             // Field dropped — never lose the engineer's note: rewrite it, else use it raw.
@@ -8959,14 +9001,80 @@ async function enforceJiraManualFields(jira, manual, facts) {
         } else if (jiraFieldParrotsDraft(loc.body, draft)) {
             const rewritten = await rewriteManualJiraField(f.label, f.styleHint, draft, facts);
             if (rewritten && !jiraFieldParrotsDraft(rewritten, draft)) replacement = rewritten;
+        } else if (f.mustGround && jiraFieldIgnoresDraft(loc.body, draft)) {
+            // The model wrote this section without using its draft. For the Description
+            // of Issue the Issue Summary is the source of truth — rewrite from it.
+            replacement = await rewriteManualJiraField(f.label, f.styleHint, draft, facts) || draft;
         }
         if (replacement !== null) {
             // Splice, never String.replace — drafts/model text can contain "$&"-style sequences.
             jira = jira.slice(0, loc.start) + f.indent + replacement.trim() + '\n' + jira.slice(loc.end);
         }
+        done++;
+        if (onProgress) onProgress(done, active.length, f.label);
     }
+    if (onProgress) onProgress(active.length, active.length, '');
     return jira;
 }
+
+// ============================================================================
+// JIRA generation progress — REAL progress, not a looping animation.
+// The bar reflects work that has actually completed: context building (0-9%),
+// log-evidence selection (9-18%), prompt assembly (18-22%), the streamed AI
+// generation measured against the known template structure (22-88%), evidence
+// enforcement (88-90%), and each field-refinement AI pass (90-99%). 100% = done.
+// ============================================================================
+const JiraProgress = {
+    pct: 0,
+    open() {
+        this.pct = 0;
+        this._paint(0, 'Preparing case data…');
+        $('mGen').style.display = 'flex';
+    },
+    // Monotonic: real progress never moves backwards.
+    set(pct, stage) {
+        const p = Math.max(this.pct, Math.min(100, pct));
+        this.pct = p;
+        this._paint(p, stage);
+    },
+    _paint(p, stage) {
+        const f = $('jiraProgFill'), t = $('jiraProgPct'), s = $('jiraProgStage');
+        if (f) f.style.width = p.toFixed(1) + '%';
+        if (t) t.textContent = Math.round(p) + '%';
+        if (s && stage) s.textContent = stage;
+    },
+    close() { $('mGen').style.display = 'none'; }
+};
+
+// Let the browser paint the latest progress state before the next heavy synchronous step.
+const jiraUiYield = () => new Promise(r => setTimeout(r, 0));
+
+// Ordered landmarks of the JIRA template. The model is required to reproduce the
+// template structure, so how far the streamed output has advanced through these
+// markers IS the real generation progress; streamed length vs the template length
+// is the secondary signal that fills the gaps between markers (and covers a model
+// that drops a heading). Both signals are monotonic.
+const JIRA_GEN_MARKERS = [
+    { needle: 'Description of Issue',          label: 'Description of Issue' },
+    { needle: 'Expected Behavior',             label: 'Expected Behavior' },
+    { needle: 'Known Issues',                  label: 'Known Issues' },
+    { needle: 'Business Impact',               label: 'Business Impact' },
+    { needle: 'Justification of Priority',     label: 'Justification of Priority' },
+    { needle: 'Number of Devices Affected',    label: 'Devices Affected' },
+    { needle: 'Environment:',                  label: 'Environment' },
+    { needle: 'SQL Version',                   label: 'Environment' },
+    { needle: 'Device Details',                label: 'Device Details' },
+    { needle: 'MobiControl Agent Version',     label: 'Device Details' },
+    { needle: 'Other SOTI Apps',               label: 'Other SOTI Apps' },
+    { needle: 'Troubleshooting Steps',         label: 'Troubleshooting Steps' },
+    { needle: 'Issue Reproduction',            label: 'Issue Reproduction' },
+    { needle: 'Repro Steps',                   label: 'Issue Reproduction' },
+    { needle: 'Log Details',                   label: 'Log Details' },
+    { needle: 'Log Analysis:',                 label: 'Log Analysis' },
+    { needle: 'Keyword for better formatting', label: 'Keywords' },
+    { needle: 'L3/SME Engineer',               label: 'L3/SME section' },
+    { needle: 'why was L3/SME not consulted',  label: 'L3/SME section' }
+];
 
 $('btnJira').onclick = () => {
     $('mJiraReview').style.display = 'flex';
@@ -8978,22 +9086,22 @@ $('mJiraReviewClose').onclick = $('btnJiraReviewCancel').onclick = () => {
 
 $('btnGenerateJira').onclick = async () => {
     $('mJiraReview').style.display = 'none';
-    $('mGen').style.display = 'flex'; // Show loading modal early
-    
+    JiraProgress.open(); // Show the real-progress loading modal early (0%)
+
     // Yield control to let the browser paint the modal
     await new Promise(resolve => setTimeout(resolve, 10));
 
     saveState(); // Final save before generating
-    
+
     // Build full context from case info + conversation + logs + review modal
     const expected   = $('jiraExpected').value || 'N/A';
     const impact     = $('jiraImpact').value || 'N/A';
     const priority   = $('jiraPriority').value || 'Medium';
     const repro      = $('jiraRepro').value || 'N/A';
-    
+
     const c          = cases.find(x => x.id === activeCaseId);
     if (!c) {
-        $('mGen').style.display = 'none';
+        JiraProgress.close();
         return;
     }
     const caseNum    = $('caseNum').value || 'N/A';
@@ -9008,6 +9116,13 @@ $('btnGenerateJira').onclick = async () => {
     const affDev     = $('affDev').value || 'N/A';
     const issue      = $('issueSummary').value || '';
     const notes      = $('meetingNotes').value || '';
+    // The Case Info "Issue Summary" is the source of truth for the ticket's
+    // "Description of Issue" section — the AI rewrites it, never replaces it.
+    const issueSummaryDraft = issue.trim();
+
+    JiraProgress.set(3, 'Collecting case details…');
+    await jiraUiYield();
+
     // Cap the chat context: the deterministic evidence rides in the template itself, so
     // the model only needs the recent conversation for narrative fields. Uncapped forensic
     // reports here used to balloon the prompt (and prefill time) enormously.
@@ -9016,6 +9131,9 @@ $('btnGenerateJira').onclick = async () => {
         if (t.length > 3000) t = t.slice(0, 3000) + '\n…[truncated]';
         return `[${(m.role || 'user').toUpperCase()}]: ${t}`;
     }).join('\n\n');
+
+    JiraProgress.set(6, 'Reading parsed log intelligence…');
+    await jiraUiYield();
 
     // Gather pre-parsed log facts (cheap — panelIntel is computed once at upload time)
     let parsedLogFacts = "";
@@ -9051,7 +9169,14 @@ $('btnGenerateJira').onclick = async () => {
     // verbatim lines from it only.
     const triageContent = extractForensicTriageForJira(c);
     const issueTermsText = [issue, notes, repro !== 'N/A' ? repro : ''].join('\n');
+
+    JiraProgress.set(9, 'Selecting the most relevant log file…');
+    await jiraUiYield();
+
     const primary = selectPrimaryJiraLog(c, triageContent, issueTermsText);
+
+    JiraProgress.set(13, 'Extracting log evidence…');
+    await jiraUiYield();
 
     let logAnalysisContent = '';
     let prefilledLogNames = 'N/A';
@@ -9070,7 +9195,11 @@ $('btnGenerateJira').onclick = async () => {
         // Legacy fallback — heavy per-log parse; only paid when there is neither
         // primary-log evidence nor a forensic triage to reuse.
         let rawSnippets = "";
+        let jiraLogIdx = 0;
         for (const log of c.logs) {
+            JiraProgress.set(13 + (jiraLogIdx / Math.max(1, c.logs.length)) * 5, `Deep-parsing ${log.name}…`);
+            await jiraUiYield();
+            jiraLogIdx++;
             await precomputeLogIntel(log);
             const { prefilteredIndices, timestampCache, intelCache } = log.precomputedIntel;
             const lines = log.lines || [];
@@ -9121,6 +9250,9 @@ $('btnGenerateJira').onclick = async () => {
         prefilledLogNames = deriveJiraLogNames(c, logAnalysisContent);
     }
 
+    JiraProgress.set(18, 'Extracting evidence keywords…');
+    await jiraUiYield();
+
     // The "Keyword for better formatting" block is the grep-able error tokens from the
     // evidence, topped up with the strongest issue terms that actually appear in it.
     let keywordContent = extractLogAnalysisKeywords(logAnalysisContent);
@@ -9146,8 +9278,11 @@ $('btnGenerateJira').onclick = async () => {
     const prefilledTimeWindow = evidenceWindow ? `${evidenceWindow} (log local time; end-user timezone TBC)` : 'TBC';
     const prefilledDeviceId = extractJiraEvidenceDeviceId(logAnalysisContent, issueTermsText) || 'TBC';
 
+    JiraProgress.set(20, 'Assembling JIRA template and prompts…');
+    await jiraUiYield();
+
     const JIRA_TEMPLATE = `h3. *Description of Issue:*
- * [AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]
+ * ${issueSummaryDraft ? "[AI: Rewrite the ISSUE SUMMARY from the Source Data into a detailed, in-depth, professional technical description of the issue — keep every fact the summary states, polish the wording, enrich with relevant specifics (product, versions, error behaviour) from the case details and conversation, do NOT copy the summary verbatim and do NOT invent facts]" : '[AI: Generate a detailed, professional technical description of the issue based on case details, conversation, and notes]'}
 
 h3. *Expected Behavior:*
  * ${expected !== 'N/A' ? "[AI: Rewrite the engineer's DRAFT Expected Behavior from the Source Data into polished professional wording enriched with case context — keep every fact, do NOT copy the draft verbatim]" : '[AI: Generate expected behavior details]'}
@@ -9258,7 +9393,7 @@ ${getJiraL3SmeSection()}`;
 2. DO NOT modify or remove the pre-filled values in the template (such as SQL Version, Server OS Version, Agent Version, Name of the log file, or the raw log snippets inside the code block) unless you have more specific information to update them with.
 2a. The "Log Analysis:" {code:java} block AND the "Keyword for better formatting and visibility" {code:java} block are VERBATIM pre-filled evidence. Reproduce BOTH exactly as given. NEVER replace the Log Analysis block with a case summary, a chat answer, or prose, and NEVER edit the keyword list.
 2b. ALWAYS reproduce the entire "L3/SME Engineer" section (heading, Name, Analysis, and the "Otherwise, why was L3/SME not consulted" line). Leave its "Analysis:" field EXACTLY as "Analysis: TBC" — do NOT write an analysis there and do NOT drop the section; an L3 engineer fills it, not you.
-3. For Description of Issue: Write a comprehensive, multi-sentence technical summary of the failure behavior, action, and components.
+3. For Description of Issue: The ISSUE SUMMARY in the Source Data is the SOURCE OF TRUTH for this section. Rewrite it into a comprehensive, well-written, in-depth technical description of the failure behavior, action, and components — keep every fact the summary states, enrich it with specifics from the case details and conversation, and never contradict it or invent facts. Do NOT copy the summary word-for-word. Only if no Issue Summary is provided, generate the description from the case details, conversation, and notes.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
 5. For Troubleshooting Steps (Workarounds Suggested): List concrete workarounds/investigation steps from the notes and logs. Do NOT write an L3/SME engineering analysis anywhere — that field stays TBC (see 2b).
 6. MANUAL DRAFT REFINEMENT: Source Data entries marked as "engineer's DRAFT" (Expected Behavior, Business Impact, Repro Steps) are rough notes typed by the support engineer. NEVER copy them into the ticket word-for-word. Rewrite each one as polished, professional technical text: fix grammar and spelling, expand shorthand into full sentences, and enrich with relevant specifics (product, versions, error behaviour) from the case details and conversation. Preserve every fact and constraint the engineer stated — refine the wording, never change the meaning.
@@ -9277,6 +9412,7 @@ ${getJiraL3SmeSection()}`;
 - Mc Version: ${sotiVer}
 - Agent: ${agentVer}
 - Platform/Env: ${platform} (${enviro})
+- Issue Summary${issueSummaryDraft ? " (SOURCE OF TRUTH for the Description of Issue — rewrite into an in-depth professional description, do not copy verbatim)" : ''}: ${issueSummaryDraft || 'N/A'}
 - Expected Behavior${expected !== 'N/A' ? " (engineer's DRAFT — rewrite professionally, do not copy verbatim)" : ''}: ${expected}
 - Business Impact${impact !== 'N/A' ? " (engineer's DRAFT — rewrite professionally, do not copy verbatim)" : ''}: ${impact}
 - Priority: ${priority}
@@ -9293,11 +9429,11 @@ ${JIRA_TEMPLATE}`;
 
     try {
         if (!LOCAL_AI_MODEL) {
-            $('mGen').style.display = 'none';
+            JiraProgress.close();
             return toast('No model selected. Open Settings (⚙) and pick an Ollama model.', 'e', 5000);
         }
         const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
-        
+
         const numPredict = 3072;
         const estimatedTokens = Math.ceil(userPrompt.length / 3.0);
         const neededTokens = estimatedTokens + numPredict + 500;
@@ -9309,6 +9445,44 @@ ${JIRA_TEMPLATE}`;
         // Detect thinking models — disable internal reasoning for Gemma 4, etc. (substring match to support GGUF/custom names)
         const isThinkingModelJira = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
 
+        JiraProgress.set(22, 'AI reading case context (prompt evaluation)…');
+        await jiraUiYield();
+
+        // Streamed generation: real progress comes from the output itself. The model must
+        // reproduce the template structure, so each JIRA_GEN_MARKERS landmark that appears
+        // in the streamed text advances the bar; streamed length vs the template length is
+        // the secondary signal in between. Both are monotonic, so the bar only moves forward.
+        const GEN_START = 22, GEN_END = 88;
+        const expectedGenLen = Math.max(600, JIRA_TEMPLATE.length);
+        let filled = '';
+        let thinkingOut = '';
+        let genMarkerIdx = 0, genSearchFrom = 0;
+        const onGenProgress = () => {
+            while (genMarkerIdx < JIRA_GEN_MARKERS.length) {
+                const at = filled.indexOf(JIRA_GEN_MARKERS[genMarkerIdx].needle, genSearchFrom);
+                if (at === -1) break;
+                genSearchFrom = at + JIRA_GEN_MARKERS[genMarkerIdx].needle.length;
+                genMarkerIdx++;
+            }
+            const byMarkers = genMarkerIdx / JIRA_GEN_MARKERS.length;
+            const byLength = Math.min(filled.length / expectedGenLen, 0.98);
+            const frac = Math.min(Math.max(byMarkers, byLength), 0.99);
+            const writing = genMarkerIdx > 0 ? JIRA_GEN_MARKERS[genMarkerIdx - 1].label : '';
+            JiraProgress.set(GEN_START + frac * (GEN_END - GEN_START),
+                writing ? `AI writing: ${writing}…` : 'AI writing report…');
+        };
+        // One NDJSON chunk from /api/chat — accumulate content plus the reasoning-field
+        // fallback used by thinking models (Gemma 4 e2b/e4b, etc.), surface stream errors.
+        const eatChunk = (line) => {
+            let chunk;
+            try { chunk = JSON.parse(line); } catch (err) { return; }
+            if (chunk.error) throw new Error(String(chunk.error));
+            const m = chunk.message || {};
+            if (m.content) filled += m.content;
+            const t = m.thinking || m.reasoning_content || m.reasoning || '';
+            if (t) thinkingOut += t;
+        };
+
         const res = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -9318,7 +9492,7 @@ ${JIRA_TEMPLATE}`;
                     { role: 'system', content: systemPrompt },
                     { role: 'user', content: userPrompt }
                 ],
-                stream: false,
+                stream: true,
                 keep_alive: -1,
                 ...(isThinkingModelJira ? { think: false } : {}), // Disable thinking phase for Gemma 4 etc.
                 options: {
@@ -9331,17 +9505,49 @@ ${JIRA_TEMPLATE}`;
             })
         });
         if (!res.ok) throw new Error(`Ollama error ${res.status}`);
-        const data = await res.json();
-        // Handle thinking models (Gemma 4 e2b/e4b, etc.) that put output in reasoning fields
-        const message = data.message || {};
-        let filled = message.content || '';
-        if (!filled.trim()) {
-            // Fallback: check reasoning fields used by thinking models
-            filled = message.reasoning_content || message.reasoning || message.thinking || '';
-            if (filled) console.warn('[Ollama JIRA] Content was empty — using reasoning field. Model:', LOCAL_AI_MODEL);
+
+        if (res.body && typeof res.body.getReader === 'function') {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let nl;
+                while ((nl = buf.indexOf('\n')) !== -1) {
+                    const line = buf.slice(0, nl).trim();
+                    buf = buf.slice(nl + 1);
+                    if (line) eatChunk(line);
+                }
+                onGenProgress();
+            }
+            buf += decoder.decode();
+            const tail = buf.trim();
+            if (tail) eatChunk(tail);
+            onGenProgress();
+        } else {
+            // Streaming body unavailable (very old runtime) — read the whole NDJSON
+            // response at once; the bar jumps to the end of the generation band.
+            const text = await res.text();
+            for (const rawLine of text.split('\n')) {
+                const line = rawLine.trim();
+                if (line) eatChunk(line);
+            }
+            onGenProgress();
+        }
+
+        if (!filled.trim() && thinkingOut) {
+            // Fallback: thinking models sometimes put the whole output in reasoning fields
+            console.warn('[Ollama JIRA] Content was empty — using reasoning field. Model:', LOCAL_AI_MODEL);
+            filled = thinkingOut;
         }
         // Strip any <think>...</think> blocks from the response
         filled = filled.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+
+        JiraProgress.set(88, 'Verifying evidence blocks…');
+        await jiraUiYield();
+
         // Deterministically force the model-owned-but-must-not-freelance fields:
         //  - Log Analysis block back to the verified forensic evidence (stops it being filled
         //    with a case summary / "are you sure?" reply instead of the triage).
@@ -9354,24 +9560,39 @@ ${JIRA_TEMPLATE}`;
         // Strip any boilerplate the model re-added (preamble, Background heading, log-size notes,
         // "outline the steps") and neutralise leftover [AI: ...] placeholders.
         filled = cleanupJiraOutput(filled);
-        // The engineer's manual Expected Behaviour / Business Impact / Repro Steps notes are
-        // draft input the model must rewrite, never parrot. Repair dropped or word-for-word
-        // copied fields with a focused rewrite pass (raw draft as last resort).
+
+        JiraProgress.set(90, 'Refining written fields…');
+        await jiraUiYield();
+
+        // The Case Info Issue Summary and the engineer's manual Expected Behaviour /
+        // Business Impact / Repro Steps notes are draft input the model must rewrite,
+        // never parrot or ignore. Repair dropped, word-for-word copied, or (for the
+        // Description of Issue) ungrounded fields with a focused rewrite pass.
         filled = await enforceJiraManualFields(filled, {
+            description: issueSummaryDraft,
             expected: expected !== 'N/A' ? expected : '',
             impact:   impact   !== 'N/A' ? impact   : '',
             repro:    repro    !== 'N/A' ? repro    : ''
-        }, { product, sotiVer, agentVer, platform, issue });
-        $('mGen').style.display = 'none';
-        if (!filled) return toast('JIRA generation failed', 'e');
+        }, { product, sotiVer, agentVer, platform, issue }, (done, total, label) => {
+            const frac = total ? Math.min(done / total, 1) : 1;
+            JiraProgress.set(90 + frac * 9, label ? `AI refining: ${label}…` : 'Field refinement complete');
+        });
+
+        if (!filled) {
+            JiraProgress.close();
+            return toast('JIRA generation failed', 'e');
+        }
+        JiraProgress.set(100, 'JIRA report ready ✓');
+        await new Promise(r => setTimeout(r, 350)); // let the user see 100% before the modal swaps
+        JiraProgress.close();
         $('jiraTa').value = filled;
         $('mJira').style.display = 'flex';
         toast('✓ JIRA Report Ready', 's');
-    } catch (e) { 
-        $('mGen').style.display = 'none';
+    } catch (e) {
+        JiraProgress.close();
         console.error('JIRA Generation Error:', e);
         alert('JIRA Generation Failed:\n\n' + e.message);
-        toast('JIRA failed: ' + e.message, 'e'); 
+        toast('JIRA failed: ' + e.message, 'e');
     }
 };
 $('mJiraClose').onclick = $('btnJiraDone').onclick = () => $('mJira').style.display = 'none';
