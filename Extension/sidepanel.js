@@ -8493,6 +8493,14 @@ async function cleanUpMeetingNotes() {
         return;
     }
 
+    // Collapse the Case Info panel so the user lands in the main chat and watches the
+    // cleaned notes stream in (mirrors how Analyse Now collapses the Logs panel).
+    if ($('bodyL') && $('bodyL').style.display !== 'none') {
+        $('bodyL').style.display = 'none';
+        $('iconL').textContent = '▶';
+        $('panelL').classList.add('collapsed');
+    }
+
     const prompt = `Rewrite my raw meeting notes below into clean, professional case meeting notes for the official Salesforce case record.
 
 STRICT RULES:
@@ -8552,7 +8560,6 @@ RULES:
 }
 
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
-if ($('btnCleanNotesQuick')) $('btnCleanNotesQuick').onclick = cleanUpMeetingNotes;
 if ($('btnCaseSummary')) $('btnCaseSummary').onclick = generateCaseSummary;
 
 $('btnNew').onclick = createNewCase;
