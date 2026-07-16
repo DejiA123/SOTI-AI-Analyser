@@ -340,6 +340,22 @@ body {
     font-size: 11px !important;
 }
 
+/* Meeting-notes AI cleanup button (sits under the Meeting Notes textarea) */
+.btn-clean-notes {
+    width: 100%;
+    margin-top: 2px;
+    background: rgba(129, 140, 248, 0.10) !important;
+    color: var(--blue2) !important;
+    border: 1px solid rgba(129, 140, 248, 0.35) !important;
+    padding: 7px !important;
+    font-weight: 600 !important;
+    font-size: 11px !important;
+}
+.btn-clean-notes:hover {
+    background: rgba(129, 140, 248, 0.22) !important;
+    color: #fff !important;
+}
+
 /* Fields */
 .fld { display: flex; flex-direction: column; gap: 4px }
 .flbl { font-size: 8.5px; font-weight: 700; color: var(--txt3); text-transform: uppercase; letter-spacing: .5px }
@@ -606,6 +622,31 @@ body {
     padding: 12px;
     background: var(--bg1);
     border-top: 1px solid var(--border);
+}
+
+/* One-click AI quick actions (above the chat input) */
+.quick-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding-bottom: 8px;
+}
+.qa-chip {
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    color: var(--txt2);
+    border-radius: var(--r20);
+    padding: 4px 11px;
+    font-size: 10.5px;
+    font-weight: 600;
+    font-family: var(--font);
+    cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
+}
+.qa-chip:hover {
+    color: var(--txt1);
+    border-color: var(--blue);
+    background: var(--bg2);
 }
 
 .input-row {
@@ -1037,3 +1078,17 @@ body {
 }
 
 .fb-done { color: var(--green); font-size: 11px; }
+
+/* Copy row on button-generated answers (cleaned notes / case summary) */
+.copy-row {
+    display: flex;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+.copy-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 12px;
+}
+.copy-btn:hover { transform: none; border-color: var(--blue); }

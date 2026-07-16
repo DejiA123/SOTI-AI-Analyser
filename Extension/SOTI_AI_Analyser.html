@@ -87,6 +87,10 @@
                         </span>
                     </div>
                     <textarea class="ftxt" id="meetingNotes" rows="6" placeholder="Manual notes..."></textarea>
+                    <button class="btn btn-clean-notes" id="btnCleanNotes" title="AI rewrites your raw meeting notes into clean, professional case notes — ready to paste into Salesforce.">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                        Clean Up for Salesforce
+                    </button>
                 </div>
                 <div class="fld"><span class="flbl">Case Number</span><input class="finput" id="caseNum" placeholder="e.g. 0012345678"></div>
                 <div class="fld" style="display: none;"><span class="flbl">Account Scrub</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
@@ -195,6 +199,10 @@
 
             <div class="chat-foot">
                 <div id="imgPreview" class="img-preview-strip" style="display:none"></div>
+                <div class="quick-actions">
+                    <button class="qa-chip" id="btnCleanNotesQuick" title="AI rewrites your raw meeting notes into clean, professional case notes — ready to paste into Salesforce.">🧹 Clean Up Meeting Notes</button>
+                    <button class="qa-chip" id="btnCaseSummary" title="AI writes a full summary of this case and the recommended next steps.">📋 Case Summary + Next Steps</button>
+                </div>
                 <div class="input-row">
                     <button class="attach-btn" id="btnAttach" title="Attach logs">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>

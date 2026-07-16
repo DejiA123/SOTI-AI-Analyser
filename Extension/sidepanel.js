@@ -646,8 +646,9 @@ function switchCase(id) {
                     const w = document.createElement('div'); w.className = `msg ${m.role}`;
                     const b = document.createElement('div'); b.className = 'mb'; b.innerHTML = md(m.content);
                     w.appendChild(b);
-                    // Re-attach 👍/👎 so rated answers keep their confirmation and unrated ones keep their buttons.
-                    if (m.role === 'assistant') attachFeedbackUI(b, c, m);
+                    // Re-attach Copy + 👍/👎 so quick-action answers keep their copy button and
+                    // rated answers keep their confirmation across tab switches.
+                    if (m.role === 'assistant') { attachCopyUI(b, m); attachFeedbackUI(b, c, m); }
                     frag.appendChild(w);
                 });
                 chat.appendChild(frag);
@@ -6983,6 +6984,64 @@ async function matchLearnedInsights(txt, logs) {
 // Takes the assistant message object so the verdict is recorded on it (msg.fbState) and
 // persisted via saveState(); switchCase re-runs this on every render, so a rated answer
 // keeps showing its confirmation and an unrated one keeps its buttons across tab switches.
+// Convert a markdown answer to clean plain text so it pastes nicely into Salesforce
+// (Salesforce case-note fields are plain text — raw **bold**/## markers look broken there).
+function mdToPlainText(mdText) {
+    let t = String(mdText || '');
+    t = t.replace(/```[a-zA-Z]*\n?/g, '').replace(/`([^`]*)`/g, '$1'); // code fences/inline code
+    t = t.replace(/^#{1,6}\s+/gm, '');                                  // headers
+    t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1'); // bold
+    t = t.replace(/(^|\s)\*([^*\n]+)\*(?=\s|[.,;:!?]|$)/g, '$1$2');     // italics (word-bounded)
+    t = t.replace(/^(\s*)[*•]\s+/gm, '$1- ');                           // normalize bullets to "-"
+    t = t.replace(/\n{3,}/g, '\n\n');
+    return t.trim();
+}
+
+// One-click Copy button on quick-action answers (cleaned meeting notes / case summary) —
+// the whole point of those outputs is pasting them into Salesforce. msg.copyKind is
+// persisted with the message, and switchCase re-runs this on every render, so the button
+// survives tab switches and reloads (same pattern as attachFeedbackUI below).
+const COPY_KIND_LABELS = {
+    notes: '📋 Copy notes for Salesforce',
+    summary: '📋 Copy summary'
+};
+function attachCopyUI(bubbleEl, msg) {
+    try {
+        if (!bubbleEl || !msg || !msg.copyKind) return;
+        const label = COPY_KIND_LABELS[msg.copyKind] || '📋 Copy';
+        const row = document.createElement('div');
+        row.className = 'copy-row';
+        const btn = document.createElement('button');
+        btn.className = 'fb-btn copy-btn';
+        btn.textContent = label;
+        btn.onclick = async () => {
+            const plain = mdToPlainText(msg.content || '');
+            let ok = false;
+            try { await navigator.clipboard.writeText(plain); ok = true; } catch (e) {}
+            if (!ok) {
+                // Fallback when the async clipboard API is unavailable (e.g. file:// mode)
+                const ta = document.createElement('textarea');
+                ta.value = plain;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                try { ok = document.execCommand('copy'); } catch (e) {}
+                ta.remove();
+            }
+            if (ok) {
+                btn.textContent = '✓ Copied — paste into Salesforce';
+                toast('Copied to clipboard', 's');
+                setTimeout(() => { btn.textContent = label; }, 2500);
+            } else {
+                toast('Could not copy — select the text manually', 'e');
+            }
+        };
+        row.appendChild(btn);
+        bubbleEl.appendChild(row);
+    } catch (e) { console.warn('attachCopyUI failed', e); }
+}
+
 function attachFeedbackUI(bubbleEl, c, msg) {
     try {
         if (!bubbleEl || !msg) return;
@@ -7051,7 +7110,14 @@ function sanitizeHistoryForModel(msgs, capChars = 4000) {
     });
 }
 
-async function send(overrideText = null, silent = false) {
+// opts — used by the one-click quick-action buttons (Clean Up Meeting Notes / Case Summary):
+//   forceConversational — never route to log-analysis/forensic mode, whatever words the text
+//     contains (raw meeting notes routinely contain "troubleshoot"/"root cause"/"analyse",
+//     which would otherwise trip the analysis detectors when logs are attached).
+//   skipResearch — skip online Pulse/Docs research AND clear any research left over from a
+//     previous question, so the answer is grounded in the case data only (and stays fast).
+//   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
+async function send(overrideText = null, silent = false, opts = {}) {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
         toast('No active case selected', 'e');
@@ -7168,7 +7234,7 @@ async function send(overrideText = null, silent = false) {
     const hasPriorAnswer = c.msgs.some(m => m.role === 'assistant' && (m.content || '').length > 150);
     const isAnalysisFollowUpTurn = hasLogs && hasPriorAnswer && !silent && isAnalysisFollowUp(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = hasLogs && !isAnalysisFollowUpTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    const analysisRun = !opts.forceConversational && hasLogs && !isAnalysisFollowUpTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
@@ -7176,12 +7242,18 @@ async function send(overrideText = null, silent = false) {
     const hasInstallerLog = hasLogs && c.logs.some(l => isMsiInstallerLog(l.name || "", l.content || ""));
     const forensicRun = analysisRun && (isLogForensicsRequest(txt) || hasInstallerLog);
     // Version / release-notes / product question → wants live research (even with logs attached).
-    const needsDeepPulse = /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+    // Quick-action turns are exempt: embedded meeting notes often name-drop versions/products,
+    // and that must not switch the prompt away from the conversational route.
+    const needsDeepPulse = !opts.forceConversational && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
 
     let supportingRefSection = "";
     let knownFixesSection = "";
     if (!isGreeting && !forensicRun) {
-        if (!hasLogs || needsDeepPulse) {
+        if (opts.skipResearch) {
+            // Quick-action turns must be grounded in the CASE data only — clear research left
+            // over from an earlier question so it can't leak into (or slow down) this answer.
+            PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
+        } else if (!hasLogs || needsDeepPulse) {
             // Q&A mode (or explicit release-notes request): full online + offline research
             const researchMs = needsDeepPulse ? 20000 : 10000;
             try {
@@ -7678,9 +7750,11 @@ ${imgContext}`;
         renderUpdate();
 
         const assistantMsg = { role: 'assistant', content: finalAnswer, fbQuestion: txt };
+        if (opts.copyKind) assistantMsg.copyKind = opts.copyKind; // persisted → Copy button survives tab switches
         c.msgs.push(assistantMsg);
         c.lastSentAt = Date.now(); // logs uploaded after this moment get flagged as NEW next send
         saveState();
+        attachCopyUI(aib, assistantMsg);        // one-click plain-text copy (quick-action answers)
         attachFeedbackUI(aib, c, assistantMsg); // 👍/👎 self-learning loop (survives tab switches)
     } catch (e) { 
         if (e.name !== 'AbortError') {
@@ -8357,7 +8431,7 @@ $('btnAnalyse').onclick = async () => {
         pFill.style.transform = 'none';
         pFill.style.width = '100%';
         pFill.style.background = 'var(--green)';
-        
+
         // Hide after 6 seconds to keep UI clean but show result
         setTimeout(() => {
             if (pWrap) pWrap.style.display = 'none';
@@ -8367,6 +8441,119 @@ $('btnAnalyse').onclick = async () => {
     $('chatIn').focus();
 };
 
+// --- QUICK AI ACTIONS (Clean Up Meeting Notes / Case Summary buttons) ---
+// One-click versions of the two prompts Support Engineers type most often. Both ride the
+// standard send() flow as a SILENT message (like Analyse Now), forced onto the
+// conversational route so words inside the notes can never trigger a log-forensics report.
+
+// Shared progress-bar wrapper (mirrors the Analyse Now flow).
+async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
+    const pWrap = $('progWrap');
+    const pLbl = $('progLbl');
+    const pFill = $('progFill');
+    if (pWrap && pLbl && pFill) {
+        pLbl.textContent = runningLabel;
+        pWrap.style.display = 'flex';
+        pFill.style.transform = '';
+        pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
+        pFill.style.background = 'linear-gradient(90deg, var(--blue), var(--blue2))';
+        pFill.style.width = '30%';
+    }
+
+    // Yield control to let the browser paint the progress indicator
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+
+    await send(promptText, true, opts);
+
+    if (pLbl && pFill) {
+        pLbl.textContent = doneLabel;
+        pFill.style.animation = 'none';
+        pFill.style.transform = 'none';
+        pFill.style.width = '100%';
+        pFill.style.background = 'var(--green)';
+        setTimeout(() => { if (pWrap) pWrap.style.display = 'none'; }, 6000);
+    }
+
+    $('chatIn').focus();
+}
+
+const MEETING_NOTES_EMPTY_TEMPLATE = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
+
+async function cleanUpMeetingNotes() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const notes = ($('meetingNotes').value || '').trim();
+    if (!notes || notes === MEETING_NOTES_EMPTY_TEMPLATE) {
+        toast('Meeting Notes is empty — type your notes in Case Info first', 'e');
+        // Open the Case Info panel and put the cursor in the notes box so they can start typing
+        if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
+        $('meetingNotes').focus();
+        return;
+    }
+
+    const prompt = `Rewrite my raw meeting notes below into clean, professional case meeting notes for the official Salesforce case record.
+
+STRICT RULES:
+- Correct spelling and grammar, expand shorthand, and write clear professional sentences.
+- Keep EVERY fact exactly as noted — names, dates, times, versions, error messages, device counts, commitments. Do NOT invent, assume, or add anything that is not in my notes, and do NOT drop any detail.
+- Structure the output with these plain-text headers, in this order, omitting any section my notes contain nothing for:
+Time of the meeting:
+Summary:
+Troubleshooting steps:
+Next steps:
+- Under "Troubleshooting steps:" and "Next steps:" use simple "-" dash bullets, one action per bullet.
+- Output PLAIN TEXT only — no markdown symbols like ** or ##, no emojis, no preamble such as "Here are your notes", and no closing remarks. Output ONLY the cleaned notes, ready to paste straight into Salesforce.
+
+MY RAW MEETING NOTES:
+"""
+${notes}
+"""`;
+
+    await runQuickAIAction('Cleaning up meeting notes...', 'Meeting notes cleaned', prompt,
+        { forceConversational: true, skipResearch: true, copyKind: 'notes' });
+}
+
+async function generateCaseSummary() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const notes = ($('meetingNotes').value || '').trim();
+    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasAnyCaseData = hasNotes
+        || ($('issueSummary').value || '').trim()
+        || ($('emailChain').value || '').trim()
+        || (c.logs && c.logs.length > 0)
+        || c.msgs.some(m => !m.hidden);
+    if (!hasAnyCaseData) {
+        toast('Nothing to summarise yet — sync from Salesforce or fill in the case details first', 'e');
+        return;
+    }
+
+    const prompt = `Give me a complete professional summary of this case, then the recommended next steps.
+
+RULES:
+- Use ONLY what is in the case information, meeting notes, email chain, any attached logs or earlier analysis in this conversation, and our chat history. Do NOT invent details — if something decisive is unknown, list it under what is missing.
+- The email chain is ordered NEWEST FIRST: the current status comes from the most recent messages, which override the original issue summary if the situation has moved on.
+- Structure the answer with exactly these sections:
+
+**Summary:** one short paragraph — the customer/account, product, version, platform, environment, and the core issue.
+
+**Key Details:** short "-" bullets with the decisive facts (versions, affected devices, error messages, findings from any log analysis).
+
+**Current Status:** where the case stands right now.
+
+**Next Steps:** a numbered list of the concrete recommended actions for the support engineer.`;
+
+    await runQuickAIAction('Building case summary...', 'Case summary ready', prompt,
+        { forceConversational: true, skipResearch: true, copyKind: 'summary' });
+}
+
+$('btnCleanNotes').onclick = cleanUpMeetingNotes;
+if ($('btnCleanNotesQuick')) $('btnCleanNotesQuick').onclick = cleanUpMeetingNotes;
+if ($('btnCaseSummary')) $('btnCaseSummary').onclick = generateCaseSummary;
 
 $('btnNew').onclick = createNewCase;
 
