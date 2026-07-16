@@ -833,6 +833,41 @@ body {
     to { transform: translateY(0); opacity: 1; }
 }
 
+/* ---- JIRA generation modal: determinate (real) progress bar ---- */
+.jira-prog-pct {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--blue2);
+    margin: 8px 0 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.jira-prog-bar {
+    height: 6px;
+    background: var(--bg3);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.jira-prog-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--blue), var(--blue2));
+    border-radius: 3px;
+    transition: width 0.25s ease;
+}
+
+.jira-prog-stage {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--txt2);
+    min-height: 15px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* ---- Local AI Toggle Switch ---- */
 .ai-toggle {
     position: relative;

@@ -418,13 +418,14 @@
     </div>
 
     <script src="lib/tesseract.v5.min.js"></script>
-    <script src="sidepanel.js?v=2.4.9"></script>
-    <!-- Generation Loading Modal -->
+    <script src="sidepanel.js?v=2.5.0"></script>
+    <!-- Generation Loading Modal — real progress (driven by JiraProgress in sidepanel.js) -->
     <div class="backdrop" id="mGen" style="display:none">
-        <div class="modal" style="text-align:center; max-width:300px">
-            <div class="thinking-dot" style="margin:0 auto 15px; width:12px; height:12px"></div>
-            <div class="w-title" style="font-size:14px">Generating JIRA Report...</div>
-            <div class="w-sub" style="margin-bottom:0; font-size:11px">Analysing conversation and logs...</div>
+        <div class="modal" style="text-align:center; max-width:340px">
+            <div class="w-title" style="font-size:14px">Generating JIRA Report</div>
+            <div class="jira-prog-pct" id="jiraProgPct">0%</div>
+            <div class="jira-prog-bar"><div class="jira-prog-fill" id="jiraProgFill"></div></div>
+            <div class="jira-prog-stage" id="jiraProgStage">Preparing case data...</div>
         </div>
     </div>
 </body>
