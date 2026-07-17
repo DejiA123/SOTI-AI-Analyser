@@ -184,10 +184,10 @@
                     <div class="w-sub">100% Local AI — powered by Ollama on your machine. No cloud, no API key, no data sent externally.</div>
                     
                     <div class="w-features">
-                        <div class="w-card"><span class="w-icon">📋</span> Complete the case form to give the AI full context</div>
-                        <div class="w-card"><span class="w-icon">📁</span> Upload MS, DS, Agent, or DDR logs for deeper analysis</div>
-                        <div class="w-card"><span class="w-icon">🔍</span> The AI will identify missing information and ask for it</div>
-                        <div class="w-card"><span class="w-icon">📦</span> Export the full session report when done</div>
+                        <div class="w-card" id="wCardCase" role="button" tabindex="0" title="Open the Case Info panel and start filling in the case details"><span class="w-icon">📋</span> Complete the case form to give the AI full context</div>
+                        <div class="w-card" id="wCardLogs" role="button" tabindex="0" title="Open the Logs panel to upload log files"><span class="w-icon">📁</span> Upload MS, DS, Agent, or DDR logs for deeper analysis</div>
+                        <div class="w-card" id="wCardMissing" role="button" tabindex="0" title="Ask the AI to review the case context and list what is still missing"><span class="w-icon">🔍</span> The AI will identify missing information and ask for it</div>
+                        <div class="w-card" id="wCardExport" role="button" tabindex="0" title="Download the full session report as a .txt file"><span class="w-icon">📦</span> Export the full session report when done</div>
                     </div>
                 </div>
             </div>
@@ -201,6 +201,7 @@
                 <div id="imgPreview" class="img-preview-strip" style="display:none"></div>
                 <div class="quick-actions">
                     <button class="qa-chip" id="btnCaseSummary" title="AI writes a full summary of this case and the recommended next steps.">📋 Case Summary + Next Steps</button>
+                    <button class="qa-chip" id="btnDraftEmail" title="AI drafts the next email to the customer from the latest case context (issue summary + email chain).">📧 Draft Email to Customer</button>
                 </div>
                 <div class="input-row">
                     <button class="attach-btn" id="btnAttach" title="Attach logs">

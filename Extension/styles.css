@@ -552,10 +552,24 @@ body {
     transition: all 0.2s ease;
 }
 
+.w-card {
+    cursor: pointer;
+    user-select: none;
+}
+
 .w-card:hover {
     background: rgba(255, 255, 255, 0.05);
-    border-color: var(--border2);
+    border-color: var(--blue);
     transform: translateY(-1px);
+}
+
+.w-card:focus-visible {
+    outline: 1px solid var(--blue);
+    outline-offset: 1px;
+}
+
+.w-card:active {
+    transform: translateY(0);
 }
 
 .w-icon { font-size: 18px; flex-shrink: 0; }

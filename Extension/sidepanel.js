@@ -3811,6 +3811,189 @@ function buildEmailChainSection(ci, small) {
     return `[EMAIL CHAIN — the live correspondence BETWEEN THE CUSTOMER AND SOTI SUPPORT for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. These are the CUSTOMER's emails and SOTI Support's replies — NONE of them were written by the person you are chatting with (the SOTI support agent handling this case); they are case context only. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
 
+// ---------------------------------------------------------------------------
+// Case lifecycle detection — deterministic, from the email chain
+// ---------------------------------------------------------------------------
+// The Case Summary / Draft Email quick actions must know whether the case is still
+// being troubleshot or is already resolved/closing. Small local models routinely
+// mis-read this from the raw chain (they see the old troubleshooting text mid-chain
+// and propose "confirm with the customer before closure" even when the customer
+// already confirmed AND the closing email was already sent), so the state is
+// detected HERE with regexes over the cleaned chain and injected into the quick-
+// action prompts as fact the model must not second-guess.
+//
+// Returns { state, customerConfirmed, supportClosingSent, evidence, customerSender, agentSender }:
+//   state    — 'closure' (resolution/closure confirmed in the chain)
+//              'active'  (chain exists, no closure evidence → case is open)
+//              'unknown' (no email chain to judge from)
+//   evidence — [{ sender, time, quote }] the closure/reopen messages, newest first.
+// Out-of-office auto-replies (EN + NL) carry no case signal yet are often the newest
+// chain entry. NL needs the full OOO phrasing ("ben ik afwezig") — the bare word
+// "afwezig" also appears in signature notes like "Afwezig op dinsdag en vrijdag" on
+// REAL emails (that false-positive suppressed a genuine closure confirmation in testing).
+const OOO_AUTO_REPLY_RE = /\bautomatic reply\b|\bauto-?reply\b|\bout of (?:the )?office\b|\bben ik\s+(?:momenteel\s+)?afwezig\b|\bmomenteel afwezig\b|\bbeperkt beschikbaar\b|\bbedankt voor (?:je|uw) e-?mail\b|\bon (?:annual |sick )?leave\b|\bmomenteel niet aanwezig\b/i;
+
+// Parse + clean the raw chain into usable entries (NEWEST first), dropping System rows.
+// Shared by detectCaseLifecycleState and buildChainChronology.
+function getCleanChainEntries(raw) {
+    const scraperFormat = /={20,}/.test(raw) || /^\s*\[[^\][]{4,80}\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?[^:\n]{1,80}:/.test(raw);
+    return parseEmailChainEntries(raw)
+        .map(e => ({ ...e, body: cleanEmailBody(e.body, e.sender, scraperFormat) }))
+        .filter(e => e.body && !/^system$/i.test((e.sender || '').trim()));
+}
+
+function detectCaseLifecycleState(ci) {
+    const res = { state: 'unknown', customerConfirmed: false, supportClosingSent: false, evidence: [], customerSender: '', agentSender: '' };
+    const raw = ((ci && ci.email_chain) || '').trim();
+    if (!raw) return res;
+    let entries;
+    try { entries = getCleanChainEntries(raw); } catch (e) { return res; }
+    if (!entries || !entries.length) return res;
+
+    const AUTO_REPLY = OOO_AUTO_REPLY_RE;
+    // Support-authored template phrases — customers never write these.
+    const SUPPORT_MARKER = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email/i;
+    // Customer agreeing the case is done ("you can close the case", "issue is resolved", …).
+    const CUSTOMER_CONSENT = /\byou can (?:go ahead and )?close\b|\bplease (?:go ahead and )?close\b|\b(?:case|it|ticket) can be closed\b|\bok(?:ay)? to close\b|\benough information\b|\bissue (?:is|was|has been)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\bproblem (?:is|was)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\b(?:it'?s|it is|everything is) working now\b|\bno (?:further|more) (?:questions|assistance|help|support|issues)\b/i;
+    // Support announcing/confirming closure (closing email, survey notice, 30-day reopen window).
+    const SUPPORT_CLOSING = /\bproceed(?:ing)? (?:with|to) (?:the )?closure\b|\bmov(?:e|ing) forward to close\b|\bclos(?:e|ing) (?:of )?(?:the|this) case\b|\bcase (?:is now|has been|will (?:now )?be) closed\b|\breceive a survey\b|\bre-?open(?:ed)?\b[^.\n]{0,80}\b(?:30|thirty) days\b|\b(?:30|thirty) days\b[^.\n]{0,80}\bre-?open/i;
+    // Customer saying it is NOT over — a signal like this NEWER than any closure talk reopens the case.
+    const REOPEN_SIGNAL = /\bstill (?:not working|failing|broken|see(?:ing)?|happening|occurr?ing|having|getting)\b|\bissue (?:persists|remains|is back|has returned|re-?occurr?ed)\b|\bnot (?:yet )?(?:resolved|fixed|working)\b|\bre-?open (?:the|this) case\b|\bdid(?:n'?t| not) (?:work|help|fix)\b|\bdoes(?:n'?t| not) work\b|\banother (?:issue|problem|error)\b|\bnew (?:issue|problem|error)\b/i;
+
+    const usable = entries.filter(e => !AUTO_REPLY.test(e.body));
+    if (!usable.length) return res;
+    const external = usable.filter(e => !/\bINTERNAL\b/i.test(e.type || ''));
+    if (!external.length) return res;
+
+    // The chain starts with the customer's email, so the OLDEST external entry that does
+    // not read like a support template names the customer. The newest support-template
+    // entry names the agent handling the case.
+    for (let i = external.length - 1; i >= 0; i--) {
+        if (!SUPPORT_MARKER.test(external[i].body)) { res.customerSender = (external[i].sender || '').trim(); break; }
+    }
+    for (const e of external) {
+        if (SUPPORT_MARKER.test(e.body)) { res.agentSender = (e.sender || '').trim(); break; }
+    }
+
+    // Extract the sentence containing a matched signal (for quoting in the prompt).
+    const sentenceAround = (text, idx, len) => {
+        const start = Math.max(text.lastIndexOf('.', idx), text.lastIndexOf('!', idx), text.lastIndexOf('?', idx), text.lastIndexOf('\n', idx)) + 1;
+        let end = text.length;
+        for (const ch of ['.', '!', '?', '\n']) {
+            const p = text.indexOf(ch, idx + len);
+            if (p !== -1 && p < end) end = p;
+        }
+        return text.slice(start, Math.min(end + 1, start + 220)).replace(/\s+/g, ' ').trim();
+    };
+    const mk = (e, m) => ({ sender: (e.sender || '').trim() || 'unknown sender', time: (e.time || '').trim(), quote: sentenceAround(e.body, m.index, m[0].length) });
+
+    // Walk NEWEST → OLDEST. The newest signal decides the state; replies quote older
+    // emails below the new text, so only the top of each cleaned body is scanned.
+    let customerEv = null, supportEv = null;
+    for (const e of external) {
+        const scan = e.body.slice(0, 800);
+        const isCust = res.customerSender && e.sender
+            ? (e.sender || '').trim().toLowerCase() === res.customerSender.toLowerCase()
+            : !SUPPORT_MARKER.test(e.body);
+        const reopenM = isCust ? scan.match(REOPEN_SIGNAL) : null;
+        const consentM = isCust ? scan.match(CUSTOMER_CONSENT) : null;
+        const closingM = !isCust ? scan.match(SUPPORT_CLOSING) : null;
+        if (res.state === 'unknown') {
+            // A customer "still broken / new problem" beats a consent phrase in the same message.
+            if (reopenM && !consentM) { res.state = 'active'; res.evidence.push(mk(e, reopenM)); return res; }
+            if (consentM || closingM) res.state = 'closure';
+        }
+        if (res.state === 'closure') {
+            if (consentM && !customerEv) { customerEv = mk(e, consentM); res.customerConfirmed = true; }
+            if (closingM && !supportEv) { supportEv = mk(e, closingM); res.supportClosingSent = true; }
+            if (customerEv && supportEv) break;
+        }
+    }
+    if (res.state === 'unknown') res.state = 'active'; // chain exists, no closure evidence → open case
+    res.evidence = [supportEv, customerEv].filter(Boolean);
+    return res;
+}
+
+// Turn the detected lifecycle state into a prompt directive the quick actions append to
+// their instructions. kind = 'summary' (Case Summary + Next Steps) | 'email' (Draft Email).
+// The directive is deliberately prescriptive: on small local models an explicit
+// "Next Steps MUST be…" is the only reliable way to keep closure cases from getting
+// invented troubleshooting steps (and vice versa).
+function buildCaseStateDirective(lc, kind) {
+    const evLines = (lc.evidence || []).map(e => `- ${e.sender}${e.time ? ` wrote on ${e.time}` : ' wrote'}: "${e.quote}"`).join('\n');
+    if (lc.state === 'closure') {
+        const lines = ['[CASE STATE — VERIFIED DETERMINISTICALLY FROM THE EMAIL CHAIN. THIS IS FACT — DO NOT SECOND-GUESS IT.]'];
+        if (lc.customerConfirmed && lc.supportClosingSent) {
+            lines.push('This case is RESOLVED and IN CLOSURE: the customer ALREADY confirmed the case can be closed, and SOTI Support ALREADY sent the closure confirmation email:');
+        } else if (lc.customerConfirmed) {
+            lines.push('This case is RESOLVED: the customer ALREADY confirmed the case can be closed. The closing confirmation email has NOT yet been sent:');
+        } else {
+            lines.push('This case is IN CLOSURE: SOTI Support has told the customer the case is proceeding to closure and the customer has raised nothing further:');
+        }
+        if (evLines) lines.push(evLines);
+        if (kind === 'email') {
+            if (lc.customerConfirmed && lc.supportClosingSent) {
+                lines.push('Because of this, the email MUST be a short FINAL CLOSURE NOTICE: thank the customer, confirm the case is now closed with a one-line recap of the outcome, and remind them they can reopen it within 30 days by replying to this email. Do NOT restart troubleshooting, do NOT ask any questions, do NOT request information.');
+            } else {
+                lines.push('Because of this, the email MUST be the CLOSURE CONFIRMATION: thank the customer for confirming, give a one-line recap of the outcome, state that the case will now be closed, and mention they can reopen it within 30 days by replying to this email. Do NOT restart troubleshooting and do NOT ask any questions.');
+            }
+        } else {
+            lines.push('Because of this, "Current Status:" MUST state this closure state explicitly, citing the message(s) quoted above by author and date.');
+            if (lc.customerConfirmed && lc.supportClosingSent) {
+                lines.push('"Next Steps:" MUST be exactly closure actions and NOTHING else:\n1. Close the case in Salesforce — the customer already confirmed closure and the closing confirmation email has already been sent.\n2. No further action is needed; the customer can reopen the case within 30 days by replying to the closure email.\nYou are FORBIDDEN from listing troubleshooting steps, from suggesting the engineer confirm with the customer before closing (the customer ALREADY confirmed), and from proposing further follow-up emails.');
+            } else if (lc.customerConfirmed) {
+                lines.push('"Next Steps:" MUST be exactly:\n1. Send the customer the closure confirmation email.\n2. Close the case in Salesforce; the customer can reopen it within 30 days by replying.\nDo NOT list troubleshooting steps — the customer already confirmed the case can be closed.');
+            } else {
+                lines.push('"Next Steps:" MUST be exactly:\n1. Proceed with closing the case per the closure process already communicated to the customer.\n2. Note the customer can reopen the case within 30 days by replying.\nDo NOT list troubleshooting steps.');
+            }
+        }
+        return lines.join('\n');
+    }
+    const lines = ['[CASE STATE — VERIFIED DETERMINISTICALLY FROM THE EMAIL CHAIN. THIS IS FACT.]'];
+    lines.push(lc.state === 'unknown'
+        ? 'There is no email correspondence recorded yet — treat the case as OPEN and in progress.'
+        : 'The email chain shows NO confirmed resolution and NO closure agreement — this case is STILL OPEN.');
+    if (lc.evidence && lc.evidence.length) lines.push(evLines);
+    if (kind === 'email') {
+        lines.push('The email MUST move the OPEN case forward: answer the customer\'s most recent unanswered question(s) precisely, or request exactly the missing information needed to proceed — grounded ONLY in the case data and the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH] sections if present. If [RELEASE NOTES] shows this exact issue is fixed in a newer version, state the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and recommend the upgrade. NEVER invent findings, links, or commitments.');
+    } else {
+        lines.push('Because the case is OPEN, "Next Steps:" MUST be concrete TROUBLESHOOTING/technical actions that move the case toward resolution — each grounded in the case data, the log analysis, or the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH] sections if present. If [RELEASE NOTES] shows this exact issue is fixed in a newer version, cite the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and make upgrading a numbered step. If decisive information is missing (logs, exact versions, error messages, reproduction details), name exactly what to request from the customer as a numbered step. NEVER invent steps that are not supported by the case data or those sections.');
+    }
+    return lines.join('\n');
+}
+
+// Deterministic OLDEST-FIRST chronology of the email chain (date — sender — gist) for
+// the Case Summary prompt. The chain itself is injected NEWEST first, and small models
+// cannot reliably re-sort it — observed failure: the Case Timeline called the newest
+// out-of-office auto-reply "the initial inquiry". This scaffold fixes the dates, order,
+// and authorship mechanically; the model only summarizes each event.
+function buildChainChronology(ci) {
+    const raw = ((ci && ci.email_chain) || '').trim();
+    if (!raw) return '';
+    let entries;
+    try { entries = getCleanChainEntries(raw); } catch (e) { return ''; }
+    if (!entries || !entries.length) return '';
+    const lines = entries.slice().reverse().slice(0, 24).map(e => {
+        const gist = e.body.replace(/\s+/g, ' ').trim().slice(0, 110);
+        const tags = [];
+        if (/\bINTERNAL\b/i.test(e.type || '')) tags.push('INTERNAL note');
+        if (OOO_AUTO_REPLY_RE.test(e.body)) tags.push('out-of-office auto-reply');
+        return `- ${e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${gist}…"`;
+    });
+    return `[EMAIL CHRONOLOGY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Base the Case Timeline section on THIS list (summarize each event in your own words, using the full emails for detail). The FIRST line below is how the case started. Entries tagged [out-of-office auto-reply] or [INTERNAL note] are NOT substantive case correspondence — never present them as the inquiry, an answer, or a status change.]\n${lines.join('\n')}`;
+}
+
+// Clean, case-derived query for quick-action research. The quick-action prompt itself is
+// an instruction block — using it as the research query would poison the release-notes
+// keyword scoring — so research runs on the case's own symptom text instead.
+// "troubleshoot"/"issue" make the research layer treat it as a troubleshooting query
+// (which enables the newer-version release-notes upgrade scan).
+function buildCaseResearchQuery() {
+    const issue = (buildEffectiveIssueSummary(null) || '').replace(/\s+/g, ' ').trim();
+    if (!issue) return '';
+    return ('troubleshoot issue: ' + issue).slice(0, 600);
+}
+
 // Fair-share allocation: small files take only what they need and donate the surplus
 // to larger files. Every file is guaranteed a minimum slice so none ever vanishes.
 function allocatePerFileBudgets(logs, totalBudget, minPerFile = 4000) {
@@ -7003,7 +7186,8 @@ function mdToPlainText(mdText) {
 // survives tab switches and reloads (same pattern as attachFeedbackUI below).
 const COPY_KIND_LABELS = {
     notes: '📋 Copy notes for Salesforce',
-    summary: '📋 Copy summary'
+    summary: '📋 Copy summary',
+    email: '📧 Copy email'
 };
 function attachCopyUI(bubbleEl, msg) {
     try {
@@ -7116,6 +7300,9 @@ function sanitizeHistoryForModel(msgs, capChars = 4000) {
 //     which would otherwise trip the analysis detectors when logs are attached).
 //   skipResearch — skip online Pulse/Docs research AND clear any research left over from a
 //     previous question, so the answer is grounded in the case data only (and stays fast).
+//   researchQuery — run research with THIS clean case-derived query instead of the message
+//     text (quick actions on open cases: their message is an instruction block that would
+//     poison the research keyword scoring). Ignored when skipResearch is set.
 //   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
 async function send(overrideText = null, silent = false, opts = {}) {
     const c = cases.find(x => x.id === activeCaseId);
@@ -7253,12 +7440,16 @@ async function send(overrideText = null, silent = false, opts = {}) {
             // Quick-action turns must be grounded in the CASE data only — clear research left
             // over from an earlier question so it can't leak into (or slow down) this answer.
             PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
-        } else if (!hasLogs || needsDeepPulse) {
-            // Q&A mode (or explicit release-notes request): full online + offline research
-            const researchMs = needsDeepPulse ? 20000 : 10000;
+        } else if (!hasLogs || needsDeepPulse || opts.researchQuery) {
+            // Q&A mode (or explicit release-notes request): full online + offline research.
+            // Quick actions on OPEN cases pass opts.researchQuery — a clean case-derived
+            // symptom query — because their txt is an instruction block that would poison
+            // the research keyword scoring. The longer window covers the release-notes
+            // upgrade scan (multiple newer-version pages).
+            const researchMs = (needsDeepPulse || opts.researchQuery) ? 20000 : 10000;
             try {
                 await Promise.race([
-                    searchPulseAndDocs(txt, c.msgs, ci),
+                    searchPulseAndDocs(opts.researchQuery || txt, c.msgs, ci),
                     new Promise(r => setTimeout(r, researchMs))
                 ]);
             } catch (e) { console.warn('Research timed out'); }
@@ -8418,7 +8609,7 @@ $('btnAnalyse').onclick = async () => {
     $('panelR').classList.add('collapsed');
 
     // Yield control to let the browser paint the "Analysing logs..." progress indicator
-    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+    await paintYield();
 
     // Send "Analyse" as a silent chat message - this triggers the
     // standard send() flow but hides the user prompt from the UI.
@@ -8446,6 +8637,19 @@ $('btnAnalyse').onclick = async () => {
 // standard send() flow as a SILENT message (like Analyse Now), forced onto the
 // conversational route so words inside the notes can never trigger a log-forensics report.
 
+// Paint yield that can never stall the flow: requestAnimationFrame does NOT fire while
+// the panel is hidden (side panel closed/occluded, background tab, minimized window), so
+// a bare rAF await would freeze the whole action until the panel became visible again.
+// The timeout fallback guarantees the flow continues either way.
+function paintYield(ms = 50) {
+    return new Promise(resolve => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        try { requestAnimationFrame(() => setTimeout(finish, ms)); } catch (e) {}
+        setTimeout(finish, ms + 250);
+    });
+}
+
 // Shared progress-bar wrapper (mirrors the Analyse Now flow).
 async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
     const pWrap = $('progWrap');
@@ -8461,7 +8665,7 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
     }
 
     // Yield control to let the browser paint the progress indicator
-    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
+    await paintYield();
 
     await send(promptText, true, opts);
 
@@ -8540,27 +8744,171 @@ async function generateCaseSummary() {
         return;
     }
 
-    const prompt = `Give me a complete professional summary of this case, then the recommended next steps.
+    // The case state (open vs resolved/closing) is detected DETERMINISTICALLY from the
+    // email chain and injected as fact — the model must never guess it. Open cases also
+    // get online research (release notes / Pulse docs) so the troubleshooting next steps
+    // can cite real fixes; closure cases skip research entirely (irrelevant + slow).
+    const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
+    const stateDirective = buildCaseStateDirective(lc, 'summary');
+    const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
+    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '' });
+    const peopleLine = (lc.customerSender || lc.agentSender)
+        ? `\n- PEOPLE (exact, from the chain): ${[lc.customerSender && `${lc.customerSender} is the CUSTOMER`, lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER handling the case`].filter(Boolean).join('; ')}. Never swap these roles.`
+        : '';
+
+    const prompt = `Write a complete, in-depth professional summary of this case, then the recommended next steps.
 
 RULES:
-- Use ONLY what is in the case information, meeting notes, email chain, any attached logs or earlier analysis in this conversation, and our chat history. Do NOT invent details — if something decisive is unknown, list it under what is missing.
-- The email chain is ordered NEWEST FIRST: the current status comes from the most recent messages, which override the original issue summary if the situation has moved on.
+- Use ONLY facts from the case information, issue summary, email chain, meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish anything — if something decisive is unknown, say so.
+- The email chain is ordered NEWEST FIRST: the current status comes from the most recent messages, which OVERRIDE the original issue summary if the situation has moved on.
+- Refer to emails naturally by author and date (e.g. "Wesley confirmed on 2 July"), never by internal message numbers.${peopleLine}
 - Structure the answer with exactly these sections:
 
-**Summary:** one short paragraph — the customer/account, product, version, platform, environment, and the core issue.
+**Summary:** one paragraph (3-6 sentences) — the customer/account, product and versions, platform and environment, what the customer reported or asked, and where the case stands now.
 
-**Key Details:** short "-" bullets with the decisive facts (versions, affected devices, error messages, findings from any log analysis).
+**Key Details:** "-" bullets with every decisive fact — versions, device models, environment, error messages, each specific question the customer asked, the specific answer/solution support gave (including any documentation links shared), and findings from any log analysis.
 
-**Current Status:** where the case stands right now.
+**Case Timeline:** "-" bullets in date order (oldest first), one per key event: date — who — what happened. Cover the case creation, each substantive exchange, and the latest message.
 
-**Next Steps:** a numbered list of the concrete recommended actions for the support engineer.`;
+**Current Status:** exactly where the case stands right now based on the newest messages — what was last said and by whom.
 
-    await runQuickAIAction('Building case summary...', 'Case summary ready', prompt,
-        { forceConversational: true, skipResearch: true, copyKind: 'summary' });
+**Next Steps:** a numbered list of the concrete actions for the support engineer. This list MUST follow the CASE STATE directive below exactly.
+
+${chronology ? chronology + '\n\n' : ''}${stateDirective}`;
+
+    await runQuickAIAction('Building case summary...', 'Case summary ready', prompt, {
+        forceConversational: true,
+        skipResearch: !researchQuery,
+        researchQuery,
+        copyKind: 'summary'
+    });
+}
+
+// Draft the next email the support engineer should send the customer, from the LIVE case
+// state: closure confirmation when the chain shows the case is done, a grounded technical
+// reply / information request when the case is still open.
+async function draftCustomerEmail() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const notes = ($('meetingNotes').value || '').trim();
+    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasAnyCaseData = hasNotes
+        || ($('issueSummary').value || '').trim()
+        || ($('emailChain').value || '').trim()
+        || (c.logs && c.logs.length > 0)
+        || c.msgs.some(m => !m.hidden);
+    if (!hasAnyCaseData) {
+        toast('Nothing to draft from yet — sync from Salesforce or fill in the case details first', 'e');
+        return;
+    }
+
+    const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
+    const stateDirective = buildCaseStateDirective(lc, 'email');
+    const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
+    const customerFirst = (lc.customerSender || '').split(/\s+/)[0] || '';
+    const caseNum = ($('caseNum').value || '').trim();
+    const peopleLine = (lc.customerSender || lc.agentSender)
+        ? `\n- PEOPLE (exact, from the chain): ${[lc.customerSender && `${lc.customerSender} is the CUSTOMER (the recipient)`, lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER (the sender — me)`].filter(Boolean).join('; ')}. Never swap these roles.`
+        : '';
+
+    const prompt = `Draft the email that I (the SOTI support engineer handling this case) should send to the customer RIGHT NOW, matching the CURRENT state of the case.
+
+STRICT RULES:
+- Ground EVERY statement ONLY in the case information, issue summary, email chain, meeting notes, any log analysis in this conversation, and our chat history. NEVER invent facts, findings, links, dates, or commitments.${peopleLine}
+- The email chain is ordered NEWEST FIRST — continue the conversation from the MOST RECENT messages; never re-answer something the chain shows is already settled.
+- Professional, warm SOTI support tone. Keep it concise — short paragraphs, no filler.
+- Output ONLY the email in PLAIN TEXT — no markdown symbols like ** or ##, no emojis, no preamble such as "Here is the draft", and no commentary after it. Ready to paste into the email client.
+- Use exactly this layout:
+Subject: <short subject${caseNum ? ` referencing Case ${caseNum}` : ''} and the topic>
+
+Hi ${customerFirst || '<customer first name from the chain>'},
+
+<the email body>
+
+Warm regards,
+${lc.agentSender || '<my name — the SOTI support engineer from the chain>'}
+Technical Support, SOTI
+
+${stateDirective}`;
+
+    await runQuickAIAction('Drafting email to customer...', 'Email draft ready', prompt, {
+        forceConversational: true,
+        skipResearch: !researchQuery,
+        researchQuery,
+        copyKind: 'email'
+    });
 }
 
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 if ($('btnCaseSummary')) $('btnCaseSummary').onclick = generateCaseSummary;
+if ($('btnDraftEmail')) $('btnDraftEmail').onclick = draftCustomerEmail;
+
+// --- WELCOME CARD SHORTCUTS ---
+// The four cards on the welcome screen are real actions, not decoration:
+// 📋 opens the Case Info panel, 📁 opens the Logs panel, 🔍 runs an AI gap review of
+// the case context, 📦 exports the session report (works even on an empty session).
+function expandSidePanel(which) { // 'L' = Case Info, 'R' = Logs — expand only, never collapse
+    const body = $(which === 'L' ? 'bodyL' : 'bodyR');
+    const tgl = $(which === 'L' ? 'toggleL' : 'toggleR');
+    if (body && tgl && body.style.display === 'none' && typeof tgl.onclick === 'function') tgl.onclick();
+}
+
+async function identifyMissingInfo() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const notes = ($('meetingNotes').value || '').trim();
+    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasAnyCaseData = hasNotes
+        || ($('issueSummary').value || '').trim()
+        || ($('emailChain').value || '').trim()
+        || (c.logs && c.logs.length > 0)
+        || c.msgs.some(m => !m.hidden);
+    if (!hasAnyCaseData) {
+        // Nothing to review — everything is missing. Point the user at the form instead
+        // of burning minutes of CPU inference to say the same thing.
+        toast('No case data yet — fill in the Case Info form first, then I can tell you what is missing', 'w');
+        expandSidePanel('L');
+        const f = $('caseNum');
+        if (f) f.focus();
+        return;
+    }
+
+    const prompt = `Review every piece of case context provided so far and tell me exactly what is missing for a confident analysis.
+
+RULES:
+- Base the review ONLY on the case information, issue summary, email chain, meeting notes, attached logs/images, and our chat history. Do NOT invent gaps that the data already covers, and do NOT list something as present unless it actually is.
+- Structure the answer with exactly these sections:
+
+**WHAT I HAVE:** "-" bullets — each piece of case context that IS provided (case number, product, versions, platform, issue summary, email chain, meeting notes, logs, images), with a few words on what it contains.
+
+**WHAT IS MISSING:** "-" bullets — the specific missing information that would materially improve the analysis (e.g. which server or device logs, exact versions, error messages, reproduction steps, affected device count/models, environment details), each with one short clause on why it matters. If nothing decisive is missing, say so.
+
+**NEXT STEP:** the single best action to take right now to fill the most important gap (e.g. what to request from the customer or which log to upload).`;
+
+    await runQuickAIAction('Reviewing case for missing information...', 'Gap review ready', prompt,
+        { forceConversational: true, skipResearch: true });
+}
+
+{
+    const wireCard = (id, fn) => {
+        const el = $(id);
+        if (!el) return;
+        el.onclick = fn;
+        el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
+    };
+    wireCard('wCardCase', () => {
+        expandSidePanel('L');
+        const f = $('caseNum');
+        if (f) f.focus();
+    });
+    wireCard('wCardLogs', () => expandSidePanel('R'));
+    wireCard('wCardMissing', identifyMissingInfo);
+    wireCard('wCardExport', () => exportSession());
+}
 
 $('btnNew').onclick = createNewCase;
 
