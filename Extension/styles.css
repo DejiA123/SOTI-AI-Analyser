@@ -574,6 +574,101 @@ body {
 
 .w-icon { font-size: 18px; flex-shrink: 0; }
 
+/* "How to get started" steps on the welcome screen */
+.w-howto {
+    width: 100%;
+    text-align: left;
+    background: rgba(0, 161, 224, 0.06);
+    border: 1px solid rgba(0, 161, 224, 0.22);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+}
+.w-howto-title {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--blue2);
+    margin-bottom: 10px;
+}
+.w-step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--txt1);
+    padding: 4px 0;
+}
+.w-step-num {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--blue);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Quick Actions dropdown at the top of the chat (visible while chatting) */
+.qa-panel {
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg1);
+}
+.qa-ph {
+    padding: 8px 12px;
+    background: var(--bg2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+    transition: background .2s;
+}
+.qa-ph:hover { background: var(--bg3); }
+.qa-ph-left {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--txt1);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.qa-ph-collapse { font-size: 10px; color: var(--txt2); }
+.qa-pb {
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 45vh;
+    overflow-y: auto;
+}
+.qa-drop-item {
+    text-align: left;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    color: var(--txt1);
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font);
+    cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
+}
+.qa-drop-item:hover {
+    color: var(--txt1);
+    border-color: var(--blue);
+    background: rgba(255, 255, 255, 0.06);
+}
+
 /* Log UI Restoration */
 .dz-sub { font-size: 10px; color: var(--txt2); margin-top: 5px; letter-spacing: 1px; }
 .log-guide { margin-top: 20px; padding: 0 15px; }
@@ -636,31 +731,6 @@ body {
     padding: 12px;
     background: var(--bg1);
     border-top: 1px solid var(--border);
-}
-
-/* One-click AI quick actions (above the chat input) */
-.quick-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    padding-bottom: 8px;
-}
-.qa-chip {
-    background: var(--bg3);
-    border: 1px solid var(--border2);
-    color: var(--txt2);
-    border-radius: var(--r20);
-    padding: 4px 11px;
-    font-size: 10.5px;
-    font-weight: 600;
-    font-family: var(--font);
-    cursor: pointer;
-    transition: color .15s, border-color .15s, background .15s;
-}
-.qa-chip:hover {
-    color: var(--txt1);
-    border-color: var(--blue);
-    background: var(--bg2);
 }
 
 .input-row {

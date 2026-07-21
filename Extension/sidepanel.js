@@ -692,6 +692,7 @@ function switchCase(id) {
         renderImgs();
         renderLogs();
         updateAllValidations();
+        updateQuickActionsPanel();
 
         // Update tab highlight
         document.querySelectorAll('.tab-item').forEach(t =>
@@ -7751,6 +7752,7 @@ async function send(overrideText = null, silent = false, opts = {}) {
         $('chatIn').style.height = '';
     }
     if ($('welcome')) $('welcome').style.display = 'none';
+    if (typeof updateQuickActionsPanel === 'function') updateQuickActionsPanel();
 
     // Wait for any log files still being read/extracted (ZIPs can take a while) —
     // sending early would silently exclude them from the AI's context.
@@ -9367,21 +9369,11 @@ ${stateDirective}`;
     });
 }
 
-$('btnCleanNotes').onclick = cleanUpMeetingNotes;
-if ($('btnCaseSummary')) $('btnCaseSummary').onclick = generateCaseSummary;
-if ($('btnDraftEmail')) $('btnDraftEmail').onclick = draftCustomerEmail;
-
-// --- WELCOME CARD SHORTCUTS ---
-// The four cards on the welcome screen are real actions, not decoration:
-// 📋 opens the Case Info panel, 📁 opens the Logs panel, 🔍 runs an AI gap review of
-// the case context, 📦 exports the session report (works even on an empty session).
-function expandSidePanel(which) { // 'L' = Case Info, 'R' = Logs — expand only, never collapse
-    const body = $(which === 'L' ? 'bodyL' : 'bodyR');
-    const tgl = $(which === 'L' ? 'toggleL' : 'toggleR');
-    if (body && tgl && body.style.display === 'none' && typeof tgl.onclick === 'function') tgl.onclick();
-}
-
-async function identifyMissingInfo() {
+// "Fix the customer's issue for me" — the AI produces a complete, decisive, grounded fix for
+// the reported problem: root cause, exact step-by-step resolution, verification, and a fallback.
+// Open cases get release-notes / Pulse research so the fix can cite real SOTI guidance and the
+// version a known defect is fixed in, rather than guessing.
+async function fixCustomerIssue() {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) { toast('No active case selected', 'e'); return; }
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
@@ -9394,31 +9386,46 @@ async function identifyMissingInfo() {
         || (c.logs && c.logs.length > 0)
         || c.msgs.some(m => !m.hidden);
     if (!hasAnyCaseData) {
-        // Nothing to review — everything is missing. Point the user at the form instead
-        // of burning minutes of CPU inference to say the same thing.
-        toast('No case data yet — fill in the Case Info form first, then I can tell you what is missing', 'w');
-        expandSidePanel('L');
-        const f = $('caseNum');
-        if (f) f.focus();
+        toast('No issue to fix yet — sync from Salesforce or fill in the case details first', 'e');
         return;
     }
 
-    const prompt = `Review every piece of case context provided so far and tell me exactly what is missing for a confident analysis.
+    const researchQuery = buildCaseResearchQuery();
+    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+
+    const prompt = `You are the senior SOTI support engineer on this case. Solve the customer's reported issue END TO END and give me the complete fix I can act on right now. Be decisive and specific — this must be an actual resolution, not a list of generic suggestions.
 
 RULES:
-- Base the review ONLY on the case information, issue summary, email chain, meeting notes, attached logs/images, and our chat history. Do NOT invent gaps that the data already covers, and do NOT list something as present unless it actually is.
-- Structure the answer with exactly these sections:
+- Ground EVERY step in the real case: use the issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs/images and their earlier analysis in this conversation, and any release-notes / Pulse documentation research provided. NEVER invent product behaviour, menu paths, version numbers, or KB links — if a detail is genuinely unknown, state exactly what to check to obtain it rather than guessing.
+- The email chain is ordered NEWEST FIRST — solve the problem as it stands in the MOST RECENT messages, and do NOT re-suggest anything the chain shows was already tried and ruled out.
+- If the evidence points to a known defect, name it and the version it is fixed in (e.g. MCMR-xxxxx, fixed in <version>) and make upgrading a concrete step. If it is a configuration issue, give the exact SOTI console location and the precise setting to change.
+- Output EXACTLY these sections, in this order, and NOTHING else:
 
-**WHAT I HAVE:** "-" bullets — each piece of case context that IS provided (case number, product, versions, platform, issue summary, email chain, meeting notes, logs, images), with a few words on what it contains.
+**Root cause:** 1-3 sentences naming the most likely cause, with the specific evidence from the case/logs that points to it. If more than one cause is plausible, name the most likely and note the alternative in one short clause.
 
-**WHAT IS MISSING:** "-" bullets — the specific missing information that would materially improve the analysis (e.g. which server or device logs, exact versions, error messages, reproduction steps, affected device count/models, environment details), each with one short clause on why it matters. If nothing decisive is missing, say so.
+**The fix — step by step:** a numbered list of the exact actions to resolve it, in order. Each step concrete enough to perform without further guessing (exact console path, setting value, command, or target version).
 
-**NEXT STEP:** the single best action to take right now to fill the most important gap (e.g. what to request from the customer or which log to upload).`;
+**How to verify:** "-" bullets — what the engineer or customer should see once the fix works, so the resolution can be confirmed.
 
-    await runQuickAIAction('Reviewing case for missing information...', 'Gap review ready', prompt,
-        { forceConversational: true, skipResearch: true });
+**If it does not resolve:** the single best fallback, or the exact data to collect next (e.g. which log at which log level) to progress or escalate the case.
+
+${chronology ? chronology + '\n\n' : ''}Deliver the fix with full confidence, grounded 100% in the case facts and the research provided.`;
+
+    await runQuickAIAction('Working out the fix...', 'Fix ready', prompt, {
+        forceConversational: true,
+        freshContext: true,
+        skipResearch: !researchQuery,
+        researchQuery,
+        copyKind: 'summary'
+    });
 }
 
+$('btnCleanNotes').onclick = cleanUpMeetingNotes;
+
+// --- WELCOME CARD SHORTCUTS ---
+// The four cards on the welcome screen are real one-click AI actions, not decoration:
+// 📋 Case Summary + Next Steps, 📧 Draft an email to the customer, 🔧 Fix the customer's
+// issue for me, 📦 Export the full session report. They mirror the top Quick Actions panel.
 {
     const wireCard = (id, fn) => {
         const el = $(id);
@@ -9426,15 +9433,48 @@ RULES:
         el.onclick = fn;
         el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
     };
-    wireCard('wCardCase', () => {
-        expandSidePanel('L');
-        const f = $('caseNum');
-        if (f) f.focus();
-    });
-    wireCard('wCardLogs', () => expandSidePanel('R'));
-    wireCard('wCardMissing', identifyMissingInfo);
+    wireCard('wCardCase', generateCaseSummary);
+    wireCard('wCardLogs', draftCustomerEmail);
+    wireCard('wCardMissing', fixCustomerIssue);
     wireCard('wCardExport', () => exportSession());
 }
+
+// --- TOP QUICK ACTIONS PANEL ---
+// A drop-down at the top of the chat that appears only once the user is chatting with the AI.
+// It exposes the same four one-click actions as the welcome cards so they stay reachable mid-chat.
+function updateQuickActionsPanel() {
+    const panel = $('qaPanel');
+    if (!panel) return;
+    const c = cases.find(x => x.id === activeCaseId);
+    const welcome = $('welcome');
+    // We're "in a chat" once the welcome screen is hidden (live turn) or the case already
+    // has visible messages (restored history). The welcome's own display is the app's
+    // existing source of truth for this, so we reuse it here.
+    const welcomeHidden = !!(welcome && welcome.style.display === 'none');
+    const hasChat = welcomeHidden || !!(c && c.msgs && c.msgs.some(m => !m.hidden));
+    panel.style.display = hasChat ? 'block' : 'none';
+    if (!hasChat) { // reset to collapsed so it re-opens fresh next chat
+        const body = $('qaBody');
+        if (body) body.style.display = 'none';
+        const icon = $('qaIcon');
+        if (icon) icon.textContent = '▶';
+    }
+}
+
+if ($('qaToggle')) {
+    $('qaToggle').onclick = () => {
+        const b = $('qaBody');
+        if (!b) return;
+        const opening = b.style.display === 'none';
+        b.style.display = opening ? 'flex' : 'none';
+        const icon = $('qaIcon');
+        if (icon) icon.textContent = opening ? '▼' : '▶';
+    };
+}
+if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
+if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
+if ($('qaFixIssue')) $('qaFixIssue').onclick = fixCustomerIssue;
+if ($('qaExport')) $('qaExport').onclick = () => exportSession();
 
 $('btnNew').onclick = createNewCase;
 
