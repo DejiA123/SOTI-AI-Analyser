@@ -135,7 +135,7 @@ function md(t) {
         
         // 5. Force spacing before common inline headers and guide steps (Case-insensitive, safe headers only).
         //    Longer phrases FIRST so "Case Timeline"/"Current Status" win before "Summary" could split them.
-        .replace(/(^|\W)(\*\*)?(Time of the meeting|Case Timeline|Current Status|Key Details|Troubleshooting tips|Troubleshooting steps|Next steps|Additional information|Root cause|Resolution|Pre-requisites|Prerequisites|Summary|Step \d+|Method \d+):\s*(\*\*)?/gi, '$1\n\n**$3:** ')
+        .replace(/(^|\W)(\*\*)?(Time of the meeting|Case Timeline|Current Status|Key Details|Troubleshooting tips|Troubleshooting steps|Troubleshoots done|Next steps|Additional information|Root cause|Resolution|Pre-requisites|Prerequisites|Summary|Step \d+|Method \d+):\s*(\*\*)?/gi, '$1\n\n**$3:** ')
 
         .replace(/```([\s\S]*?)```/g, '<div style="background:rgba(0,0,0,0.3); padding:12px; border-radius:8px; font-family:monospace; margin:15px 0; border:1px solid rgba(255,255,255,0.1); white-space:pre-wrap; word-break:break-all; font-size:12px">$1</div>')
         // Bold label glued to its text ("**Key Details:**- SOTI") — force the missing space
@@ -3207,6 +3207,118 @@ function isAnalysisFollowUp(text) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// "How many times does <X> occur in the logs?" — deterministic occurrence count
+// ---------------------------------------------------------------------------
+// After a forensic analysis the model would answer counting questions from the
+// (necessarily trimmed) forensic REPORT, not the real logs — so the number was
+// wrong/guessed. These helpers detect a counting question, extract the search
+// term, and count it across the FULL raw log content so the answer is exact.
+
+function isOccurrenceCountQuestion(text) {
+    const t = (text || '').trim().toLowerCase();
+    if (!t) return false;
+    if (!/\blogs?\b|\bfiles?\b|\bthem\b|\bit\b|\bappear|\boccur|\bshow|\btimes\b|\bcount\b|\bmany\b|\boften\b/.test(t)) return false;
+    return /\bhow\s+many\s+times\b/.test(t)
+        || /\bhow\s+many\b[^?]*\b(occur|occurr|appear|show|are\s+there|instances?|times|hits?|matches?|entries|lines?|errors?)\b/.test(t)
+        || /\bnumber\s+of\s+times\b/.test(t)
+        || /\b(count|counts?\s+of|occurrences?\s+of|instances?\s+of)\b/.test(t)
+        || /\bhow\s+often\b/.test(t)
+        || /\bhow\s+frequently\b/.test(t);
+}
+
+// Extract the string to count from a counting question. Prefer an explicit quoted
+// value, then a high-signal error token (dotted identifier / CamelCase Exception /
+// ALL_CAPS constant / MCMR code), then a fallback phrase after "does"/"of"/"for".
+function extractCountTerm(text) {
+    const raw = String(text || '');
+    // 1) Quoted (any quote kind).
+    for (const rx of [/"([^"\n]{2,80})"/, /[“”]([^“”\n]{2,80})[“”]/, /'([^'\n]{2,80})'/, /[‘’]([^‘’\n]{2,80})[‘’]/, /`([^`\n]{2,80})`/]) {
+        const m = raw.match(rx);
+        if (m && m[1].trim()) return m[1].trim();
+    }
+    // 2) High-signal tokens anywhere in the question.
+    const tokenPatterns = [
+        /\b([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){2,})\b/,                       // java.lang.SecurityException
+        /\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout|Denied|Refused|Warning))\b/, // UnauthorizedAccessException
+        /\b(MCMR[-\s]?\d{3,6})\b/i,                                             // MCMR-24460
+        /\b([A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+)\b/,                               // PACKAGE_USAGE_STATS
+        /\b(HTTP\s?\d{3}|\b[45]\d{2}\b)\b/,                                     // 429 / HTTP 500
+    ];
+    for (const rx of tokenPatterns) {
+        const m = raw.match(rx);
+        if (m && m[1]) return m[1].trim();
+    }
+    // 3) Phrase after the trigger words (strip a leading article / "error"/"word").
+    const after = raw.match(/\b(?:does|do|of|for|the (?:word|term|error|string|phrase|line|message)|word|term|error|string|phrase)\s+([A-Za-z0-9][\w .:\/\\-]{2,60}?)(?:\s+(?:occur|occurr|appear|show|come up|happen|error|in the|in my|in your|in these|in those|in all)\b|[?.!]|$)/i);
+    if (after && after[1]) {
+        const cand = after[1].replace(/\b(error|errors|message|messages|log|logs|line|lines)\b\s*$/i, '').trim();
+        if (cand.length >= 2) return cand;
+    }
+    return '';
+}
+
+// Count occurrences of `term` across the FULL raw content of every attached log.
+// Substring for multi-word/punctuated terms; whole-word for short bare tokens (so
+// "APN" doesn't count "APNS"). Returns per-file counts, total, and first/last cite.
+function countTermInLogs(logs, term) {
+    const t = String(term || '').trim();
+    if (!t || !Array.isArray(logs) || !logs.length) return null;
+    const shortBare = t.length <= 5 && /^[A-Za-z0-9]+$/.test(t);
+    let rx = null;
+    try {
+        rx = shortBare
+            ? new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi')
+            : new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    } catch (e) { return null; }
+    const per = [];
+    let total = 0, firstCite = null, lastCite = null;
+    for (const log of logs) {
+        const name = jiraLogBaseName(log.name || 'log');
+        let content = log.content;
+        if (typeof content !== 'string') {
+            content = Array.isArray(log.lines) ? log.lines.join('\n') : '';
+        }
+        if (!content) { per.push({ name, count: 0 }); continue; }
+        // Count matches; also find the first matching line number for a citation.
+        rx.lastIndex = 0;
+        let count = 0, m;
+        while ((m = rx.exec(content)) !== null) {
+            count++;
+            if (m.index === rx.lastIndex) rx.lastIndex++; // zero-width guard
+            if (count > 5000000) break; // sanity cap
+        }
+        if (count > 0) {
+            const lines = Array.isArray(log.lines) && log.lines.length ? log.lines : content.split('\n');
+            let firstLn = -1, lastLn = -1;
+            const lineRx = shortBare
+                ? new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i')
+                : new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            for (let i = 0; i < lines.length; i++) {
+                if (lineRx.test(lines[i])) { if (firstLn < 0) firstLn = i + 1; lastLn = i + 1; }
+            }
+            if (firstLn > 0 && !firstCite) firstCite = `${name}:${firstLn}`;
+            if (lastLn > 0) lastCite = `${name}:${lastLn}`;
+        }
+        per.push({ name, count });
+        total += count;
+    }
+    return { term: t, total, per, firstCite, lastCite, matchMode: shortBare ? 'whole-word' : 'substring' };
+}
+
+// Render the count result as an authoritative prompt block the model must quote from.
+function buildOccurrenceCountSection(res) {
+    if (!res) return '';
+    const perLine = res.per.filter(p => p.count > 0).map(p => `- ${p.name}: ${p.count}`).join('\n')
+        || '- (no matches in any attached log)';
+    const cites = res.total > 0 && res.firstCite
+        ? `\nFirst occurrence: ${res.firstCite}${res.lastCite && res.lastCite !== res.firstCite ? `; last occurrence: ${res.lastCite}` : ''}.`
+        : '';
+    return `[EXACT OCCURRENCE COUNT — counted deterministically across the FULL raw log files (${res.matchMode} match), AUTHORITATIVE. Use THESE numbers verbatim; do NOT estimate from the forensic report or the trimmed evidence.]
+"${res.term}" appears ${res.total} time${res.total === 1 ? '' : 's'} in total across the attached logs:
+${perLine}${cites}`;
+}
+
 function shouldUseFocusedLogPipeline(logs) {
     if (!logs || logs.length === 0) return false;
     return logs.some(log => {
@@ -3863,8 +3975,19 @@ const OOO_AUTO_REPLY_RE = /\bautomatic reply\b|\bauto-?reply\b|\bout of (?:the )
 // Shared by detectCaseLifecycleState and buildChainChronology.
 function getCleanChainEntries(raw) {
     const scraperFormat = /={20,}/.test(raw) || /^\s*\[[^\][]{4,80}\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?[^:\n]{1,80}:/.test(raw);
+    // sigBody = the sender's OWN message with the quoted reply tail cut but the signature
+    // KEPT. Role detection needs it because: cleanEmailBody strips the signature (where the
+    // "Technical Support, SOTI" marker lives), so the cleaned body loses it; but the fully
+    // raw body still contains that marker inside QUOTED support replies a customer pasted
+    // below their own text. sigBody keeps the sender's signature yet drops the quoted tail,
+    // so the marker means "this sender is support", not "this sender quoted support".
+    const cutTail = (body) => {
+        const s = String(body || '');
+        const idx = s.search(/(?:^|[\n\s])(?:-{3,}\s*Original Message\s*-{3,}|From:\s?[^\n]{0,160}?\bSent:\s)/i);
+        return idx > 10 ? s.slice(0, idx) : s;
+    };
     return parseEmailChainEntries(raw)
-        .map(e => ({ ...e, body: cleanEmailBody(e.body, e.sender, scraperFormat) }))
+        .map(e => ({ ...e, sigBody: cutTail(e.body), body: cleanEmailBody(e.body, e.sender, scraperFormat) }))
         .filter(e => e.body && !/^system$/i.test((e.sender || '').trim()));
 }
 
@@ -3890,19 +4013,46 @@ function detectCaseLifecycleState(ci) {
     if (!usable.length) return res;
     const external = usable.filter(e => !/\bINTERNAL\b/i.test(e.type || ''));
     if (!external.length) return res;
+    // Role detection runs over real CORRESPONDENCE only — [CALL LOG] entries are the agent's
+    // own phone notes (no support signature), and mistaking one for a customer email named
+    // the agent as the customer (observed role-swap bug).
+    const correspondence = external.filter(e => !/\bCALL\b/i.test(e.type || ''));
 
-    // The chain starts with the customer's email, so the OLDEST external entry that does
-    // not read like a support template names the customer. The newest support-template
+    // The chain starts with the customer's email, so the OLDEST correspondence entry that
+    // does not read like a support template names the customer. The newest support-template
     // entry names the agent handling the case. Bare Salesforce lifecycle events ("Case
     // created" logged under "Web Services") are records, not emails — skip them or the
     // portal robot gets named as the customer.
-    for (let i = external.length - 1; i >= 0; i--) {
-        if (/^case (?:created|closed|reopened)\b/i.test(external[i].body.trim())) continue;
-        if (!SUPPORT_MARKER.test(external[i].body)) { res.customerSender = (external[i].sender || '').trim(); break; }
+    // Test SUPPORT_MARKER on sigBody — the sender's own text incl. signature, but WITHOUT the
+    // quoted reply tail (so a customer who pasted a support reply below isn't misread as support).
+    const bodyFor = (e) => e.sigBody || e.body || '';
+    for (let i = correspondence.length - 1; i >= 0; i--) {
+        if (/^case (?:created|closed|reopened)\b/i.test(correspondence[i].body.trim())) continue;
+        if (!SUPPORT_MARKER.test(bodyFor(correspondence[i]))) { res.customerSender = (correspondence[i].sender || '').trim(); break; }
     }
-    for (const e of external) {
-        if (SUPPORT_MARKER.test(e.body)) { res.agentSender = (e.sender || '').trim(); break; }
+    // FALLBACK when the customer never wrote a substantive email (the issue came in via the
+    // portal / case-description field and every email in the chain is support-authored — a
+    // common shape). Without this, customerSender stayed empty and the model guessed the
+    // SUPPORT engineer as "the customer experiencing the issue".
+    if (!res.customerSender) {
+        // 1) The "Case created" row names the customer contact in the portal record.
+        const created = external.find(e => /^case (?:created|reopened)\b/i.test((e.body || '').trim()));
+        if (created && created.sender && !SUPPORT_MARKER.test(bodyFor(created))) {
+            res.customerSender = created.sender.trim();
+        }
     }
+    if (!res.customerSender) {
+        // 2) The recipient a support email greets ("Hi Niels,") is the customer. Greetings are
+        // stripped from cleaned bodies, so scan the RAW chain text.
+        const gm = raw.match(/(?:^|\n)\s*(?:Hi|Hello|Dear)\s+([A-Z][A-Za-z'’.-]{1,30})\s*,/);
+        if (gm && gm[1] && !/^(there|team|all|support|sir|madam)$/i.test(gm[1])) res.customerSender = gm[1].trim();
+    }
+    for (const e of correspondence) {
+        if (SUPPORT_MARKER.test(bodyFor(e))) { res.agentSender = (e.sender || '').trim(); break; }
+    }
+    // A parenthetical company tag on the customer name ("Niels Harland (CM.com …)") is noise
+    // for role labelling — keep just the person's name.
+    res.customerSender = res.customerSender.replace(/\s*\([^)]*\)\s*$/, '').trim();
 
     // Extract the sentence containing a matched signal (for quoting in the prompt).
     const sentenceAround = (text, idx, len) => {
@@ -3967,13 +4117,13 @@ function buildCaseStateDirective(lc, kind) {
                 lines.push('Because of this, the email MUST be the CLOSURE CONFIRMATION: thank the customer for confirming, give a one-line recap of the outcome, state that the case will now be closed, and mention they can reopen it within 30 days by replying to this email. Do NOT restart troubleshooting and do NOT ask any questions.');
             }
         } else {
-            lines.push('Because of this, "Current Status:" MUST state this closure state explicitly, citing the message(s) quoted above by author and date.');
+            lines.push('Because of this, the "Summary:" MUST state this closure state explicitly, citing the message(s) quoted above by author and date.');
             if (lc.customerConfirmed && lc.supportClosingSent) {
-                lines.push('"Next Steps:" MUST be exactly closure actions and NOTHING else:\n1. Close the case in Salesforce — the customer already confirmed closure and the closing confirmation email has already been sent.\n2. No further action is needed; the customer can reopen the case within 30 days by replying to the closure email.\nYou are FORBIDDEN from listing troubleshooting steps, from suggesting the engineer confirm with the customer before closing (the customer ALREADY confirmed), and from proposing further follow-up emails.');
+                lines.push('"Next steps:" MUST be exactly closure actions and NOTHING else:\n1. Close the case in Salesforce — the customer already confirmed closure and the closing confirmation email has already been sent.\n2. No further action is needed; the customer can reopen the case within 30 days by replying to the closure email.\nYou are FORBIDDEN from listing troubleshooting steps, from suggesting the engineer confirm with the customer before closing (the customer ALREADY confirmed), and from proposing further follow-up emails.');
             } else if (lc.customerConfirmed) {
-                lines.push('"Next Steps:" MUST be exactly:\n1. Send the customer the closure confirmation email.\n2. Close the case in Salesforce; the customer can reopen it within 30 days by replying.\nDo NOT list troubleshooting steps — the customer already confirmed the case can be closed.');
+                lines.push('"Next steps:" MUST be exactly:\n1. Send the customer the closure confirmation email.\n2. Close the case in Salesforce; the customer can reopen it within 30 days by replying.\nDo NOT list troubleshooting steps — the customer already confirmed the case can be closed.');
             } else {
-                lines.push('"Next Steps:" MUST be exactly:\n1. Proceed with closing the case per the closure process already communicated to the customer.\n2. Note the customer can reopen the case within 30 days by replying.\nDo NOT list troubleshooting steps.');
+                lines.push('"Next steps:" MUST be exactly:\n1. Proceed with closing the case per the closure process already communicated to the customer.\n2. Note the customer can reopen the case within 30 days by replying.\nDo NOT list troubleshooting steps.');
             }
         }
         return lines.join('\n');
@@ -3986,7 +4136,7 @@ function buildCaseStateDirective(lc, kind) {
     if (kind === 'email') {
         lines.push('The email MUST move the OPEN case forward: answer the customer\'s most recent unanswered question(s) precisely, or request exactly the missing information needed to proceed — grounded ONLY in the case data and the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH]/[OFFLINE PULSE KNOWLEDGE MATCHES] sections if present. If [RELEASE NOTES] shows this exact issue is fixed in a newer version, state the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and recommend the upgrade. If the chain references an earlier SOTI case that resolved a similar issue, acknowledge it and say support is reviewing that case\'s resolution. NEVER invent findings, links, or commitments.');
     } else {
-        lines.push('Because the case is OPEN, "Next Steps:" MUST be a concrete TROUBLESHOOTING plan that moves the case toward resolution. Build the numbered list as: (1) the most likely cause(s) implied by the case evidence, each tied to a specific fact; (2) precise verification/configuration checks — use the exact console paths, settings, and prerequisites from [OFFLINE PULSE KNOWLEDGE MATCHES]/[DEEP RESEARCH]/[PULSE SEARCH]/[DOCS SEARCH] entries that match this issue, never invented ones; (3) the exact missing information to request from the customer — name each item specifically (which log files, the exact error text or a screenshot, device models, OS/agent versions, reproduction details); (4) if [RELEASE NOTES] shows this exact issue is fixed in a newer version, cite the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and make upgrading a numbered step; (5) if the emails reference an earlier SOTI case as having resolved a similar issue, make reviewing that case\'s resolution an explicit numbered step. NEVER pad with generic filler ("analyze the context", "escalate to L3", "review documentation"), and NEVER invent steps that are not supported by the case data or those sections.');
+        lines.push('Because the case is OPEN, "Next steps:" MUST be a concrete TROUBLESHOOTING plan that moves the case toward resolution. Build the numbered list as: (1) the most likely cause(s) implied by the case evidence, each tied to a specific fact; (2) precise verification/configuration checks — use the exact console paths, settings, and prerequisites from [OFFLINE PULSE KNOWLEDGE MATCHES]/[DEEP RESEARCH]/[PULSE SEARCH]/[DOCS SEARCH] entries that match this issue, never invented ones; (3) the exact missing information to request from the customer — name each item specifically (which log files, the exact error text or a screenshot, device models, OS/agent versions, reproduction details); (4) ONLY if a [RELEASE NOTES] section is present AND shows this exact issue fixed in a newer version, cite the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and make upgrading a numbered step — if [RELEASE NOTES] is absent or says no matching fix, do NOT add any "review release notes" / "upgrade" step at all; (5) if the emails reference an earlier SOTI case as having resolved a similar issue, make reviewing that case\'s resolution an explicit numbered step. Keep steps that are already done OUT of this list (they belong under "Troubleshoots done"). NEVER pad with generic filler ("analyze the context", "escalate to L3", "review documentation", "review release notes"), and NEVER invent steps that are not supported by the case data or those sections.');
     }
     return lines.join('\n');
 }
@@ -3996,12 +4146,16 @@ function buildCaseStateDirective(lc, kind) {
 // cannot reliably re-sort it — observed failure: the Case Timeline called the newest
 // out-of-office auto-reply "the initial inquiry". This scaffold fixes the dates, order,
 // and authorship mechanically; the model only summarizes each event.
-function buildChainChronology(ci) {
+// purpose: 'timeline' (default) instructs the model to base a dated Case Timeline on this
+// list; 'grounding' tells it to use the list ONLY to know what was done + the current state
+// and to NOT reproduce a dated timeline (used by the concise Case Summary format).
+function buildChainChronology(ci, purpose) {
     const raw = ((ci && ci.email_chain) || '').trim();
     if (!raw) return '';
     let entries;
     try { entries = getCleanChainEntries(raw); } catch (e) { return ''; }
     if (!entries || !entries.length) return '';
+    const grounding = purpose === 'grounding';
     const ordered = entries.slice().reverse().slice(0, 24); // OLDEST first
     const lines = ordered.map((e, i) => {
         const isNewest = i === ordered.length - 1;
@@ -4015,7 +4169,9 @@ function buildChainChronology(ci) {
         return `- ${e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${gist}…"`;
     });
     const newest = ordered[ordered.length - 1];
-    const newestLine = `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
+    const newestLine = grounding
+        ? `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the current state of the case comes from THIS message; attribute it to THIS author, not an older one.`
+        : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
     // Other SOTI case numbers referenced inside the emails are gold for troubleshooting
     // ("this happened before and was resolved in case X") — extract them deterministically
     // so they can never be lost to gisting/truncation. The CURRENT case's own number (from
@@ -4029,10 +4185,15 @@ function buildChainChronology(ci) {
         if (!own && counts.size > 1) own = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
         const refs = [...counts.keys()].filter(n => n.toUpperCase() !== own);
         if (refs.length) {
-            refCasesLine = `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. If an email says an earlier case resolved a similar issue, that is a decisive fact: surface it in Key Details and Current Status, and make reviewing that case's resolution a numbered Next Step.]`;
+            refCasesLine = grounding
+                ? `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. If an email says an earlier case resolved a similar issue, surface it in the Summary and make reviewing that case's resolution a numbered Next step.]`
+                : `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. If an email says an earlier case resolved a similar issue, that is a decisive fact: surface it in Key Details and Current Status, and make reviewing that case's resolution a numbered Next Step.]`;
         }
     } catch (e) { }
-    return `[EMAIL CHRONOLOGY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Base the Case Timeline section on THIS list (summarize each event in your own words, using the full emails for detail). The FIRST line below is how the case started. Entries tagged [out-of-office auto-reply] or [INTERNAL note] are NOT substantive case correspondence — never present them as the inquiry, an answer, or a status change. Entries tagged [phone CALL LOG] are phone calls — present them in the timeline as calls, not emails.]\n${lines.join('\n')}${newestLine}${refCasesLine}`;
+    const header = grounding
+        ? `[CASE HISTORY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Use this ONLY to know what troubleshooting/actions were already done and what the current state is — do NOT reproduce it as a dated timeline in your answer. Entries tagged [phone CALL LOG] are phone calls and [INTERNAL note] are internal notes: treat BOTH as troubleshooting actions/findings that belong under "Troubleshoots done", never as customer emails. Entries tagged [out-of-office auto-reply] carry no case signal — ignore them.]`
+        : `[EMAIL CHRONOLOGY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Base the Case Timeline section on THIS list (summarize each event in your own words, using the full emails for detail). The FIRST line below is how the case started. Entries tagged [out-of-office auto-reply] or [INTERNAL note] are NOT substantive case correspondence — never present them as the inquiry, an answer, or a status change. Entries tagged [phone CALL LOG] are phone calls — present them in the timeline as calls, not emails.]`;
+    return `${header}\n${lines.join('\n')}${newestLine}${refCasesLine}`;
 }
 
 // Clean, case-derived query for quick-action research. The quick-action prompt itself is
@@ -5481,6 +5642,7 @@ RULES:
 - Answer the ACTUAL question asked. Do NOT output a "Log Analysis" report, headed sections, or a root-cause verdict UNLESS the agent explicitly asks you to analyse the logs or find the root cause.
 - FOLLOW-UP / "why" questions ("why do you think that's the root cause?", "how did you conclude that?", "are you sure?", "explain that"): the user is asking you to JUSTIFY the answer you ALREADY gave earlier in this conversation. Answer conversationally in a few sentences — restate your reasoning and cite the specific evidence (the exact error message, file:line, timestamp, and why it is the cause rather than a downstream symptom) that led to it. Do NOT regenerate a full forensic report, tables, or headed sections, and do NOT switch to a different root cause than the one you already gave.
 - Case questions (case number, product, version, status, "summarize the case", "what's in the case info") → answer from [CASE] and [ISSUE SUMMARY].
+- "How many times / how often does <X> occur" questions → when an [EXACT OCCURRENCE COUNT] section is present, that number was counted directly from the FULL raw logs and is AUTHORITATIVE. State that exact total (and the per-file breakdown if useful) verbatim. NEVER estimate the count from a previous forensic report or from the trimmed evidence, and never say you cannot count it when that section is present.
 - Status / "what do I do next" questions → read [EMAIL CHAIN] from the TOP (it is ordered NEWEST FIRST) and answer from the most recent messages. [EMAIL CHAIN] OVERRIDES [ISSUE SUMMARY]: the summary is only the original problem and may already be resolved or superseded. If the latest emails show the issue is fixed or the conversation moved on, reflect that — do NOT re-recommend old troubleshooting or a meeting for an already-solved problem; tell the agent how to address the newest open item, or confirm the fix and suggest closing the case.
 - "Draft a reply / respond to the customer" requests → write the email FROM SOTI Support TO the customer (address the customer by name from the [EMAIL CHAIN] if known), professional and ready to send — then stop; do not add analysis around it unless asked.
 - Be concise, clear and helpful, in plain prose.
@@ -7432,7 +7594,7 @@ function mdToPlainText(mdText) {
     // ("Summary:The customer" / "Key Details:- SOTI") — give it its space and its own
     // paragraph so the pasted note reads cleanly.
     t = t.replace(/^([A-Z][A-Za-z0-9 /&-]{1,40}:)(?=\S)/gm, '$1 ');
-    t = t.replace(/([^\n])\n((?:Time of the meeting|Summary|Key Details|Case Timeline|Current Status|Next Steps|Troubleshooting steps|Next steps|Root cause|Resolution):)/g, '$1\n\n$2');
+    t = t.replace(/([^\n])\n((?:Time of the meeting|Summary|Key Details|Case Timeline|Current Status|Next Steps|Troubleshooting steps|Troubleshoots done|Next steps|Root cause|Resolution):)/g, '$1\n\n$2');
     t = t.replace(/\n{3,}/g, '\n\n');
     return t.trim();
 }
@@ -7677,8 +7839,13 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // prior answer existing, and never on the "Analyse Now" button (silent).
     const hasPriorAnswer = c.msgs.some(m => m.role === 'assistant' && (m.content || '').length > 150);
     const isAnalysisFollowUpTurn = hasLogs && hasPriorAnswer && !silent && isAnalysisFollowUp(txt);
+    // "How many times does <X> occur in the logs?" — answer from a deterministic count over
+    // the RAW logs, NOT from the forensic report. Detected here so it routes conversationally
+    // (a fresh forensic report would just re-quote its own trimmed evidence and guess).
+    const occCountTerm = (hasLogs && !silent && isOccurrenceCountQuestion(txt)) ? extractCountTerm(txt) : '';
+    const countQuestionTurn = !!occCountTerm;
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = !opts.forceConversational && hasLogs && !isAnalysisFollowUpTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    const analysisRun = !opts.forceConversational && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
@@ -7688,7 +7855,7 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // Version / release-notes / product question → wants live research (even with logs attached).
     // Quick-action turns are exempt: embedded meeting notes often name-drop versions/products,
     // and that must not switch the prompt away from the conversational route.
-    const needsDeepPulse = !opts.forceConversational && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+    const needsDeepPulse = !opts.forceConversational && !countQuestionTurn && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
 
     let supportingRefSection = "";
     let knownFixesSection = "";
@@ -7921,6 +8088,14 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             let liveDataSection = "";
             const liveDataLines = [];
             liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${summaryText}`);
+            // Occurrence-count answer goes FIRST (right after the issue) so the end-trimmer can
+            // never cut it — it is the authoritative answer to a counting question.
+            if (countQuestionTurn) {
+                try {
+                    const countSection = buildOccurrenceCountSection(countTermInLogs(c.logs, occCountTerm));
+                    if (countSection) liveDataLines.push(countSection);
+                } catch (e) { console.warn('Occurrence count failed', e); }
+            }
             // When research is present on a small model, the chain shares a ~10K budget with
             // it — cap the chain tighter (newest messages stay whole, older ones gist) so the
             // research that grounds the fix isn't entirely trimmed away. Quick-action turns
@@ -8125,7 +8300,17 @@ ${imgContext}`;
             // gemma4:e2b, a prior "no release notes were provided" answer in history made the
             // model echo the refusal verbatim even though the fresh [RELEASE NOTES] data sat
             // right in the prompt — consistency bias beats the data on a 5B model.
-            const history = (opts.freshContext || fixItTurn || rnTurn)
+            // A FRESH log analysis (forensic or normal "Analyse Now", not a follow-up) is
+            // fully self-contained in this turn's evidence — it needs NO chat history. On a
+            // small model, carrying a prior Case Summary answer (~2KB) plus 8 protected turns
+            // into a forensic run steals budget the log evidence needs and can push the
+            // evidence past the trimmer's keep-floor. Sending only the live analysis turn is
+            // what keeps forensic analysis working after a summary/email/other quick action.
+            const freshAnalysisRun = analysisRun && !isAnalysisFollowUpTurn;
+            // Count turns also send only the live turn: the exact count is injected as
+            // authoritative data, and a prior 3KB forensic report in history would otherwise
+            // eat the budget and push the count section past the trimmer's keep-floor.
+            const history = (opts.freshContext || fixItTurn || rnTurn || freshAnalysisRun || countQuestionTurn)
                 ? sanitizeHistoryForModel(c.msgs.slice(-1))
                 : sanitizeHistoryForModel(c.msgs.slice(-10));
             // The FINAL entry is the LIVE turn, not history — sanitizeHistoryForModel's 4K
@@ -9093,28 +9278,25 @@ async function generateCaseSummary() {
     const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
     const stateDirective = buildCaseStateDirective(lc, 'summary');
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
-    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' });
+    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
     const peopleLine = (lc.customerSender || lc.agentSender)
         ? `\n- PEOPLE (exact, from the chain): ${[lc.customerSender && `${lc.customerSender} is the CUSTOMER`, lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER handling the case`].filter(Boolean).join('; ')}. Never swap these roles.`
         : '';
 
-    const prompt = `Write a complete, in-depth professional summary of this case, then the recommended next steps.
+    const prompt = `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
 
 RULES:
-- Use ONLY facts from the case information, issue summary, email chain, meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish anything — if something decisive is unknown, say so.
-- The email chain is ordered NEWEST FIRST: the current status comes from the most recent messages, which OVERRIDE the original issue summary if the situation has moved on.
-- Refer to emails naturally by author and date (e.g. "Wesley confirmed on 2 July"), never by internal message numbers.${peopleLine}
-- Structure the answer with exactly these sections:
+- Use ONLY facts from the issue description, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — if something decisive is unknown, say so in one short phrase.
+- The email chain is ordered NEWEST FIRST: the current state comes from the most recent messages, which OVERRIDE the original issue description if the situation has moved on.
+- Refer to people by name (e.g. "Ayodeji"), never by internal message numbers. Do NOT output a dated timeline.${peopleLine}
+- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as "Technical Support, SOTI" (e.g. Ayodeji Augustine, Savio Basil Saju) is a SOTI SUPPORT ENGINEER, NOT the customer — never write that a SOTI engineer "is experiencing the issue". If no customer name is given, say "the customer" rather than naming a support engineer as the customer.
+- Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
 
-**Summary:** one paragraph (3-6 sentences) — the customer/account, product and versions, platform and environment, what the customer reported or asked, and where the case stands now.
+Summary: 2-4 sentences — the customer/account, product and versions, platform/environment, what the customer reported, and where the case stands RIGHT NOW (from the newest message; name who said it and when if that is decisive, e.g. an internal note or a referenced earlier case).
 
-**Key Details:** "-" bullets with every decisive fact — versions, device models, environment, error messages, each specific question the customer asked, the specific answer/solution support gave (including any documentation links shared), any earlier/related SOTI case numbers referenced in the emails, and findings from any log analysis.
+Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established — what support tested or tried, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), questions the customer already answered, and any findings from log analysis in this conversation. Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
 
-**Case Timeline:** "-" bullets in date order (oldest first), one per key event: date — who — what happened. Cover the case creation, each substantive exchange, and the latest message. Append "(phone call)" ONLY to events whose chronology line carries the [phone CALL LOG] tag, and "(internal note)" ONLY to lines tagged [INTERNAL note] — every untagged event is an email and gets NO label.
-
-**Current Status:** exactly where the case stands right now based on the NEWEST message — state who sent it, when, and what it says (including anything decisive it references, such as an earlier SOTI case). Attribute it to the correct author.
-
-**Next Steps:** a numbered list of the concrete actions for the support engineer. This list MUST follow the CASE STATE directive below exactly.
+Next steps: a numbered list of the concrete actions still to do for the support engineer. This list MUST follow the CASE STATE directive below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
 
 ${chronology ? chronology + '\n\n' : ''}${stateDirective}`;
 
@@ -10164,76 +10346,64 @@ $('btnGenerateJira').onclick = async () => {
     JiraProgress.set(13, 'Extracting log evidence…');
     await jiraUiYield();
 
+    // The JIRA ticket names EXACTLY ONE log file — the single most relevant one — and its
+    // Log Analysis block quotes verbatim lines from THAT file only (per the user's spec).
     let logAnalysisContent = '';
     let prefilledLogNames = 'N/A';
     if (primary) {
         logAnalysisContent = buildJiraLogEvidence(primary.log, primary);
         if (logAnalysisContent) prefilledLogNames = jiraLogBaseName(primary.log.name);
     }
+    if (!logAnalysisContent && primary) {
+        // A primary file exists but term/error anchoring found nothing quotable — deep-parse
+        // THAT ONE file (never all of them) so the ticket still reports a single log.
+        prefilledLogNames = jiraLogBaseName(primary.log.name);
+        const log = primary.log;
+        await precomputeLogIntel(log);
+        const { prefilteredIndices, timestampCache, intelCache } = log.precomputedIntel;
+        const lines = log.lines || [];
+        let rawSnippets = "";
+        const phases = await extractFailurePhases(lines, log);
+        const sqlFacts = await collectDistinctSqlFacts(lines, log);
+        if (phases.length > 0 || sqlFacts.length > 0) {
+            if (phases.length > 0) {
+                phases.forEach(p => {
+                    rawSnippets += `Line ${p.lineNum} @ ${p.timestamp || 'No Timestamp'}: ${p.title}\n`;
+                    if (p.window && p.window.text) {
+                        rawSnippets += p.window.text.trim().split('\n').slice(0, 10).map(l => "  " + l).join('\n') + "\n";
+                    }
+                });
+            }
+            if (sqlFacts.length > 0) {
+                sqlFacts.slice(0, 8).forEach(sf => {
+                    rawSnippets += `Line ${sf.lineNum} @ ${sf.timestamp || 'No Timestamp'}: ${sf.text}\n`;
+                });
+            }
+        } else {
+            const candidateLines = [];
+            for (let idx = 0; idx < prefilteredIndices.length; idx++) {
+                const lineIdx = prefilteredIndices[idx];
+                const intel = intelCache[lineIdx];
+                if (intel.isForensic && !intel.hasStackFrame) {
+                    candidateLines.push({ lineNum: lineIdx + 1, text: (lines[lineIdx] || '').trim(), timestamp: timestampCache[lineIdx] || "" });
+                }
+            }
+            candidateLines.slice(0, 8).forEach(cl => {
+                rawSnippets += `Line ${cl.lineNum} @ ${cl.timestamp}: ${cl.text}\n`;
+            });
+        }
+        logAnalysisContent = rawSnippets.trim();
+    }
     if (!logAnalysisContent && triageContent) {
-        // No usable uploaded logs — fall back to the forensic triage rows, restricted
-        // to the single most-cited file so the ticket still names ONE log.
+        // No uploaded logs at all (analysis ran on pasted content) — fall back to the forensic
+        // triage rows, restricted to the single most-cited file so the ticket still names ONE log.
         const t = filterTriageToPrimaryFile(triageContent);
         logAnalysisContent = t.rows;
         prefilledLogNames = t.file || deriveJiraLogNames(c, triageContent);
     }
     if (!logAnalysisContent) {
-        // Legacy fallback — heavy per-log parse; only paid when there is neither
-        // primary-log evidence nor a forensic triage to reuse.
-        let rawSnippets = "";
-        let jiraLogIdx = 0;
-        for (const log of c.logs) {
-            JiraProgress.set(13 + (jiraLogIdx / Math.max(1, c.logs.length)) * 5, `Deep-parsing ${log.name}…`);
-            await jiraUiYield();
-            jiraLogIdx++;
-            await precomputeLogIntel(log);
-            const { prefilteredIndices, timestampCache, intelCache } = log.precomputedIntel;
-            const lines = log.lines || [];
-
-            const phases = await extractFailurePhases(lines, log);
-            const sqlFacts = await collectDistinctSqlFacts(lines, log);
-
-            if (phases.length > 0 || sqlFacts.length > 0) {
-                rawSnippets += `\n--- Failure evidence from ${log.name} ---\n`;
-                if (phases.length > 0) {
-                    rawSnippets += `Chronological phases:\n`;
-                    phases.forEach(p => {
-                        rawSnippets += `Line ${p.lineNum} @ ${p.timestamp || 'No Timestamp'}: ${p.title}\n`;
-                        if (p.window && p.window.text) {
-                            rawSnippets += p.window.text.trim().split('\n').slice(0, 10).map(l => "  " + l).join('\n') + "\n";
-                        }
-                    });
-                }
-                if (sqlFacts.length > 0) {
-                    rawSnippets += `Unique SQL Messages:\n`;
-                    sqlFacts.slice(0, 8).forEach(sf => {
-                        rawSnippets += `Line ${sf.lineNum} @ ${sf.timestamp || 'No Timestamp'}: ${sf.text}\n`;
-                    });
-                }
-            } else {
-                // Fallback to top candidates
-                const candidateLines = [];
-                for (let idx = 0; idx < prefilteredIndices.length; idx++) {
-                    const lineIdx = prefilteredIndices[idx];
-                    const intel = intelCache[lineIdx];
-                    if (intel.isForensic && !intel.hasStackFrame) {
-                        candidateLines.push({
-                            lineNum: lineIdx + 1,
-                            text: lines[lineIdx].trim(),
-                            timestamp: timestampCache[lineIdx] || ""
-                        });
-                    }
-                }
-                if (candidateLines.length > 0) {
-                    rawSnippets += `\n--- High-signal events from ${log.name} ---\n`;
-                    candidateLines.slice(0, 8).forEach(cl => {
-                        rawSnippets += `Line ${cl.lineNum} @ ${cl.timestamp}: ${cl.text}\n`;
-                    });
-                }
-            }
-        }
-        logAnalysisContent = rawSnippets.trim() || "[No high-signal SQL or MSI logs detected]";
-        prefilledLogNames = deriveJiraLogNames(c, logAnalysisContent);
+        logAnalysisContent = "[No high-signal log evidence detected]";
+        if (prefilledLogNames === 'N/A') prefilledLogNames = deriveJiraLogNames(c, logAnalysisContent);
     }
 
     JiraProgress.set(18, 'Extracting evidence keywords…');
