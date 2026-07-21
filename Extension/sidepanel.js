@@ -9420,12 +9420,125 @@ ${chronology ? chronology + '\n\n' : ''}Deliver the fix with full confidence, gr
     });
 }
 
+// "30/60/90 Case Analysis" — the management-review write-up for an aging case. The 30/60/90
+// milestone is derived DETERMINISTICALLY from the Case Age field (never guessed) and today's
+// date is injected as fact. Open cases get release-notes / Pulse research so Research Links
+// can cite real SOTI pages; the output follows the exact fixed template.
+async function generate306090Analysis() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const notes = ($('meetingNotes').value || '').trim();
+    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasAnyCaseData = hasNotes
+        || ($('issueSummary').value || '').trim()
+        || ($('emailChain').value || '').trim()
+        || (c.logs && c.logs.length > 0)
+        || c.msgs.some(m => !m.hidden);
+    if (!hasAnyCaseData) {
+        toast('Nothing to analyse yet — sync from Salesforce or fill in the case details first', 'e');
+        return;
+    }
+
+    // Milestone is a fact, derived from Case Age (in days) — the model must not invent it.
+    const ageRaw = ($('caseAge').value || '').trim();
+    const ageNum = parseFloat(ageRaw);
+    let milestoneDirective;
+    if (!isNaN(ageNum)) {
+        const bucket = ageNum >= 90 ? '90-day' : ageNum >= 60 ? '60-day' : ageNum >= 30 ? '30-day' : 'under 30 days';
+        milestoneDirective = `"${bucket}" (the case is ${ageNum} days old)`;
+    } else {
+        milestoneDirective = 'the correct milestone if the case age is stated anywhere in the context, otherwise "Unknown — case age not provided"';
+    }
+    const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
+    const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
+    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+
+    const prompt = `Produce a 30/60/90 case analysis for management review of this aging support case. Use EXACTLY the template layout below — same headers, same order — and output nothing before or after it.
+
+RULES:
+- Ground EVERY statement ONLY in the case information, issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs/analysis in this conversation, our chat history, and any release-notes / Pulse research provided. NEVER invent facts, versions, dates, or links — if something decisive is unknown, say so in a short phrase.
+- The email chain is ordered NEWEST FIRST — the current state comes from the most recent messages.
+- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER; anyone who signs off as "Technical Support, SOTI" is a SOTI SUPPORT ENGINEER, not the customer. Never swap these roles.
+- "30/60/90:" MUST be ${milestoneDirective}.
+- "Date of Update:" MUST be ${today}.
+- "Research Links:" list ONLY real URLs that actually appear in the provided research or case data; if there are none, write "None".
+- Output PLAIN TEXT only — no markdown symbols like ** or ##, no emojis, no preamble.
+
+TEMPLATE (fill in after each header):
+30/60/90:
+Date of Update:
+Case Summary: 2-4 sentences — the customer/account, product and versions, platform/environment, what was reported, and where the case stands right now.
+Next steps: "-" bullets — the concrete actions still to do to move the case forward.
+Research Links: [real URLs from the research/case, or "None"]
+30/60/90 JIRA Justification: 1-3 sentences on whether this aged case warrants a JIRA / development escalation at this milestone, referencing the case age, business impact, and whether a product defect is suspected (quote any MCMR-xxxxx already raised).
+
+${chronology ? chronology + '\n\n' : ''}Base everything strictly on the case facts and the research provided.`;
+
+    await runQuickAIAction('Building 30/60/90 analysis...', '30/60/90 analysis ready', prompt, {
+        forceConversational: true,
+        freshContext: true,
+        skipResearch: !researchQuery,
+        researchQuery,
+        copyKind: 'summary'
+    });
+}
+
+// "Problem & Resolution Summary (Internal)" — a tight two-line internal record: what the
+// customer's actual issue was, and exactly how it was resolved. Accuracy is mandatory; if the
+// case is not actually resolved yet, the model must say so rather than fabricate a resolution.
+async function generateProblemResolutionSummary() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const notes = ($('meetingNotes').value || '').trim();
+    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasAnyCaseData = hasNotes
+        || ($('issueSummary').value || '').trim()
+        || ($('emailChain').value || '').trim()
+        || (c.logs && c.logs.length > 0)
+        || c.msgs.some(m => !m.hidden);
+    if (!hasAnyCaseData) {
+        toast('Nothing to summarise yet — sync from Salesforce or fill in the case details first', 'e');
+        return;
+    }
+
+    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+
+    const prompt = `Write a brief INTERNAL Problem & Resolution summary for this case. Use EXACTLY the two-section layout below and output nothing else.
+
+STRICT RULES:
+- Ground BOTH sections ONLY in the case information, issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any log analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — this is an internal record and must be 100% accurate.
+- The email chain is ordered NEWEST FIRST — the resolution comes from the MOST RECENT messages.
+- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER; anyone who signs off as "Technical Support, SOTI" is a SOTI SUPPORT ENGINEER. Never state a SOTI engineer had the issue.
+- If the case is NOT actually resolved yet, say so plainly under "Solution:" and give the current status / plan — do NOT fabricate a resolution.
+- Output PLAIN TEXT only — no markdown symbols like ** or ##, no emojis, no preamble.
+
+TEMPLATE:
+Problem: <the customer's actual issue in 1-3 sentences — what was failing, on which product/version/platform>
+Solution: <exactly how the issue was resolved: the fix applied, configuration change, workaround, or upgrade — accurate to 100%. If unresolved, state that and the current status.>
+
+${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case facts.`;
+
+    await runQuickAIAction('Building problem & resolution summary...', 'Problem & resolution ready', prompt, {
+        forceConversational: true,
+        freshContext: true,
+        skipResearch: true,
+        copyKind: 'summary'
+    });
+}
+
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 
 // --- WELCOME CARD SHORTCUTS ---
-// The four cards on the welcome screen are real one-click AI actions, not decoration:
+// The cards on the welcome screen are real one-click AI actions, not decoration:
 // 📋 Case Summary + Next Steps, 📧 Draft an email to the customer, 🔧 Fix the customer's
-// issue for me, 📦 Export the full session report. They mirror the top Quick Actions panel.
+// issue for me, 📅 30/60/90 Case Analysis, 🧩 Problem & Resolution Summary (Internal),
+// 📦 Export the full session report. They mirror the top Quick Actions panel.
 {
     const wireCard = (id, fn) => {
         const el = $(id);
@@ -9436,12 +9549,14 @@ $('btnCleanNotes').onclick = cleanUpMeetingNotes;
     wireCard('wCardCase', generateCaseSummary);
     wireCard('wCardLogs', draftCustomerEmail);
     wireCard('wCardMissing', fixCustomerIssue);
+    wireCard('wCard306090', generate306090Analysis);
+    wireCard('wCardProbRes', generateProblemResolutionSummary);
     wireCard('wCardExport', () => exportSession());
 }
 
 // --- TOP QUICK ACTIONS PANEL ---
 // A drop-down at the top of the chat that appears only once the user is chatting with the AI.
-// It exposes the same four one-click actions as the welcome cards so they stay reachable mid-chat.
+// It exposes the same one-click actions as the welcome cards so they stay reachable mid-chat.
 function updateQuickActionsPanel() {
     const panel = $('qaPanel');
     if (!panel) return;
@@ -9474,6 +9589,8 @@ if ($('qaToggle')) {
 if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
 if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
 if ($('qaFixIssue')) $('qaFixIssue').onclick = fixCustomerIssue;
+if ($('qa306090')) $('qa306090').onclick = generate306090Analysis;
+if ($('qaProbRes')) $('qaProbRes').onclick = generateProblemResolutionSummary;
 if ($('qaExport')) $('qaExport').onclick = () => exportSession();
 
 $('btnNew').onclick = createNewCase;
