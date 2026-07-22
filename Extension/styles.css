@@ -981,13 +981,14 @@ body {
     height: 100%;
     width: 0%;
     border-radius: 999px;
-    /* Purple (indigo) fill with a slow-shifting gradient so the colour itself feels alive. */
+    /* Purple (indigo) fill with a static gradient. The gradient no longer scrolls: a shifting
+       background read as the bar sliding backwards (like it was reverting/cancelling), so the
+       only ambient motion left is the glow pulse below and the forward sheen sweep. */
     background: linear-gradient(90deg, #4f46e5 0%, #6366f1 40%, #818cf8 70%, #a5b4fc 100%);
-    background-size: 220% 100%;
     /* Width is eased frame-by-frame in JS (JiraProgress), so no CSS width transition here — a
        transition on top would only smear the rapid per-frame updates. */
-    animation: jira-glow-pulse 1.9s ease-in-out infinite, jira-gradient-shift 3.2s linear infinite;
-    will-change: width, box-shadow, background-position;
+    animation: jira-glow-pulse 1.9s ease-in-out infinite;
+    will-change: width, box-shadow;
     overflow: hidden;
 }
 
@@ -1006,11 +1007,6 @@ body {
 @keyframes jira-glow-pulse {
     0%, 100% { box-shadow: 0 0 5px 0 rgba(129, 140, 248, 0.45), 0 0 2px rgba(99, 102, 241, 0.7); }
     50%      { box-shadow: 0 0 14px 2px rgba(129, 140, 248, 0.9), 0 0 8px rgba(99, 102, 241, 0.85); }
-}
-
-@keyframes jira-gradient-shift {
-    0%   { background-position: 0% 50%; }
-    100% { background-position: 220% 50%; }
 }
 
 @keyframes jira-prog-sheen {
