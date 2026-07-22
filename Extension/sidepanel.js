@@ -10694,25 +10694,61 @@ async function enforceJiraManualFields(jira, manual, facts, onProgress) {
 // enforcement (88-90%), and each field-refinement AI pass (90-99%). 100% = done.
 // ============================================================================
 const JiraProgress = {
-    pct: 0,
+    target: 0,   // real progress, from set() — monotonic, never moves backwards
+    shown: 0,    // the value actually painted; eased toward target each animation frame
+    soft: 0,     // soft ceiling the idle trickle may drift toward while real work is busy
+    stage: '',
+    _raf: null,
+    _last: 0,
     open() {
-        this.pct = 0;
-        this._paint(0, 'Preparing case data…');
+        this.target = 0; this.shown = 0; this.soft = 0; this.stage = 'Preparing case data…';
+        this._paint();
         $('mGen').style.display = 'flex';
+        this._animate();
     },
-    // Monotonic: real progress never moves backwards.
-    set(pct, stage) {
-        const p = Math.max(this.pct, Math.min(100, pct));
-        this.pct = p;
-        this._paint(p, stage);
+    // Real progress. Monotonic. The painted bar EASES toward this instead of snapping, so the
+    // early phase reads as a smooth climb from 1% up to 22% rather than an instant jump that then
+    // sits frozen. `softHeadroom` lets the idle trickle drift a little past `pct` during a known
+    // slow wait (e.g. the model's prompt-evaluation pause before the first token) so the bar keeps
+    // gently inching and never looks stuck — it can never overtake the real work by more than this.
+    set(pct, stage, softHeadroom = 2) {
+        this.target = Math.max(this.target, Math.min(100, pct));
+        this.soft = Math.max(this.soft, Math.min(97, this.target + Math.max(0, softHeadroom)));
+        if (this.target >= 100) this.soft = this.shown = 100; // completion is a satisfying snap
+        if (stage) this.stage = stage;
     },
-    _paint(p, stage) {
+    _animate() {
+        if (typeof requestAnimationFrame !== 'function') { this._paint(); return; }
+        cancelAnimationFrame(this._raf);
+        this._last = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        const step = (now) => {
+            const dt = Math.min(120, now - this._last); this._last = now;
+            if (this.shown < this.target) {
+                // Catch up to real progress with a smooth ease-out (~1.5–2 s to close a big gap, so
+                // the 1%→22% setup phase reads as a visible glide, not a snap) plus a small linear
+                // floor so the final sliver never crawls. Still responsive enough to track streaming.
+                this.shown = Math.min(this.target, this.shown + (this.target - this.shown) * (1 - Math.pow(0.3, dt / 1000)) + 0.002 * dt);
+                if (this.target - this.shown < 0.25) this.shown = this.target; // lock on, no endless crawl
+            } else if (this.shown < this.soft) {
+                // Real progress hasn't advanced yet (a slow wait). Trickle very gently toward the soft
+                // ceiling so the bar stays alive without ever passing where the real work actually is.
+                this.shown = Math.min(this.soft, this.shown + (this.soft - this.shown) * (1 - Math.pow(0.6, dt / 1000)));
+            }
+            this._paint();
+            this._raf = requestAnimationFrame(step);
+        };
+        this._raf = requestAnimationFrame(step);
+    },
+    _paint() {
         const f = $('jiraProgFill'), t = $('jiraProgPct'), s = $('jiraProgStage');
-        if (f) f.style.width = p.toFixed(1) + '%';
-        if (t) t.textContent = Math.round(p) + '%';
-        if (s && stage) s.textContent = stage;
+        if (f) f.style.width = this.shown.toFixed(1) + '%';
+        if (t) t.textContent = Math.round(this.shown) + '%';
+        if (s && this.stage) s.textContent = this.stage;
     },
-    close() { $('mGen').style.display = 'none'; }
+    close() {
+        if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
+        $('mGen').style.display = 'none';
+    }
 };
 
 // Let the browser paint the latest progress state before the next heavy synchronous step.
@@ -11102,7 +11138,10 @@ ${JIRA_TEMPLATE}`;
         // Detect thinking models — disable internal reasoning for Gemma 4, etc. (substring match to support GGUF/custom names)
         const isThinkingModelJira = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
 
-        JiraProgress.set(22, 'AI reading case context (prompt evaluation)…');
+        // Prompt evaluation (before the first token) is the longest single wait, so allow a wider
+        // idle-trickle headroom here: the bar keeps easing gently upward through the low-20s during
+        // the pause and only visibly "moves past 22%" once real token streaming begins below.
+        JiraProgress.set(22, 'AI reading case context (prompt evaluation)…', 6);
         await jiraUiYield();
 
         // Streamed generation: real progress comes from the output itself. The model must
