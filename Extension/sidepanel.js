@@ -10576,7 +10576,7 @@ function jiraFieldIgnoresDraft(sectionText, draft) {
 
 // Focused single-field rewrite. Returns the rewritten text, or '' on any failure so the
 // caller can keep what it already has — this pass must never break report generation.
-async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts) {
+async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts, signal) {
     try {
         if (!LOCAL_AI_MODEL) return '';
         const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
@@ -10591,6 +10591,7 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts) {
         const res = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: signal || null, // aborts if the user cancels JIRA generation mid-refinement
             body: JSON.stringify({
                 model: LOCAL_AI_MODEL,
                 messages: [
@@ -10613,6 +10614,7 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts) {
         out = out.replace(/^["'`]+|["'`]+$/g, '').trim();
         return out;
     } catch (e) {
+        if (e && e.name === 'AbortError') throw e; // user cancelled — stop, don't swallow it
         console.warn('[JIRA] Manual field rewrite failed for', fieldLabel, e);
         return '';
     }
@@ -10623,7 +10625,7 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts) {
 // The 'description' entry additionally guards grounding: the Description of Issue must
 // always derive from the Case Info Issue Summary, so a description that ignores the
 // summary is rewritten from it. onProgress(done, total, label) reports real progress.
-async function enforceJiraManualFields(jira, manual, facts, onProgress) {
+async function enforceJiraManualFields(jira, manual, facts, onProgress, signal) {
     if (!jira || !manual) return jira;
     const fields = [
         {
@@ -10659,6 +10661,7 @@ async function enforceJiraManualFields(jira, manual, facts, onProgress) {
     const active = fields.filter(f => String(manual[f.key] || '').trim());
     let done = 0;
     for (const f of active) {
+        if (signal && signal.aborted) throw new DOMException('JIRA generation cancelled', 'AbortError');
         const draft = String(manual[f.key] || '').trim();
         if (onProgress) onProgress(done, active.length, f.label);
         const loc = findJiraSectionBody(jira, f.headingRx, f.endRx);
@@ -10666,14 +10669,14 @@ async function enforceJiraManualFields(jira, manual, facts, onProgress) {
         let replacement = null;
         if (isBlankJiraValue(loc.body)) {
             // Field dropped — never lose the engineer's note: rewrite it, else use it raw.
-            replacement = await rewriteManualJiraField(f.label, f.styleHint, draft, facts) || draft;
+            replacement = await rewriteManualJiraField(f.label, f.styleHint, draft, facts, signal) || draft;
         } else if (jiraFieldParrotsDraft(loc.body, draft)) {
-            const rewritten = await rewriteManualJiraField(f.label, f.styleHint, draft, facts);
+            const rewritten = await rewriteManualJiraField(f.label, f.styleHint, draft, facts, signal);
             if (rewritten && !jiraFieldParrotsDraft(rewritten, draft)) replacement = rewritten;
         } else if (f.mustGround && jiraFieldIgnoresDraft(loc.body, draft)) {
             // The model wrote this section without using its draft. For the Description
             // of Issue the Issue Summary is the source of truth — rewrite from it.
-            replacement = await rewriteManualJiraField(f.label, f.styleHint, draft, facts) || draft;
+            replacement = await rewriteManualJiraField(f.label, f.styleHint, draft, facts, signal) || draft;
         }
         if (replacement !== null) {
             // Splice, never String.replace — drafts/model text can contain "$&"-style sequences.
@@ -10693,6 +10696,11 @@ async function enforceJiraManualFields(jira, manual, facts, onProgress) {
 // generation measured against the known template structure (22-88%), evidence
 // enforcement (88-90%), and each field-refinement AI pass (90-99%). 100% = done.
 // ============================================================================
+// AbortController for the in-flight JIRA generation. The Cancel button in the loading modal
+// aborts this so the streamed /api/chat request — and any follow-up field-refinement calls —
+// stop cleanly instead of running to completion in the background.
+let jiraGenController = null;
+
 const JiraProgress = {
     target: 0,   // real progress, from set() — monotonic, never moves backwards
     shown: 0,    // the value actually painted; eased toward target each animation frame
@@ -10792,6 +10800,18 @@ $('mJiraReviewClose').onclick = $('btnJiraReviewCancel').onclick = () => {
 $('btnGenerateJira').onclick = async () => {
     $('mJiraReview').style.display = 'none';
     JiraProgress.open(); // Show the real-progress loading modal early (0%)
+
+    // Fresh AbortController for this run so the Cancel button can stop the streamed request and
+    // any refinement passes. (The button lives after this script in the DOM, so it is wired here —
+    // when the modal is opened — rather than at top level where it wouldn't exist yet.)
+    jiraGenController = new AbortController();
+    const genSignal = jiraGenController.signal;
+    const cancelBtn = $('btnCancelJiraGen');
+    if (cancelBtn) cancelBtn.onclick = () => {
+        try { jiraGenController.abort(); } catch (e) {}
+        JiraProgress.close();
+        toast('JIRA generation cancelled');
+    };
 
     // Yield control to let the browser paint the modal
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -11182,6 +11202,7 @@ ${JIRA_TEMPLATE}`;
         const res = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: genSignal, // Cancel button aborts the streamed generation
             body: JSON.stringify({
                 model: LOCAL_AI_MODEL,
                 messages: [
@@ -11272,20 +11293,24 @@ ${JIRA_TEMPLATE}`;
         }, { product, sotiVer, agentVer, platform, issue }, (done, total, label) => {
             const frac = total ? Math.min(done / total, 1) : 1;
             JiraProgress.set(90 + frac * 9, label ? `AI refining: ${label}…` : 'Field refinement complete');
-        });
+        }, genSignal);
 
+        if (genSignal.aborted) return; // cancelled during refinement — modal already closed
         if (!filled) {
             JiraProgress.close();
             return toast('JIRA generation failed', 'e');
         }
         JiraProgress.set(100, 'JIRA report ready ✓');
         await new Promise(r => setTimeout(r, 350)); // let the user see 100% before the modal swaps
+        if (genSignal.aborted) return; // cancelled in the final beat — don't surface the result
         JiraProgress.close();
         $('jiraTa').value = filled;
         $('mJira').style.display = 'flex';
         toast('✓ JIRA Report Ready', 's');
     } catch (e) {
         JiraProgress.close();
+        // User cancelled — the Cancel handler already closed the modal and toasted; stay quiet.
+        if (genSignal.aborted || (e && e.name === 'AbortError')) return;
         console.error('JIRA Generation Error:', e);
         alert('JIRA Generation Failed:\n\n' + e.message);
         toast('JIRA failed: ' + e.message, 'e');
