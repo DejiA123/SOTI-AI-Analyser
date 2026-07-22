@@ -3208,6 +3208,40 @@ function isAnalysisFollowUp(text) {
     return false;
 }
 
+// A META question about THIS chat itself — "what was my first message?", "what did I ask you
+// first?", "repeat my previous question", "what did we discuss?", "recap our conversation",
+// "verify the info you gave me", "are you sure you summarised that right?". These are answered
+// from the CONVERSATION HISTORY (and the always-present [CONVERSATION SO FAR] digest), NOT from
+// the knowledge base — so they must NOT trigger a Pulse/Docs research run (a stray "MCMR"/
+// "version" token in pasted text otherwise fired research, and the model then replied "no SOTI
+// documentation exists to verify this" instead of using the chat) and must stay conversational
+// even when logs or a case are loaded (never a log-forensics report).
+function isConversationMetaQuestion(text) {
+    const t = (text || '').trim().toLowerCase();
+    if (!t) return false;
+    // Must be framed around this conversation: a personal pronoun or an explicit chat noun.
+    // This is what separates "what was my first message" (meta) from "what was the first error
+    // message in the logs" (a log lookup) — the latter has neither.
+    const convoFraming = /\b(i|me|my|we|our|us|you|your)\b/.test(t)
+        || /\b(chat|conversation|convo|discussion|thread|exchange)\b/.test(t);
+    if (!convoFraming) return false;
+    // Reference to a message/turn of this chat by position (first/previous/last/…).
+    if (/\b(first|1st|earlier|earliest|previous|prior|last|initial|original)\b[^.?!]*\b(message|msg|question|prompt|request|ask(?:ed)?|said|wrote|typed|sent|point|words?)\b/.test(t)) return true;
+    if (/\b(message|msg|question|prompt|request)\b[^.?!]*\b(first|1st|earlier|earliest|previous|prior|last|initial|original)\b/.test(t)) return true;
+    // "what did I / we / you ... say|ask|write|discuss ..."
+    if (/\bwhat\s+(did|have)\s+(i|we|you)\b[^.?!]*\b(say|said|ask(?:ed)?|writ\w+|wrote|type|typed|send|sent|tell|told|mention\w*|discuss\w*|talk\w*|cover\w*)\b/.test(t)) return true;
+    if (/\bwhat\s+(was|were)\b[^.?!]*\bmy\b[^.?!]*\b(message|question|prompt|request|words?|point)\b/.test(t)) return true;
+    // Recap / summarise / go over THIS conversation (not the customer's case).
+    if (/\b(recap|summar\w+|remind\s+me\s+of|what\s+have\s+we|go\s+over|walk\s+me\s+through)\b[^.?!]*\b(our|this|the)\s+(chat|conversation|discussion|thread|convo|messages?|exchange)\b/.test(t)) return true;
+    if (/\b(our|this)\s+(chat|conversation|discussion|thread|convo)\b[^.?!]*\b(so\s+far|until\s+now|up\s+to\s+now|history)\b/.test(t)) return true;
+    // "are you sure you summarised/answered that right", "did you get it right"
+    if (/\bare\s+you\s+sure\b[^.?!]*\b(summari[sz]\w+|said|answer\w*|analy\w+|got\s+it\s+right|right|correct|accurat\w+|mix\w*)\b/.test(t)) return true;
+    // Verify/confirm/re-check something the ASSISTANT itself produced earlier.
+    if (/\b(verify|confirm|double[\s-]?check|re[\s-]?check|is\s+(this|that)\s+(right|correct|accurate))\b[^.?!]*\b(you|your)\b[^.?!]*\b(gave|said|told|wrote|provided|summari[sz]\w+|answer\w*|respon\w*|analy\w+|state\w*)\b/.test(t)) return true;
+    if (/\byou\b[^.?!]*\b(gave|said|told|wrote|provided|summari[sz]\w+)\b[^.?!]*\b(me|earlier|before|above|previously|last|already)\b/.test(t)) return true;
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // "How many times does <X> occur in the logs?" — deterministic occurrence count
 // ---------------------------------------------------------------------------
@@ -7708,6 +7742,12 @@ const OllamaAI = {
                     if (bigIdx === 0 && m.role === 'system') {
                         const dataStart = content.indexOf('[ISSUE SUMMARY');
                         if (dataStart > 0) minKeep = Math.max(minKeep, Math.min(dataStart, 4500));
+                        // Keep the compact [CONVERSATION SO FAR] memory digest whole — it is the
+                        // model's reliable record of earlier turns and is deliberately tiny, so
+                        // protecting it costs little and is what preserves chat memory once the
+                        // oldest full turns have been dropped above.
+                        const convoEnd = content.indexOf('[END CONVERSATION SO FAR]');
+                        if (convoEnd > 0) minKeep = Math.max(minKeep, Math.min(convoEnd + 26, 7000));
                     }
                     const newLen = Math.max(minKeep, content.length - over - 150);
                     // A cut the appended notice would cancel out frees no space — floor reached.
@@ -8035,6 +8075,66 @@ function sanitizeHistoryForModel(msgs, capChars = 4000) {
     });
 }
 
+// A compact, ALWAYS-PRESENT skeleton of the conversation so far — one short line per prior
+// turn, numbered by the agent's messages. This is what gives a small/CPU model reliable
+// conversational memory: the per-request context trimmer in completions.create drops the
+// OLDEST full turns to fit the tiny budget, which previously left the model unable to answer
+// "what was my first message?" (it saw a mid-conversation turn as the earliest) and made it
+// lose the thread of a multi-step chat. The digest is tiny, is placed in the PROTECTED head of
+// the system prompt (the trimmer keeps everything through [END CONVERSATION SO FAR]), so it
+// survives even when the full turns are dropped. Log/diagnostic dumps and image-OCR blobs are
+// stripped so only the human-readable ask/answer gist remains. `msgs` must be the PRIOR turns
+// only (exclude the live turn currently being sent). Never mutates its input.
+function buildConversationDigest(msgs, isSmall = false) {
+    const turns = (msgs || []).filter(m => m && m.content && !m.hidden);
+    if (turns.length === 0) return '';
+    const perTurnCap = isSmall ? 150 : 240;
+    const totalCap = isSmall ? 900 : 1900;
+    const gist = (raw) => {
+        let c = String(raw || '');
+        // Strip everything that is not the human-readable message: our own log/diagnostic
+        // dumps, the OCR blob, and fenced code/log blocks. Keep the actual words.
+        c = c.replace(/=== FILE:[\s\S]*?=== END[^\n]*/g, ' ')
+             .replace(/\[(?:DIAGNOSTIC DATA|LOG ANALYSIS DATA|ATTACHED LOGS|SCRAPPED TEXT FROM ATTACHED IMAGES|Extracted Image Data via OCR)[\s\S]*/gi, ' ')
+             .replace(/```[\s\S]*?```/g, ' [code/log block] ')
+             .replace(/\s+/g, ' ')
+             .trim();
+        if (c.length > perTurnCap) c = c.slice(0, perTurnCap).trim() + '…';
+        return c;
+    };
+    // Number turns by the AGENT's messages so "my first/second message" lines up with the label.
+    const lines = [];
+    let agentNum = 0;
+    for (const m of turns) {
+        const g = gist(m.content);
+        if (!g) continue;
+        if (m.role === 'user') {
+            agentNum++;
+            lines.push(`[Agent #${agentNum}]: ${g}`);
+        } else {
+            lines.push(`   [AI]: ${g}`);
+        }
+    }
+    if (lines.length === 0) return '';
+    // If the skeleton is long, keep the FIRST turn (so "what was my first message" is always
+    // answerable) and the most RECENT turns, eliding the middle — both ends matter most.
+    let body = lines.join('\n');
+    if (body.length > totalCap) {
+        const head = lines.slice(0, 2); // first agent ask (+ the reply to it)
+        const tail = [];
+        let used = head.join('\n').length + 40;
+        for (let i = lines.length - 1; i >= 2; i--) {
+            if (used + lines[i].length + 1 > totalCap) break;
+            tail.unshift(lines[i]);
+            used += lines[i].length + 1;
+        }
+        body = head.join('\n') + '\n   …(earlier middle turns elided)…\n' + tail.join('\n');
+    }
+    return `[CONVERSATION SO FAR — a short record of the earlier turns in THIS chat, oldest first. "[Agent #N]" = the support agent's Nth message (the person you are talking to); "[AI]" = your own earlier reply. Use this to answer any question about what was said earlier in this conversation, e.g. "what was my first message?". This is chat history, NOT the customer's case data.]
+${body}
+[END CONVERSATION SO FAR]`;
+}
+
 // opts — used by the one-click quick-action buttons (Clean Up Meeting Notes / Case Summary):
 //   forceConversational — never route to log-analysis/forensic mode, whatever words the text
 //     contains (raw meeting notes routinely contain "troubleshoot"/"root cause"/"analyse",
@@ -8167,8 +8267,12 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // (a fresh forensic report would just re-quote its own trimmed evidence and guess).
     const occCountTerm = (hasLogs && !silent && isOccurrenceCountQuestion(txt)) ? extractCountTerm(txt) : '';
     const countQuestionTurn = !!occCountTerm;
+    // A question ABOUT this chat itself ("what was my first message?", "verify what you told
+    // me", "are you sure you summarised that right?"). Answered from the chat history + the
+    // [CONVERSATION SO FAR] digest — never a log report, never a knowledge-base research run.
+    const metaConversationTurn = !opts.freshContext && !silent && isConversationMetaQuestion(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = !opts.forceConversational && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    const analysisRun = !opts.forceConversational && !metaConversationTurn && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
@@ -8188,14 +8292,16 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // Version / release-notes / product question → wants live research (even with logs attached).
     // Quick-action turns are exempt: embedded meeting notes often name-drop versions/products,
     // and that must not switch the prompt away from the conversational route.
-    const needsDeepPulse = !opts.forceConversational && !countQuestionTurn && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
+    const needsDeepPulse = !opts.forceConversational && !countQuestionTurn && !metaConversationTurn && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
 
     let supportingRefSection = "";
     let knownFixesSection = "";
     if (!isGreeting && !forensicRun) {
-        if (opts.skipResearch) {
-            // Quick-action turns must be grounded in the CASE data only — clear research left
-            // over from an earlier question so it can't leak into (or slow down) this answer.
+        if (opts.skipResearch || metaConversationTurn) {
+            // Quick-action AND chat-meta turns must be grounded in the CASE / conversation only —
+            // clear research left over from an earlier question so a stray "MCMR"/"version" token
+            // in the text can't fire a Pulse run whose empty result makes the model answer "no SOTI
+            // documentation exists to verify this" instead of using the actual conversation.
             PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
         } else if (!hasLogs || needsDeepPulse || opts.researchQuery) {
             // Q&A mode (or explicit release-notes request): full online + offline research.
@@ -8482,6 +8588,18 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             }
             if (hasLogs) {
                 liveDataLines.push(`[CRITICAL INSTRUCTION: You MUST read and retain the [CASE] and [ISSUE SUMMARY] information in this prompt. Even when analyzing logs, you must cross-reference the logs with the CUSTOMER's reported case notes, and you MUST answer any direct questions the support agent asks about the case info. If the agent asks for a summary of the case, you MUST summarize ONLY the [CASE], [ISSUE SUMMARY], and the attached logs. NEVER summarize [DEEP RESEARCH], [DOCS SEARCH], or [SUPPORTING REFERENCE] as the case summary, as those are external articles, not the case itself.]`);
+            }
+            // Prepend the compact [CONVERSATION SO FAR] memory digest so it sits in the PROTECTED
+            // head of the system prompt (before [ISSUE SUMMARY]). This is what preserves chat
+            // memory on a small model when the request trimmer later drops the oldest full turns:
+            // the model can still answer "what was my first message?" and keep the thread. Skipped
+            // for fresh log analyses / quick actions / release-notes turns (they deliberately send
+            // only the live turn) and when there is no prior turn to record. `c.msgs` here is the
+            // prior turns only — the live user turn is not pushed until after this block.
+            const includeConvoDigest = !analysisRun && !opts.freshContext && !fixItTurn && !rnTurn && c.msgs.length > 0;
+            if (includeConvoDigest) {
+                const convoDigest = buildConversationDigest(c.msgs, isSmallModel);
+                if (convoDigest) liveDataLines.unshift(convoDigest);
             }
             liveDataSection = liveDataLines.join('\n');
 
