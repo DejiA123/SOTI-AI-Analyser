@@ -968,18 +968,63 @@ body {
 }
 
 .jira-prog-bar {
-    height: 6px;
+    height: 8px;
     background: var(--bg3);
-    border-radius: 3px;
+    border-radius: 999px;
     overflow: hidden;
+    position: relative;
+    box-shadow: inset 0 0 0 1px rgba(129, 140, 248, 0.10);
 }
 
 .jira-prog-fill {
+    position: relative;
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, var(--blue), var(--blue2));
-    border-radius: 3px;
-    transition: width 0.25s ease;
+    border-radius: 999px;
+    /* Purple (indigo) fill with a slow-shifting gradient so the colour itself feels alive. */
+    background: linear-gradient(90deg, #4f46e5 0%, #6366f1 40%, #818cf8 70%, #a5b4fc 100%);
+    background-size: 220% 100%;
+    /* Width is eased frame-by-frame in JS (JiraProgress), so no CSS width transition here — a
+       transition on top would only smear the rapid per-frame updates. */
+    animation: jira-glow-pulse 1.9s ease-in-out infinite, jira-gradient-shift 3.2s linear infinite;
+    will-change: width, box-shadow, background-position;
+    overflow: hidden;
+}
+
+/* A soft light sweeps across the filled portion — reads as an active "loading" shimmer even
+   while the bar is momentarily holding at a real milestone (e.g. during prompt evaluation). */
+.jira-prog-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.55) 50%, transparent 80%);
+    transform: translateX(-120%);
+    animation: jira-prog-sheen 1.7s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes jira-glow-pulse {
+    0%, 100% { box-shadow: 0 0 5px 0 rgba(129, 140, 248, 0.45), 0 0 2px rgba(99, 102, 241, 0.7); }
+    50%      { box-shadow: 0 0 14px 2px rgba(129, 140, 248, 0.9), 0 0 8px rgba(99, 102, 241, 0.85); }
+}
+
+@keyframes jira-gradient-shift {
+    0%   { background-position: 0% 50%; }
+    100% { background-position: 220% 50%; }
+}
+
+@keyframes jira-prog-sheen {
+    0%        { transform: translateX(-120%); }
+    55%, 100% { transform: translateX(120%); }
+}
+
+/* Respect users who prefer less motion: keep the bar (and a soft static glow) but drop the loops. */
+@media (prefers-reduced-motion: reduce) {
+    .jira-prog-fill {
+        animation: none;
+        box-shadow: 0 0 8px 1px rgba(129, 140, 248, 0.7);
+    }
+    .jira-prog-fill::after { animation: none; opacity: 0; }
 }
 
 .jira-prog-stage {
