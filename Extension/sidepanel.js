@@ -3689,14 +3689,21 @@ async function buildMandatoryForensicChecklist(logs) {
 
 // One line per attached file so the model always knows every file that exists,
 // even if a file's snippet had to be trimmed to fit the context window.
-async function buildFileManifest(logs, lastSentAt = 0) {
+async function buildFileManifest(logs, lastSentAt = 0, opts = {}) {
     if (!logs || logs.length === 0) return "";
+    // With a large bundle (dozens/hundreds of files) a per-file detail line each would consume the
+    // whole small-model budget before any evidence. `compactAfter` keeps full detail for the first N
+    // (pass logs pre-ranked so those are the most relevant) and collapses the rest to a compact,
+    // named tail — every file is still acknowledged, none is silently dropped.
+    const compactAfter = (typeof opts.compactAfter === 'number' && opts.compactAfter > 0) ? opts.compactAfter : 0;
     const rows = [];
     const newFiles = [];
+    const tail = [];
     for (let i = 0; i < logs.length; i++) {
         const log = logs[i];
         const isNew = lastSentAt && log.uploadedAt && log.uploadedAt > lastSentAt;
         if (isNew) newFiles.push(log.name);
+        if (compactAfter && i >= compactAfter) { tail.push(log.name); continue; }
         let detail = "";
         try {
             const intel = await getLogPanelIntel(log);
@@ -3716,8 +3723,11 @@ async function buildFileManifest(logs, lastSentAt = 0) {
         manifest += `\n[NEW FILES ADDED SINCE LAST MESSAGE: ${newFiles.join(', ')} — prioritize acknowledging and analysing these]\n`;
     }
     manifest += `\n=== ATTACHED FILE MANIFEST (${logs.length} file${logs.length === 1 ? '' : 's'}) ===\n` +
-                rows.join('\n') +
-                `\nRULE: Every file listed above EXISTS and MUST be acknowledged in your analysis. If a file's snippet was truncated, state that instead of ignoring the file.\n` +
+                rows.join('\n');
+    if (tail.length) {
+        manifest += `\n…and ${tail.length} more scanned file${tail.length === 1 ? '' : 's'} (lower relevance to this question): ${tail.join(', ')}`;
+    }
+    manifest += `\nRULE: Every file listed above EXISTS and MUST be acknowledged in your analysis. If a file's snippet was truncated, state that instead of ignoring the file.\n` +
                 `=== END FILE MANIFEST ===\n`;
     return manifest;
 }
@@ -4240,24 +4250,33 @@ function allocatePerFileBudgets(logs, totalBudget, minPerFile = 4000) {
     return budgets;
 }
 
-async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 0) {
+async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 0, focusText = "") {
     if (!logs || logs.length === 0) return "";
-    // Header (manifest + profile + incident) is always included; snippets are budgeted
-    // against everything else so the logs never get pushed out of the context window.
-    let header = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
-    header += await buildFileManifest(logs, lastSentAt);
-    header += await buildLogPatternProfile(logs);
-    header += await buildCrossLogIncidentIndex(logs, { patternMode: false });
-    const snippetBudget = await computeSnippetBudget(logs.length, externalOverhead + header.length);
-    const budgets = allocatePerFileBudgets(logs, snippetBudget, isSmallLocalModel() ? 1500 : 4000);
-    let ctx = header;
-    for (const log of logs) {
-        const content = log.content || "";
-        const name = log.name || "Attached log";
-        const limit = budgets.get(log) || 10000;
-        ctx += `\n=== FILE: ${name} ===\n${await getSmartLogSnippet(content, limit, name, log.lines)}\n=== END FILE ===\n`;
-    }
-    return ctx;
+    const { terms, matcher } = extractFocusTerms(focusText);
+    for (const l of logs) { try { await getLogPanelIntel(l); } catch (e) { /* intel best-effort */ } }
+    const small = isSmallLocalModel();
+    // Rank files so the manifest lists the most relevant ones first and the tail collapses when a
+    // bundle has many files (a SOTI DebugReport is ~50 files, most tiny static configs).
+    const weights = computeFocusTermWeights(logs, terms);
+    const ranked = [...logs].sort((a, b) => scoreFileRelevance(b, terms, matcher, weights) - scoreFileRelevance(a, terms, matcher, weights));
+    // ORDER = concentrated snippets (query-focused digest first) → manifest → bounded secondary.
+    // The manifest and the pattern-profile / cross-log incident index are reference/secondary
+    // material; they are placed AFTER the digest and the incident index is BOUNDED, so the answer
+    // evidence leads and is never the part a downstream context trim eats.
+    const leadHeader = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
+    const manifestSection = await buildFileManifest(ranked, lastSentAt, { compactAfter: small ? 10 : 24 });
+    let secondary = await buildLogPatternProfile(logs);
+    secondary += await buildCrossLogIncidentIndex(logs, { patternMode: false });
+    const secondaryCap = small ? 2200 : 24000;
+    if (secondary.length > secondaryCap) secondary = secondary.slice(0, secondaryCap) + "\n[secondary failure-index truncated — the query-focused evidence above is the primary source for this question.]\n";
+    // Spend the room that is ACTUALLY left after the whole prompt (system rules + case/research +
+    // history + header + manifest + the bounded secondary), NOT an inflated per-file floor. On a
+    // small/CPU model this is only a few thousand chars, so buildConcentratedSnippets puts the budget
+    // on the top-ranked files and names the rest instead of shredding all 50 files into fragments.
+    const promptBudget = await getPromptCharBudget();
+    const realBudget = Math.max(small ? 5500 : 12000, promptBudget - Math.max(0, externalOverhead) - leadHeader.length - manifestSection.length - secondary.length);
+    const snippets = await buildConcentratedSnippets(ranked, realBudget, matcher, terms, weights);
+    return leadHeader + snippets + manifestSection + secondary;
 }
 
 function getLogForensicsSystemPrompt() {
@@ -4916,7 +4935,307 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
     return report;
 }
 
-async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log", precalculatedLines = null, logObj = null) {
+// ============================ QUERY-FOCUSED EVIDENCE ============================
+// The forensic pipeline above is FAILURE-KEYWORD driven — it finds errors, exceptions and
+// rollbacks. But a large class of real cases is SILENT: the customer's problem is a feature that
+// the product reports as SUCCESS yet does not actually work on the device. The APN case is the
+// canonical example — MobiControl logs "Install policies, APN … SUCCESS" while Android soft-deletes
+// the row (edited=4 / CARRIER_DELETED). Those lines carry NO error token, so the generic selector
+// drops them and, seeing only unrelated errors, the model concludes "insufficient evidence".
+// These helpers pull the lines that match what the USER actually asked about (and the reported
+// symptom) so feature-specific evidence survives budgeting even when it contains no error keyword,
+// and they let the budget CONCENTRATE on the handful of files that matter when a bundle contains
+// dozens or hundreds of files (a SOTI DebugReport is ~50 files, most of them tiny static configs).
+
+const FOCUS_STOPWORDS = new Set(['the','a','an','and','or','but','for','with','from','into','onto','over','under','is','are','was','were','be','been','being','has','have','had','not','no','yes','it','its','this','that','these','those','there','here','then','than','out','off','why','what','when','where','how','which','who','whom','whose','does','did','do','doing','done','can','cannot','could','should','would','will','shall','may','might','must','get','got','getting','see','seen','seeing','using','use','used','uses','they','them','their','theirs','our','ours','your','yours','you','we','us','please','issue','issues','problem','problems','error','errors','fail','fails','failed','failing','failure','failures','install','installs','installed','installing','installation','showing','show','shows','appears','appear','appearing','working','work','works','happening','happen','happens','still','only','also','same','after','before','during','because','about','above','below','some','any','all','each','more','most','other','others','device','devices','log','logs','logfile','logfiles','analyse','analyze','analysis','analysed','analyzed','investigate','investigating','forensic','root','cause','check','checked','checking','need','needs','needed','want','wants','wanted',
+    // Common prose words that carry a misleadingly-high rarity score in log files (they appear in
+    // the issue narrative but are not technical signals) — excluding them keeps ranking anchored on
+    // real domain tokens (apn, telephony, carrier, globaldata, iccid, mnc…) rather than narration.
+    'via','reports','report','reported','reporting','exists','exist','existing','assign','assigned','assigning','content','soft','row','rows','names','named','point','points','access','list','listed','listing','actual','actually','apply','applied','applies','applying','result','results','resulting','value','values','field','fields','option','options','provide','provided','providing','provider','confirm','confirmed','include','included','including','present','absent','instead','rather','either','neither','however','though','although','whether','since','while','without','within','across','upon','toward','towards','itself','themselves','really','simply','just','even','ever','never','always','often','sometimes','multiple','several','various','different','specific','specifically','correct','correctly','properly','normal','normally','native','natively','directly','manually','automatically','silently']);
+
+// Salient tokens from the user's question + the reported symptom. Words ≥3 chars (minus common
+// support-desk noise) plus any 3+ digit number (24007 / MCC / MNC / error numbers). Returns a
+// deduped term list and a single word-boundary regex that matches any of them.
+function extractFocusTerms(focusText) {
+    const text = String(focusText || '').toLowerCase();
+    if (!text.trim()) return { terms: [], matcher: null };
+    const raw = text.match(/[a-z][a-z0-9._]{2,}|\b\d{3,}\b/g) || [];
+    const seen = new Set();
+    const terms = [];
+    for (let w of raw) {
+        w = w.replace(/^[._]+|[._]+$/g, '');
+        if (w.length < 3) continue;
+        if (/^\d+$/.test(w) ? false : FOCUS_STOPWORDS.has(w)) continue;
+        if (seen.has(w)) continue;
+        seen.add(w);
+        terms.push(w);
+        if (terms.length >= 28) break;
+    }
+    if (!terms.length) return { terms: [], matcher: null };
+    const esc = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    let matcher = null;
+    try { matcher = new RegExp('(?:^|[^a-z0-9])(?:' + esc.join('|') + ')(?:[^a-z0-9]|$)', 'i'); } catch (e) { matcher = null; }
+    return { terms, matcher };
+}
+
+// IDF-style weight per focus term across the WHOLE bundle. A term in almost every file (generic
+// words like "data"/"network"/"settings") is near-worthless for ranking; a term in only a few
+// files (apn, globaldata, telephony, 24007, an exception class) is a strong signal for which
+// file holds the answer. Over-generic terms (in >60% of files) are zeroed so noisy device logs
+// stop out-ranking the one audit/agent log that actually names the failing feature.
+function computeFocusTermWeights(logs, terms) {
+    const weights = new Map();
+    if (!terms || !terms.length || !logs || !logs.length) return weights;
+    const N = logs.length;
+    const scans = logs.map(l => (((l.content || "").length > 400000 ? (l.content || "").slice(0, 400000) : (l.content || "")).toLowerCase()));
+    for (const t of terms) {
+        if (t.length < 3) continue;
+        let df = 0;
+        for (const s of scans) if (s.indexOf(t) >= 0) df++;
+        if (df === 0) { weights.set(t, 0); continue; }              // term not present anywhere
+        // The "too generic to discriminate" down-weighting only makes sense on a LARGE bundle: with
+        // only a handful of files, a term appearing in most of them is not noise, it's just present,
+        // and zeroing it would starve line-scoring. Small bundles keep every present term. Present
+        // terms are floored so a line that matches one always registers (never scored as 0 evidence).
+        let w = Math.min(4, Math.log((N + 1) / (df + 0.5)));
+        if (N >= 8 && df > N * 0.6) w = 0.15;                        // ubiquitous in a large bundle
+        weights.set(t, Math.max(0.2, w));
+    }
+    return weights;
+}
+
+// Relevance score for ONE file: IDF-weighted focus-term density (dominant) + forensic signal +
+// a nudge for real log files over tiny static config dumps. Never throws — ranking must not
+// break assembly. `weights` is optional; without it every term counts equally (weight 1).
+function scoreFileRelevance(log, terms, matcher, weights) {
+    try {
+        const content = log.content || "";
+        const intel = log.panelIntel || {};
+        let score = 0;
+        if (terms && terms.length) {
+            // Sample enough of large files that terms first logged deep in the file (a 6 MB server
+            // log logs the APN event ~1 MB in) still register. A present term uses a floored weight
+            // even when the bundle-wide DF sample missed it, so it is never scored as zero evidence.
+            const scan = (content.length > 2000000 ? content.slice(0, 2000000) : content).toLowerCase();
+            for (const t of terms) {
+                if (t.length < 3) continue;
+                let idx = scan.indexOf(t), n = 0;
+                while (idx >= 0 && n < 40) { n++; idx = scan.indexOf(t, idx + t.length); }
+                if (n === 0) continue;
+                const w = weights ? Math.max(0.2, weights.get(t) || 0) : 1;
+                score += Math.min(n, 40) * w * 6; // query relevance dominates ranking
+            }
+        }
+        score += Math.min(intel.eventCount || 0, 120) * 0.5;   // forensic signal (secondary)
+        if (intel.topException) score += 12;
+        if (intel.azureSql) score += 8;
+        const lc = (log.name || "").toLowerCase();
+        if (/\.(xml|json)$/.test(lc) && (intel.lineCount || 0) < 60) score -= 25; // tiny config dumps
+        if (/\.(log|txt|out|err|trace)$/.test(lc)) score += 5;
+        if (/audit|mobicontrol|deployment|management|\bagent\b|provision|\badb\b|device/.test(lc)) score += 10;
+        return score;
+    } catch (e) { return 0; }
+}
+
+// Pull the lines that match the focus terms into a compact, line-anchored block. This is the
+// evidence a "silent success" case lives in. Deduplicates near-identical lines (keeps up to 3 so
+// repeated re-push attempts remain visible with their timestamps) and stays within `budget` chars.
+async function buildQueryFocusedEvidence(log, matcher, budget) {
+    if (!matcher || !log || budget < 160) return "";
+    const lines = log.lines || ((log.content || "").split('\n'));
+    try { await precomputeLogIntel(log); } catch (e) { /* timestamps are best-effort */ }
+    const timestampCache = (log.precomputedIntel && log.precomputedIntel.timestampCache) || [];
+    const hits = [];
+    const sigCounts = new Map();
+    for (let i = 0; i < lines.length; i++) {
+        if (i % 4000 === 0 && i > 0) await yieldIfNeeded();
+        const line = lines[i];
+        if (!line || line.length < 3) continue;
+        const scan = line.length > 600 ? line.slice(0, 600) : line;
+        if (!matcher.test(scan)) continue;
+        const sig = (typeof normalizeLogSignature === 'function' ? normalizeLogSignature(scan) : scan).slice(0, 120);
+        const seen = sigCounts.get(sig) || 0;
+        if (seen >= 3) continue;                 // keep a few repeats (timestamps matter), not a flood
+        sigCounts.set(sig, seen + 1);
+        hits.push({ lineNum: i + 1, ts: timestampCache[i] || "", text: scan.trim() });
+        if (hits.length >= 80) break;
+    }
+    if (!hits.length) return "";
+    let block = `\n--- QUERY-FOCUSED EVIDENCE (lines matching the reported issue — NOTE: many are INFO/SUCCESS, not errors; a feature the product logs as "installed"/"success" that is absent on the device is itself the finding) ---\n`;
+    for (const h of hits) {
+        const row = `Line ${h.lineNum}${h.ts ? ` @ ${h.ts}` : ""}: ${h.text}\n`;
+        if (block.length + row.length > budget) { block += `… [additional matching lines omitted for context budget]\n`; break; }
+        block += row;
+    }
+    block += `--- END QUERY-FOCUSED EVIDENCE ---\n`;
+    return block;
+}
+
+// Assemble a per-file snippet so the query-focused block always LEADS (it is the most important
+// part and must never be the piece a downstream trim eats) and the total never exceeds `limit`.
+function assembleSnippet(focusBlock, mainBody, limit) {
+    focusBlock = focusBlock || "";
+    mainBody = mainBody || "";
+    if (limit <= 0) limit = focusBlock.length + mainBody.length;
+    if (focusBlock.length >= limit) return focusBlock.slice(0, limit);
+    const room = limit - focusBlock.length;
+    if (mainBody.length <= room) return focusBlock + mainBody;
+    return focusBlock + mainBody.slice(0, room) + "\n[…snippet capped to fit the context window — the query-focused evidence and primary findings above are complete.]\n";
+}
+
+// Scan every file for lines matching the focus terms and score each line by how many distinct
+// domain terms it hits and their combined rarity weight — so "SUCCESS, Install policies, APN"
+// (apn) or a telephony/carrier line outscores a line that merely happens to contain one common
+// word. Returns deduped, globally score-sorted hits (with file + line + timestamp). Bounded per
+// file so one noisy log can't dominate. Never throws.
+async function collectFocusLines(logs, matcher, weights, terms) {
+    const hits = [];
+    if (!matcher) return hits;
+    // Score against EVERY query term, each with a floored weight. Using weights.entries() would drop
+    // any term the bundle-wide DF sample scored 0 (e.g. a term first logged >400 KB into a huge file),
+    // which is exactly the high-value evidence — so a line matching it would be scored as if it
+    // matched nothing. Flooring keeps every genuinely-present term counting toward a line's score.
+    const termList = (terms && terms.length)
+        ? terms.filter(t => t && t.length >= 3).map(t => [t, weights ? Math.max(0.2, weights.get(t) || 0) : 1])
+        : (weights ? [...weights.entries()].filter(([, w]) => w > 0) : []);
+    const perFileKeep = 50;
+    for (const log of logs) {
+        const lines = log.lines || ((log.content || "").split('\n'));
+        try { await precomputeLogIntel(log); } catch (e) { /* timestamps best-effort */ }
+        const timestampCache = (log.precomputedIntel && log.precomputedIntel.timestampCache) || [];
+        const sigCounts = new Map();
+        // Keep the TOP-scoring matches for THIS file, not the first N. A big audit/server log has
+        // thousands of low-value matches (a common word like "android"/"data") long before the one
+        // high-value line ("SUCCESS, Install policies, APN"); a first-N cap would stop before ever
+        // reaching it. Periodic truncation-by-score keeps the strongest evidence wherever it sits.
+        let fileHits = [];
+        for (let i = 0; i < lines.length; i++) {
+            if (i % 4000 === 0 && i > 0) await yieldIfNeeded();
+            const line = lines[i];
+            if (!line || line.length < 3) continue;
+            const scan = line.length > 400 ? line.slice(0, 400) : line;
+            if (!matcher.test(scan)) continue;
+            const low = scan.toLowerCase();
+            let score = 0, distinct = 0;
+            for (const [t, w] of termList) {
+                if (low.indexOf(t) >= 0) { score += w; distinct++; }
+            }
+            if (distinct === 0) continue;
+            score += distinct * 1.5; // lines that hit several distinct terms are the strongest evidence
+            const sig = (typeof normalizeLogSignature === 'function' ? normalizeLogSignature(scan) : scan).slice(0, 120);
+            const c = sigCounts.get(sig) || 0;
+            if (c >= 2) continue;      // keep a couple of repeats (timestamps matter), not a flood
+            sigCounts.set(sig, c + 1);
+            fileHits.push({ file: log.name || "Attached log", lineNum: i + 1, ts: timestampCache[i] || "", text: scan.trim(), score });
+            if (fileHits.length > perFileKeep * 4) {
+                fileHits.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
+                fileHits.length = perFileKeep;
+            }
+        }
+        fileHits.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
+        for (const h of fileHits.slice(0, perFileKeep)) hits.push(h);
+    }
+    hits.sort((a, b) => b.score - a.score || a.lineNum - b.lineNum);
+    return hits.slice(0, 800);
+}
+
+// Turn the supplied logs into an evidence block that fits `realBudget` chars, in TWO phases so
+// the tool can handle a 50- or 100-file bundle without burying the answer:
+//   PHASE 1 — a QUERY-FOCUSED DIGEST across the most relevant files: the lines that match what the
+//     customer reported (including INFO/SUCCESS lines, which is where a "silent success" case like
+//     the APN lives). This LEADS the block, so it always survives the downstream context trim.
+//   PHASE 2 — full forensic detail for the top-ranked file(s) with whatever budget remains.
+// Files that don't fit are named (they're already in the manifest/incident index) so the model
+// knows they were scanned, not ignored.
+async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weights) {
+    if (!logs || !logs.length) return "";
+    const small = isSmallLocalModel();
+    for (const l of logs) { try { await getLogPanelIntel(l); } catch (e) { /* intel best-effort */ } }
+    if (!weights && terms && terms.length) weights = computeFocusTermWeights(logs, terms);
+    const ranked = [...logs].sort((a, b) => scoreFileRelevance(b, terms, matcher, weights) - scoreFileRelevance(a, terms, matcher, weights));
+
+    let ctx = "";
+    let spent = 0;
+    const digestedFrom = new Set();
+
+    // PHASE 1 — GLOBAL query-focused digest. Scan every file for lines matching the reported issue,
+    // score each line by the combined weight of the domain terms it hits, and keep the highest-
+    // scoring lines ACROSS ALL FILES (grouped by file, newest budget first). Scoring per line — not
+    // per file — is what guarantees the smoking-gun line ("SUCCESS, Install policies, APN") survives
+    // even when it lives in a file that isn't the single most "relevant" one overall. This block
+    // LEADS the evidence, so the downstream context trim (which keeps the head) can never drop it.
+    if (matcher) {
+        const phase1Budget = small ? Math.min(Math.floor(realBudget * 0.8), 5200) : Math.floor(realBudget * 0.55);
+        const scored = await collectFocusLines(ranked, matcher, weights, terms);
+        if (scored.length) {
+            // Lines-per-file adapts to how many files actually have matches: DEPTH when few files
+            // hold the evidence (show more of each), BREADTH when many do (show the top lines of more
+            // files, since the answer's file is likelier to be one of the ~10 shown than the top one).
+            const filesWithHits = new Set(scored.map(h => h.file)).size;
+            const maxLinesPerFile = filesWithHits <= 6 ? (small ? 16 : 34) : (small ? 6 : 12);
+            // Group hits by file and order files by their single best (highest-scoring) line, so the
+            // file that holds the strongest evidence leads. WITHIN each file, order lines by score
+            // DESCENDING (then line number) and cap per file — this is what makes the smoking-gun line
+            // ("SUCCESS, Install policies, APN", score high) appear instead of being crowded out by
+            // earlier, lower-scoring matches from the same file. Capping per file lets several files
+            // each contribute their few best lines rather than one noisy file consuming the budget.
+            const byFile = new Map();
+            for (const h of scored) {
+                if (!byFile.has(h.file)) byFile.set(h.file, { best: h.score, rows: [] });
+                const g = byFile.get(h.file);
+                g.rows.push(h); if (h.score > g.best) g.best = h.score;
+            }
+            const fileOrder = [...byFile.entries()].sort((a, b) => b[1].best - a[1].best).map(e => e[0]);
+            let body = "";
+            let used = 0;
+            for (const file of fileOrder) {
+                if (used >= phase1Budget) break;
+                const rows = byFile.get(file).rows
+                    .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
+                    .slice(0, maxLinesPerFile)
+                    .sort((a, b) => a.lineNum - b.lineNum); // chronological within the chosen top lines
+                let seg = `\n### ${file}\n`;
+                let any = false;
+                for (const h of rows) {
+                    // Cap each digest line: a few files log 400-char JSON blobs whose head carries the
+                    // signal — truncating them lets MANY more files fit the digest instead of one file's
+                    // verbose lines consuming the whole budget.
+                    const text = h.text.length > 240 ? h.text.slice(0, 240) + '…' : h.text;
+                    const row = `Line ${h.lineNum}${h.ts ? ` @ ${h.ts}` : ""}: ${text}\n`;
+                    if (used + seg.length + row.length > phase1Budget) break;
+                    seg += row; any = true;
+                }
+                if (any) { body += seg; used += seg.length; digestedFrom.add(logs.find(l => (l.name || "Attached log") === file) || {}); }
+            }
+            if (body) {
+                ctx += `\n=== QUERY-FOCUSED EVIDENCE ACROSS FILES (lines matching the reported issue; INFO/SUCCESS lines included on purpose — a feature the product logs as installed/success but that is ABSENT on the device is itself the finding, not a non-event) ===\n`
+                    + body
+                    + `\n=== END QUERY-FOCUSED EVIDENCE ===\n`;
+                spent += ctx.length;
+            }
+        }
+    }
+
+    // PHASE 2 — forensic detail for the top-ranked files with the remaining budget.
+    const perFileCap = small ? 3200 : 15000;
+    const perFileMin = small ? 700 : 2500;
+    const deferred = [];
+    for (const log of ranked) {
+        const remaining = realBudget - spent;
+        if (ctx.length > 0 && remaining < perFileMin) { deferred.push(log); continue; }
+        const limit = Math.min(perFileCap, Math.max(perFileMin, remaining));
+        const snippet = await getSmartLogSnippet(log.content || "", limit, log.name || "Attached log", log.lines, log, "");
+        ctx += `\n=== FILE: ${log.name || "Attached log"} (${(log.content || "").length} chars) ===\n${snippet}\n=== END: ${log.name || "Attached log"} ===\n`;
+        spent += snippet.length;
+    }
+    if (deferred.length) {
+        const undigested = deferred.filter(l => !digestedFrom.has(l));
+        ctx += `\n[${deferred.length} additional file(s) were scanned and appear in the manifest / incident index above but were not expanded here so the highest-signal evidence stays within the model's context window${undigested.length ? `: ${undigested.map(l => l.name).slice(0, 50).join(', ')}${undigested.length > 50 ? ', …' : ''}` : ''}. Ask about any of them by name to expand it.]\n`;
+    }
+    return ctx;
+}
+
+async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached log", precalculatedLines = null, logObj = null, focusBlock = "") {
     if (!content) return "";
     const lines = precalculatedLines || content.split('\n');
     const totalLines = lines.length;
@@ -4940,7 +5259,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         if (focused.length > hardCap) {
             focused = `${focused.slice(0, hardCap)}\n\n[TRUNCATED: primary root-cause anchor preserved above]\n`;
         }
-        return focused;
+        return assembleSnippet(focusBlock, focused, limit);
     }
 
     const parsedBlocks = await extractExceptionBlocksFromLog(log);
@@ -5283,13 +5602,15 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
         forensicReport = `${forensicReport.slice(0, keepHead)}\n\n[FORENSIC REPORT TRUNCATED FOR MODEL CONTEXT: root-cause ranking, parsed exception blocks, segment map, and distinct signatures above are whole-file summaries; middle timeline entries omitted only after deterministic whole-file analysis.]\n\n${forensicReport.slice(-keepTail)}`;
     }
     
-    // If the file is small enough, just return the whole thing plus the report
+    // If the file is small enough, just return the whole thing plus the report. The final
+    // assembleSnippet keeps the query-focused evidence FIRST and enforces `limit`, so a bundle of
+    // many files can no longer overflow the model's context window with one file's full content.
     if (content.length <= (headSize + tailSize)) {
-        return `${forensicReport}\n\n[FULL LOG CONTENT]\n${content}`;
+        return assembleSnippet(focusBlock, `${forensicReport}\n\n[FULL LOG CONTENT]\n${content}`, limit);
     }
 
     // Place the forensic report at the TOP so it is never truncated by local AI context limits.
-    return `${forensicReport}${await buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks, log)}`;
+    return assembleSnippet(focusBlock, `${forensicReport}${await buildRawLogCoverage(content, lines, rankedRootCandidates, parsedBlocks, log)}`, limit);
 }
 
 function hideToast() {
@@ -7853,7 +8174,17 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
     // detector so RUNTIME logs (DeploymentServer.log etc.) are NOT misrouted to the MSI prompt.
     const hasInstallerLog = hasLogs && c.logs.some(l => isMsiInstallerLog(l.name || "", l.content || ""));
-    const forensicRun = analysisRun && (isLogForensicsRequest(txt) || hasInstallerLog);
+    // forensicRun == the STRICT MSI/installer methodology (find the CustomAction that returned
+    // 1603 / triggered "Return value 3"). getLogForensicsSystemPrompt / getCompactInstallerForensicPrompt
+    // are BOTH written for setup/installer logs, so this path is gated on an actual installer log
+    // being present — NOT merely on the word "analyse". A request to "analyse the logs" on RUNTIME
+    // or DEVICE logs (Android agent, Management/Deployment Server, adb, audit) must take the general
+    // analysis path (getLeanLogPrompt / getCompactLogPrompt), which is built for those logs and leads
+    // with the reported customer symptom — otherwise an Android APN case is analysed with MSI rules
+    // and the model, told to hunt for a "Return value 3" that does not exist, reports "insufficient
+    // evidence". The general prompts still produce a full forensic report (triage → propagation →
+    // root cause), so nothing is lost for non-installer forensic asks.
+    const forensicRun = analysisRun && hasInstallerLog;
     // Version / release-notes / product question → wants live research (even with logs attached).
     // Quick-action turns are exempt: embedded meeting notes often name-drop versions/products,
     // and that must not switch the prompt away from the conversational route.
@@ -8187,39 +8518,52 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
                         if (leanEvidence.length > 6800) leanEvidence = leanEvidence.slice(0, 6800) + "\n[…older lines trimmed; root cause + timeline above are complete]\n";
                         logContext = `\n\n[INSTALLER LOG ANALYSIS]` + leanManifest + leanEvidence;
                     } else {
-                        logContext = await buildLogAnalysisContext(c.logs, c.lastSentAt || 0, externalOverhead);
+                        logContext = await buildLogAnalysisContext(c.logs, c.lastSentAt || 0, externalOverhead, `${summaryText === 'NO SUMMARY PROVIDED' ? '' : summaryText} ${txt}`);
                     }
                 } else {
-                    let header = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
-                    // Lead with the reported symptom (protected from end-trim) so the model correlates
-                    // the evidence with what the customer actually reported, instead of grabbing an
-                    // unrelated high-severity error.
+                    // Focus terms = the reported symptom + this turn's question. They steer file
+                    // ranking and pull the query-relevant lines (even non-error / "success" lines) to
+                    // the front of each snippet, so a silent-success case (e.g. an APN the product
+                    // logs as installed but the device never applies) is actually surfaced.
+                    const { terms, matcher } = extractFocusTerms(`${summaryText === 'NO SUMMARY PROVIDED' ? '' : summaryText} ${txt}`);
+                    // Lead with the reported symptom (tiny + protected from end-trim) so the model
+                    // correlates the evidence with what the customer actually reported instead of
+                    // grabbing an unrelated high-severity error.
+                    let leadHeader = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
                     if (summaryText && summaryText !== 'NO SUMMARY PROVIDED') {
-                        header += `\n[REPORTED ISSUE / CASE SYMPTOM — correlate the evidence with THIS]: ${summaryText.slice(0, 600)}\n`;
+                        leadHeader += `\n[REPORTED ISSUE / CASE SYMPTOM — correlate the evidence with THIS]: ${summaryText.slice(0, 600)}\n`;
                     }
-                    header += await buildFileManifest(c.logs, c.lastSentAt || 0);
-                    // HAR network captures are JSON — the line scanner can't read them, so parse them
-                    // into HTTP-transaction evidence (4xx/5xx, redirects, OAuth/SSO error codes, FQDN
-                    // mismatch) and place it FIRST so it survives trimming and leads the analysis.
                     const harLogs = c.logs.filter(l => isHarContent(l.name || "", l.content || ""));
-                    for (const l of harLogs) {
-                        try { header += buildHarAnalysis(l.content || "", l.name || "capture.har"); } catch (e) { console.warn('HAR analysis failed', e); }
-                    }
-                    // The CROSS-LOG INCIDENT INDEX carries the per-line citations (file:Line N @ ts)
-                    // the model must quote; the LOG PATTERN PROFILE is just summary counts. On
-                    // small/CPU models the prompt is end-trimmed, so put the line-numbered index
-                    // FIRST and the summary profile last — that way the citations are never the part
-                    // that gets cut (fixes "Line N/A" evidence on large runtime logs).
                     const nonHarLogs = c.logs.filter(l => !isHarContent(l.name || "", l.content || ""));
+                    // Rank so the manifest + budget prioritise the files relevant to THIS question.
+                    for (const l of nonHarLogs) { try { await getLogPanelIntel(l); } catch (e) { /* best-effort */ } }
+                    const termWeights = computeFocusTermWeights(nonHarLogs, terms);
+                    const rankedLogs = [...nonHarLogs].sort((a, b) => scoreFileRelevance(b, terms, matcher, termWeights) - scoreFileRelevance(a, terms, matcher, termWeights));
+                    // File inventory. Placed AFTER the query-focused digest below (reference material),
+                    // so on a tiny model the evidence — not the 50-line file list — leads the window.
+                    let manifestSection = await buildFileManifest(rankedLogs.concat(harLogs), c.lastSentAt || 0, { compactAfter: isSmallModel ? 10 : 24 });
+                    // HAR network captures are JSON — the line scanner can't read them, so parse them
+                    // into HTTP-transaction evidence (4xx/5xx, redirects, OAuth/SSO error codes, FQDN).
+                    for (const l of harLogs) {
+                        try { manifestSection += buildHarAnalysis(l.content || "", l.name || "capture.har"); } catch (e) { console.warn('HAR analysis failed', e); }
+                    }
+                    // Secondary evidence: the CROSS-LOG INCIDENT INDEX (per-line failure citations) + the
+                    // LOG PATTERN PROFILE (summary counts). These are FAILURE-keyword driven — invaluable
+                    // for a crash/exception case, but for a many-file bundle they can run to 100 KB+ and,
+                    // on a small model, would swallow the whole window. So they are BOUNDED and placed
+                    // AFTER the query-focused digest, which leads and is protected from the end-trim.
                     const incidentIndex = await buildCrossLogIncidentIndex(nonHarLogs, { patternMode: true });
                     const patternProfile = await buildLogPatternProfile(nonHarLogs);
-                    header += isSmallModel ? (incidentIndex + patternProfile) : (patternProfile + incidentIndex);
-                    const snippetBudget = await computeSnippetBudget(Math.max(1, nonHarLogs.length), externalOverhead + header.length);
-                    const budgets = allocatePerFileBudgets(nonHarLogs, snippetBudget, isSmallModel ? 1500 : 4000);
-                    logContext = header;
-                    for (const l of nonHarLogs) {
-                        logContext += `\n\n=== FILE: ${l.name} (${l.content.length} chars) ===\n${await getSmartLogSnippet(l.content, budgets.get(l) || 10000, l.name, l.lines)}\n=== END: ${l.name} ===`;
-                    }
+                    let secondary = isSmallModel ? (incidentIndex + patternProfile) : (patternProfile + incidentIndex);
+                    const secondaryCap = isSmallModel ? 2200 : 24000;
+                    if (secondary.length > secondaryCap) secondary = secondary.slice(0, secondaryCap) + "\n[secondary failure-index truncated — the query-focused evidence above is the primary source for this question.]\n";
+                    // Concentrate the budget genuinely left over onto the top-ranked files, led by their
+                    // query-focused evidence, so a 50- or 100-file bundle can no longer bury the one file
+                    // that holds the answer past the model's context window. ORDER = symptom → digest →
+                    // manifest → bounded failure-index, so the digest is never the part the trim eats.
+                    const realBudget = Math.max(isSmallModel ? 5500 : 12000, promptBudget - Math.max(0, externalOverhead) - leadHeader.length - manifestSection.length - secondary.length);
+                    const snippets = await buildConcentratedSnippets(rankedLogs, realBudget, matcher, terms, termWeights);
+                    logContext = leadHeader + snippets + manifestSection + secondary;
                 }
                 // Enforce the reservation now the evidence is sized: the case/research data only
                 // gets the room genuinely left over — never the other way round. Trim the email
