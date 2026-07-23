@@ -46,9 +46,6 @@ First-time setup:
 3. Wait for the setup to complete (~2 GB model download, one time only).
 4. Back in Settings, click the refresh icon to detect models, then Save.
 
-If Bitdefender blocks it: allow setup_local_ai.bat and
-%LOCALAPPDATA%\Programs\Ollama in your antivirus settings.
-
 
 FILE INVENTORY
 --------------

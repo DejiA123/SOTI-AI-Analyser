@@ -37,7 +37,6 @@ function Test-OllamaInstalled {
 
 function Install-OllamaOfficial {
     Write-Info "Running official installer: irm https://ollama.com/install.ps1 | iex"
-    Write-Info "If Bitdefender prompts, choose Allow - this is the official Ollama script from ollama.com."
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $installScript = (Invoke-WebRequest -Uri "https://ollama.com/install.ps1" -UseBasicParsing -TimeoutSec 300).Content
@@ -178,7 +177,6 @@ if (Test-OllamaInstalled) {
     if (-not $ok) { $ok = Install-OllamaViaSetupExe }
     if (-not $ok) {
         Write-Err "Automatic install did not complete."
-        Write-Info "If Bitdefender blocked the script, allow PowerShell and https://ollama.com for your user."
         Write-Info "Manual install: open PowerShell and run: irm https://ollama.com/install.ps1 | iex"
         exit 1
     }
@@ -250,6 +248,5 @@ Write-Header "Setup complete"
 Write-Success "Local AI is ready."
 Write-Info "1. Reload the SOTI AI Analyser extension in Chrome."
 Write-Info "2. Open Settings - set URL to http://127.0.0.1:11434 - refresh models - Save."
-Write-Info "3. Optional Bitdefender exclusion: $env:LOCALAPPDATA\Programs\Ollama"
 Write-Host ""
 pause
