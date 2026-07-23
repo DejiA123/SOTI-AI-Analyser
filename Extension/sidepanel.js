@@ -2132,11 +2132,15 @@ function extractStackOriginSummary(text) {
 //      code 1603" that is NOT "translated to success due to continue marking" (those are non-fatal).
 //   That CustomAction is THE root cause. This removes the model's freedom to blame SQL/enumeration
 //   noise, and it is 100% accurate for SOTI MSI setup logs.
-function findMsiRootCause(lines) {
+function findMsiRootCause(lines, minIdx = 0) {
     if (!lines || !lines.length) return null;
+    // minIdx scopes the search to the FINAL install session (see buildInstallerFailureAnalysis):
+    // a file can hold several attempts, and the rollback that matters is the one in the run being
+    // analysed — never a "Return value 3" from a prior attempt earlier in the same file.
+    const from = Math.max(0, minIdx);
     // 1) First fatal "Return value 3" on an "Action ended" line.
     let rv3Idx = -1, rv3Action = "", rv3Ts = "";
-    for (let i = 0; i < lines.length; i++) {
+    for (let i = from; i < lines.length; i++) {
         const ln = lines[i] || "";
         if (ln.indexOf("Return value 3") !== -1 && /Action ended/i.test(ln)) {
             rv3Idx = i;
@@ -2149,7 +2153,7 @@ function findMsiRootCause(lines) {
     // 2) Nearest preceding NON-TRANSLATED "returned actual error code 1603".
     const searchEnd = rv3Idx >= 0 ? rv3Idx : lines.length - 1;
     let causeIdx = -1, causeName = "", causeTs = "";
-    for (let i = searchEnd; i >= 0; i--) {
+    for (let i = searchEnd; i >= from; i--) {
         const ln = lines[i] || "";
         if (ln.indexOf("1603") === -1) continue;
         const m = ln.match(/CustomAction\s+(\S+)\s+returned actual error code 1603/i);
@@ -2269,6 +2273,46 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
 
     if (sorted.length === 0) return "";
 
+    // ── SESSION SCOPING ───────────────────────────────────────────────────────────
+    // One log FILE routinely holds SEVERAL install attempts — a run that failed, then a
+    // retry hours, days, or (as here) months later. Because they share a file, a naive
+    // "earliest event = the first domino" reading blames a benign line from a PRIOR run
+    // for TODAY's failure, and reports a nonsensical multi-month "install window". A real
+    // MSI install logs continuously, so a multi-hour silent gap between high-signal lines
+    // is always a run boundary. Split on that gap and keep only the FINAL session — the run
+    // that actually contains the failure being analysed.
+    const SESSION_GAP_MS = 3 * 60 * 60 * 1000; // 3h: longer than any single install, shorter than a retry-later gap
+    let scoped = sorted;
+    let priorAttempts = 0;
+    let priorSpan = null;
+    {
+        let startIdx = 0;
+        for (let i = sorted.length - 1; i >= 1; i--) {
+            const a = sorted[i - 1].sortTime, b = sorted[i].sortTime;
+            if (Number.isFinite(a) && Number.isFinite(b) && (b - a) >= SESSION_GAP_MS) { startIdx = i; break; }
+        }
+        if (startIdx > 0) {
+            scoped = sorted.slice(startIdx);
+            priorAttempts = startIdx;
+            priorSpan = { from: sorted[0].timestamp, to: sorted[startIdx - 1].timestamp };
+        }
+    }
+    // The install WINDOW is the final session's own start → end — never file-first → file-last,
+    // which across a multi-attempt file spans the whole gap and reads as a "2-month install".
+    if (scoped.length) {
+        firstTimestamp = scoped[0].timestamp || firstTimestamp;
+        lastTimestamp = scoped[scoped.length - 1].timestamp || lastTimestamp;
+    }
+    // The user-facing failure line (the message the engineer actually sees), latest first — so the
+    // report leads with the REAL failure and its REAL timestamp, not the file's earliest line.
+    const finalFailure = [...scoped].reverse().find(e => /Installation failed while installing|Fatal error during installation|AggregateException|Win32Exception|Setup (?:failed|aborted)|installation (?:failed|aborted|was interrupted|did not complete)|MainEngineThread is returning/i.test(e.text || ""));
+    // Per-file first line of the final session, so the deterministic MSI scan ignores a prior run's rollback.
+    const sessionStartLineByFile = new Map();
+    for (const e of scoped) {
+        const cur = sessionStartLineByFile.get(e.file);
+        if (cur === undefined || e.lineNum < cur) sessionStartLineByFile.set(e.file, e.lineNum);
+    }
+
     let report = `\n\n=== INSTALLER EVIDENCE (setup/MSI log — line-anchored facts only; AI derives root cause) ===\n`;
     report += `Product/context hint: ${product}${returnCode ? ` | Return code in log: ${returnCode}` : ""}\n`;
     report += `Log source(s): ${sources.join(', ')}\n`;
@@ -2279,6 +2323,12 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
     if (sqlTarget) env.push(`SQL target: ${sqlTarget}`);
     if (azureSql) env.push(`SQL platform: AZURE SQL DATABASE (note: Azure SQL does NOT support "ALTER DATABASE ... SET RECOVERY SIMPLE" — if a migration script runs that, it fails here)`);
     if (env.length > 0) report += `Environment facts: ${env.join('; ')}\n`;
+    if (priorAttempts > 0 && priorSpan) {
+        report += `Scope note: this file ALSO contains ${priorAttempts} high-signal line(s) from an EARLIER, separate run (${priorSpan.from || '?'} → ${priorSpan.to || '?'}) — EXCLUDED below. Analyse ONLY the final session (${firstTimestamp || '?'} → ${lastTimestamp || '?'}); a line from the earlier run is NEVER the root cause of this failure, and its timestamp is not "the install date".\n`;
+    }
+    if (finalFailure) {
+        report += `Observed failure (the run's actual outcome — lead your report with THIS line and its timestamp): ${finalFailure.file}:Line ${finalFailure.lineNum}${finalFailure.timestamp ? ` @ ${finalFailure.timestamp}` : ""} — ${truncateLogLine(finalFailure.text, 200)}\n`;
+    }
 
     // PRIMARY ROOT-CAUSE ANCHOR — leads the evidence so it survives context trimming.
     // Prefer the DETERMINISTIC MSI cause (exact CustomAction before the first "Return value 3");
@@ -2286,7 +2336,8 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
     let detCause = null;
     for (const name of sources) {
         const dl = lineMap.get(name) || [];
-        const r = findMsiRootCause(dl);
+        const minIdx = Math.max(0, (sessionStartLineByFile.get(name) || 1) - 1);
+        const r = findMsiRootCause(dl, minIdx);
         if (r && r.causeIdx >= 0) { detCause = { ...r, file: name, lines: dl }; break; }
         if (r && !detCause) detCause = { ...r, file: name, lines: dl };
     }
@@ -2326,7 +2377,7 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
         }
         // KEY FAILURE CHAIN — the exact ordered rows for the triage table, so the model uses the
         // real chain (symptom → root cause → failing action → rollback) instead of medium-signal noise.
-        const earliestSymptom = sorted.find(e => e.score >= 80 && (e.lineNum < detCause.causeIdx + 1)
+        const earliestSymptom = scoped.find(e => e.score >= 80 && (e.lineNum < detCause.causeIdx + 1)
             && /SQL|database|login|cannot open|exception|denied|certificate|connection|migration/i.test(e.text || ""));
         report += `KEY FAILURE CHAIN (use THESE as the triage rows, in this order — do not substitute lower-signal lines):\n`;
         if (earliestSymptom) report += `  1) SYMPTOM (earliest, installer continued past it): ${detCause.file}:Line ${earliestSymptom.lineNum}${earliestSymptom.timestamp ? ` @ ${earliestSymptom.timestamp}` : ""} — ${truncateLogLine(earliestSymptom.text, 180)}\n`;
@@ -2334,8 +2385,29 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
         report += `  3) FAILING ACTION: ${detCause.file}:Line ${detCause.causeIdx + 1}${detCause.causeTs ? ` @ ${detCause.causeTs}` : ""} — CustomAction ${detCause.causeName} returned error code 1603\n`;
         if (detCause.rv3Idx >= 0) report += `  4) ROLLBACK: ${detCause.file}:Line ${detCause.rv3Idx + 1}${detCause.rv3Ts ? ` @ ${detCause.rv3Ts}` : ""} — Return value 3 (installation aborts)\n`;
         if (win && !lean) { report += `Full context around the failing action:\n`; report += "```text\n" + win + "\n```\n"; }
+    } else if (detCause && detCause.rv3Idx >= 0) {
+        // No CustomAction returned a non-translated 1603, but the MSI still ABORTED at an action with
+        // "Return value 3" (e.g. InstallValidate). Anchor on that real failure point near the end of
+        // the session — never on the earliest line — and surface the environmental / prerequisite
+        // errors just above it as the root-cause candidates.
+        const NONDET_WHY = /System requirements Check Failed|prerequisite|\.Net\b.*(?:Failed|Status = Failed)|Status = Failed|Exit Code \d+|Upgrade handler .*failed|Installation failed while installing|Fatal error during installation|ALTER DATABASE|transaction log .* is full|Cannot open database|Login failed|could not (?:open|connect)|Timeout expired|access is denied|not enough space|AggregateException|Win32Exception/i;
+        const why = [];
+        for (let i = detCause.rv3Idx - 1; i >= Math.max(0, detCause.rv3Idx - 500); i--) {
+            const t = (detCause.lines[i] || "").trim();
+            if (!t || /Return value 1\b|Action (?:start|ended)|Property\(S\)|Closing MSIHANDLE|Creating MSIHANDLE|PROPERTY CHANGE|Note: 1:/i.test(t)) continue;
+            if (NONDET_WHY.test(t)) { why.push(`${detCause.file}:Line ${i + 1} — ${t.slice(0, 260)}`); if (why.length >= 3) break; }
+        }
+        report += `\n--- PRIMARY FAILURE POINT (no CustomAction returned 1603 — the installer aborted at an MSI action) ---\n`;
+        report += `Failing action: ${detCause.rv3Action || 'MSI action'} — Return value 3 (the action FAILED and triggered the abort)\n`;
+        report += `Location: ${detCause.file}:Line ${detCause.rv3Idx + 1}${detCause.rv3Ts ? ` @ ${detCause.rv3Ts}` : ""}\n`;
+        if (why.length) {
+            report += `WHY it failed (root-cause candidates — cite these exact lines; prefer the earliest environment/prerequisite error over the generic MSI abort):\n`;
+            why.forEach(h => report += `  • ${h}\n`);
+        } else {
+            report += `No explicit error message accompanies this action in the log. "Return value 3" means the action FAILED (commonly a failed prerequisite check, a file-in-use lock, insufficient permissions, or low disk space). Take the root cause from the earliest ERR lines in the timeline below — do NOT invent a SqlException, error code, or CustomAction that the evidence does not show.\n`;
+        }
     } else {
-        const primaryAnchor = [...sorted].sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)[0];
+        const primaryAnchor = [...scoped].sort((a, b) => b.score - a.score || a.sortTime - b.sortTime)[0];
         if (primaryAnchor && primaryAnchor.score >= 100) {
             const aLines = lineMap.get(primaryAnchor.file) || [];
             const aBlock = installerEvidenceWindow(aLines, primaryAnchor.lineNum - 1, 25, 5);
@@ -2351,7 +2423,7 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
     // model build the propagation/domino path and tell the symptom apart from the real cause.
     const chronoSeen = new Map();
     const chronoEvents = [];
-    for (const e of sorted) {
+    for (const e of scoped) {
         const sigKey = ((typeof normalizeLogSignature === 'function' ? normalizeLogSignature(e.text) : e.text) || e.text).slice(0, 80);
         const prev = chronoSeen.get(sigKey);
         if (prev) { prev.count++; continue; }
@@ -2370,7 +2442,7 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
     if (windowN > 0) {
     report += `\n--- EVIDENCE WINDOWS (highest-score lines with surrounding context) ---\n`;
     const seen = new Set();
-    [...sorted]
+    [...scoped]
         .sort((a, b) => b.score - a.score)
         .slice(0, windowN)
         .sort((a, b) => a.sortTime - b.sortTime || a.lineNum - b.lineNum)
@@ -2391,10 +2463,15 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
     }
 
     report += `\nAI instructions: Format your response as a strict Markdown table, then a ROOT CAUSE and FIX. `;
+    if (priorAttempts > 0) {
+        report += `SESSION RULE: this file holds more than one run. Analyse ONLY the final session (${firstTimestamp || '?'} → ${lastTimestamp || '?'}); the ${priorAttempts} excluded earlier line(s) are a DIFFERENT, earlier run and can never be the cause here. If asked about "today's" date or the timestamps, note that the failure DID occur in this session (${lastTimestamp || '?'}) — never claim the log lacks events for that date. `;
+    }
     if (haveDet) {
         report += `The PRIMARY ROOT CAUSE above is authoritative and already identified for you: the failing action is CustomAction ${detCause.causeName} (the 1603 that was NOT "translated to success"). Your ROOT CAUSE line MUST name CustomAction ${detCause.causeName} and cite its exact line and timestamp. Explain WHY using only the lines shown above it. Do NOT name any other action, and NEVER blame SQL "Cannot open database"/"Login failed"/database-enumeration lines — those are pre-create enumeration noise here. Do NOT invent CustomAction names or 1603 codes that are not in the evidence above.\n`;
+    } else if (detCause && detCause.rv3Idx >= 0) {
+        report += `There is NO CustomAction 1603 in this run — do NOT invent one, and do NOT invent a SqlException or SQL error code (this log contains none). The installer aborted at the PRIMARY FAILURE POINT above (${detCause.rv3Action || 'an MSI action'}, Return value 3). Your ROOT CAUSE must be the earliest concrete environment/prerequisite error shown in its "WHY it failed" candidates (or, if none, state honestly that the log records only the "${detCause.rv3Action || 'MSI'} Return value 3" abort with no accompanying error message, and name the failed prerequisite / requirement check from the timeline). Cite exact file:Line and timestamps; the "Return value 3" line itself is the symptom, not the root cause.\n`;
     } else {
-        report += `CRITICAL MSI RULE: The true root cause is almost ALWAYS the CustomAction, script execution, or error immediately preceding "Return value 3" or "Closing MSIHANDLE". Do NOT randomly blame early SQL/login lines unless they are directly above the fatal Return value 3 rollback trigger! Follow the specific MSI rules in the PRODUCT-SPECIFIC LOG SIGNATURES section if available.\n`;
+        report += `CRITICAL MSI RULE: The true root cause is almost ALWAYS the CustomAction, script execution, or error immediately preceding "Return value 3" or "Closing MSIHANDLE". Do NOT randomly blame early SQL/login lines unless they are directly above the fatal Return value 3 rollback trigger, and NEVER cite an exception (e.g. SqlException) or error code that does not literally appear in the evidence above. Follow the specific MSI rules in the PRODUCT-SPECIFIC LOG SIGNATURES section if available.\n`;
     }
     report += `=== END INSTALLER EVIDENCE ===`;
     return report;
@@ -4318,15 +4395,23 @@ function getLogForensicsSystemPrompt() {
 
 You are operating in FORENSIC REPORT mode for an MSI/setup installer log. Your goal is a highly accurate, definitive Forensic Installation Failure Report that names the EXACT failing action.
 
+SCOPE THE RUN FIRST (a log file can hold several attempts):
+- A single installer log often contains MULTIPLE install attempts — a failed run, then a retry hours, days, or months later. A large time gap between blocks of events marks a run boundary. Analyse ONLY the session that contains the failure (use the evidence's "Observed failure" line and the final-session window). Events from an earlier run are NEVER the root cause of this failure, and the earlier run's date is NOT the install date.
+- The install window you report is the FINAL session's start → end, NOT the file's first-to-last timestamps. If asked about "today's" date or the timestamps, confirm what the log actually contains — the failure DID occur on its session date; never claim the log lacks events for a date its failure lines carry.
+
 THE MSI ROOT-CAUSE METHOD (follow in this order — this is how an expert reads an MSI log):
-1. Find the FIRST "Action ended ...: <Action>. Return value 3." — "Return value 3" = that action FAILED and triggered the rollback. (Return value 1 = success; Return value 2 = user cancel.)
+1. Find the FIRST "Action ended ...: <Action>. Return value 3." IN THE FINAL SESSION — "Return value 3" = that action FAILED and triggered the rollback. (Return value 1 = success; Return value 2 = user cancel.)
 2. Just above it, find the line "CustomAction <Name> returned actual error code 1603". That named CustomAction is THE ROOT CAUSE. Read the 5–30 lines ABOVE it to explain WHY it failed.
-3. "MainEngineThread is returning 1603" is only the final summary exit code — never cite it as the root cause.
+3. NO-1603 CASE: if NO "CustomAction ... returned actual error code 1603" precedes the rollback (e.g. the abort is at InstallValidate), the root cause is the earliest concrete environment/prerequisite error in the session — a failed system-requirements / .NET-runtime check, "Upgrade handler ... failed", low disk space, a locked file. The "Return value 3" line is then the symptom, not the cause. If the log records only the abort with no accompanying error, say so honestly and name the failed check — do not guess.
+4. "MainEngineThread is returning 1603" is only the final summary exit code — never cite it as the root cause.
+
+NEVER FABRICATE: cite exceptions, error codes and CustomAction names ONLY when they literally appear in the evidence. If there is no SqlException, no 1603, and no Azure SQL in the log, do NOT mention any of them. A "SQL target" / DB-server name in the environment is NOT evidence of a SqlException.
 
 WHAT IS NOISE — you MUST ignore it as the root cause:
 - A 1603 that says "but will be translated to success due to continue marking" is NON-FATAL (e.g. CheckConnectionString, WixRemoveFoldersEx). It did NOT fail the install. Never blame it.
 - SQL lines such as "Cannot open database ... requested by the login", "Login failed", "EnumerateDatabaseNames" during install are usually pre-create ENUMERATION noise. Do NOT name SQL/authentication as root cause when a non-translated CustomAction 1603 precedes the rollback.
 - "Closing MSIHANDLE", "Note: 1: 2265", "User/Machine policy value", and post-failure actions (XSFatalErrorDlg, CopyInstallationLog, OpenInstallFolder) are symptoms/cleanup, never the cause.
+- A benign WARN/WRN from early in the file (e.g. "... .cmd not found in mapper for N") is not a fatal error and, if it belongs to an earlier run, is doubly irrelevant. Never elevate it to root cause.
 
 OUTPUT — a Markdown table plus a verdict:
 | Signal | Meaning |
@@ -4349,16 +4434,30 @@ in the evidence below: the environment, a "PRIMARY ROOT CAUSE" block (the failin
 ONLY from that evidence.
 
 HOW TO REASON (critical):
+- ONE SESSION ONLY: a single file often holds SEVERAL install attempts (a failed run, then a retry
+  hours/days/months later). Analyse ONLY the run that produced the failure — the evidence's "Observed
+  failure" line and the final session window (start → end). If a "Scope note" flags earlier lines as a
+  separate prior run, they are NOT the cause and their date is NOT the install date. Never pick the file's
+  earliest line as the root cause when it is hours or months before the failure.
 - The ROOT CAUSE is the deepest error in the "WHY it failed" lines — the error the failing CustomAction
   hit just before "Return value 3" (e.g. "ALTER DATABASE ... is not supported", "transaction log is full",
   a failing migration script, a constraint violation).
+- NO 1603 CASE: if the evidence shows a "PRIMARY FAILURE POINT" (an MSI action such as InstallValidate that
+  returned "Return value 3") with NO CustomAction 1603, the root cause is the earliest concrete environment/
+  prerequisite error above it (e.g. "System requirements Check Failed", a failed .NET/ASP.NET Core runtime
+  check, "Upgrade handler ... failed", low disk space). The "Return value 3" line is the symptom. If no
+  error message accompanies the abort, say so honestly and name the failed requirement check — do NOT guess.
+- EVIDENCE ONLY — no fabrication: cite exceptions, error codes and CustomAction names ONLY if they literally
+  appear in the evidence. If there is no SqlException / no 1603 / no Azure SQL, do NOT mention one. "SQL
+  target: <name>" in the environment is just the DB server name — it is NOT evidence of a SqlException.
 - The EARLIEST errors in the timeline (especially "Cannot open database ... login failed") are usually
   SYMPTOMS the installer logged but continued past — NEVER report a symptom as the root cause.
 - If the environment says AZURE SQL DATABASE and the failure is "ALTER DATABASE / SET RECOVERY", the cause
   is that Azure SQL does not support that statement; recommend a supported SQL Server or a patched script.
 
 OUTPUT FORMAT — use these exact headings. Cite ONLY real file:Line and timestamps copied from the evidence
-(never invent, never write placeholders like "Line N"/"{n}"). Begin directly with the "## 🔍" heading, no preamble:
+(never invent, never write placeholders like "Line N"/"{n}"). Use the final-session window for **Install:**,
+never the file's first-to-last span. Begin directly with the "## 🔍" heading, no preamble:
 
 ## 🔍 Forensic Analysis: <product + version> Installation Failure
 **Log Source:** <file> | **Install:** <start ts> → <end ts> (Return <code>)
@@ -4367,18 +4466,18 @@ OUTPUT FORMAT — use these exact headings. Cite ONLY real file:Line and timesta
 ### 1. Chronological Triage
 | Timestamp | Location | Event |
 | --- | --- | --- |
-(4–6 rows from the CHRONOLOGICAL evidence: the first SQL/validation symptom, the migration/SQL error, the failing CustomAction's 1603, and the "Return value 3" rollback — each with its real file:Line.)
+(4–6 rows from the CHRONOLOGICAL evidence within the final session: the first symptom/failed check, the deeper error, the failing action — a CustomAction's 1603 OR the PRIMARY FAILURE POINT's "Return value 3" — and the observed failure line, each with its real file:Line.)
 
 ### 2. Propagation Path (domino effect)
-A short numbered chain: earliest symptom → deeper error → the WHY/root-cause error → failing CustomAction → rollback (Return <code>).
+A short numbered chain: earliest symptom → deeper error → the WHY/root-cause error → failing action (CustomAction 1603 or the "Return value 3" abort) → observed failure (Return <code>).
 
 ### 3. Root Cause — Symptom vs. Source
 | Finding | Classification |
 | --- | --- |
-(Mark the early SQL-login / FQDN / validation lines as **Symptom**; mark the WHY error as **ROOT CAUSE**.)
+(Mark the early SQL-login / FQDN / validation / "Return value 3" abort lines as **Symptom**; mark the deepest environment/prerequisite error as **ROOT CAUSE**.)
 
-**Root Cause:** one precise sentence naming the failing CustomAction and the WHY error (with file:Line).
-**Recommendation:** the specific fix for that error (supported SQL Server / patched migration script / free the transaction log / grant db_owner / etc.).`;
+**Root Cause:** one precise sentence naming the failing action AND the underlying error (with file:Line) — the CustomAction + WHY error, or, when there is no 1603, the failed prerequisite/environment error behind the "Return value 3" abort. If the log records only the abort with no accompanying error, say so plainly rather than inventing a cause.
+**Recommendation:** the specific fix for that error (install the missing prerequisite / supported SQL Server / patched migration script / free the transaction log / grant db_owner / free disk space / etc.).`;
 }
 
 function validateForensicAIResponse(text, logs) {
