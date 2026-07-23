@@ -43,7 +43,8 @@ The extension uses a locally-running Ollama model for all AI responses.
 First-time setup:
 1. Open the extension, click the ⋮ menu → Settings.
 2. Click "Download setup_local_ai.bat" and run it (double-click).
-3. Wait for the setup to complete (~2 GB model download, one time only).
+3. Wait for the setup to complete (~7.2 GB model download, one time only).
+   Allow around 10 GB of free disk space for the model plus runtime overhead.
 4. Back in Settings, click the refresh icon to detect models, then Save.
 
 
@@ -85,6 +86,8 @@ Local AI installer (optional — for first-time Ollama setup):
 
 Repo files:
   README.txt              This file
+  SECURITY.md             Security & data-protection assessment
+  UNINSTALL.md            Rollback/uninstall steps for the local AI setup
   .gitignore              Git ignore rules
 
 

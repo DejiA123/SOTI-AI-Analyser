@@ -23,3 +23,8 @@ desktop.ini
 # Extension artifacts
 Extension/lib/jszip.min.js
 Extension/lib/tesseract.min.js
+
+# Extension signing key — private half of the manifest "key" that fixes the
+# extension ID. Needed only to publish a .crx under the same ID. NEVER commit.
+*.pem
+soti-extension-signing-key.pem

@@ -1,5 +1,15 @@
 # SOTI AI Analyser - Local AI Auto-Setup
-# Uses official https://ollama.com/install.ps1 then downloads gemma4:e2b.
+# Installs Ollama (winget first, official installer / signed setup.exe as fallbacks),
+# hardens it for local-only use, then downloads gemma4:e2b (~7.2 GB).
+#
+# Managed rollout: pass -ExtensionId <id> when the extension is deployed from the Chrome
+# Web Store or by enterprise policy under an ID other than the one the bundled manifest
+# "key" produces. The default below matches Extension/manifest.json.
+
+param(
+    [ValidatePattern('^[a-p]{32}$')]
+    [string]$ExtensionId = "odkmlcpmfgdfoikmcmhoongggbepbdna"
+)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -67,6 +77,39 @@ function Install-OllamaViaWinget {
     }
 }
 
+function Test-InstallerSignature {
+    # SECURITY: the downloaded installer runs with full user privileges outside the browser
+    # sandbox, so verify its Authenticode signature before executing it. This closes the
+    # "fetch an .exe over HTTPS and simply trust it" gap - a tampered, unsigned, or
+    # wrong-publisher binary (TLS-intercepting proxy, cache poisoning, hijacked URL) is
+    # rejected here instead of being installed silently.
+    param([string]$Path)
+
+    try {
+        $sig = Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop
+    } catch {
+        Write-Err "Could not read the installer signature: $($_.Exception.Message)"
+        return $false
+    }
+
+    if ($sig.Status -ne "Valid") {
+        Write-Err "Installer signature is NOT valid (status: $($sig.Status)). Refusing to run it."
+        if ($sig.StatusMessage) { Write-Err "  $($sig.StatusMessage)" }
+        return $false
+    }
+
+    $subject = "$($sig.SignerCertificate.Subject)"
+    if ($subject -notmatch 'CN=Ollama Inc\.') {
+        Write-Err "Installer is signed by an UNEXPECTED publisher. Refusing to run it."
+        Write-Err "  Expected: CN=Ollama Inc."
+        Write-Err "  Found:    $subject"
+        return $false
+    }
+
+    Write-Success "Installer signature verified (CN=Ollama Inc., issuer: $(($sig.SignerCertificate.Issuer -split ',')[0]))."
+    return $true
+}
+
 function Install-OllamaViaSetupExe {
     Write-Info "Trying OllamaSetup.exe fallback..."
     $installerUrl = "https://ollama.com/download/OllamaSetup.exe"
@@ -76,6 +119,10 @@ function Install-OllamaViaSetupExe {
     try {
         Invoke-WebRequest -Uri $installerUrl -OutFile $setupExe -UseBasicParsing -TimeoutSec 300
         if (-not (Test-Path $setupExe)) { return $false }
+        if (-not (Test-InstallerSignature -Path $setupExe)) {
+            Remove-Item $setupExe -Force -ErrorAction SilentlyContinue
+            return $false
+        }
         $proc = Start-Process -FilePath $setupExe -ArgumentList "/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
         if ($proc.ExitCode -ne 0 -and -not (Test-OllamaInstalled)) {
             Start-Process -FilePath $setupExe -ArgumentList "/SILENT" -Wait | Out-Null
@@ -192,15 +239,26 @@ if (-not (Test-Path $ollamaExe)) {
 # --- Step 2: Start / verify service ---
 Write-Header "Step 2: Start Ollama"
 
-# SECURITY: scope OLLAMA_ORIGINS to the SOTI extension + the standalone page ONLY - never "*".
-# "*" lets ANY website the analyst visits reach the local model API from the browser (a
-# drive-by localhost-service risk the security team flagged). This scoped list blocks arbitrary
-# web origins while still allowing the extension and the standalone page. For a managed rollout,
-# replace chrome-extension://* with the pinned extension ID (chrome-extension://<your-id>).
-$sotiOrigins = "chrome-extension://*,http://localhost:8765,http://127.0.0.1:8765"
-Write-Info "Configuring OLLAMA_ORIGINS to the SOTI extension + standalone page only (not '*')..."
+# SECURITY: scope OLLAMA_ORIGINS to THIS extension by its exact ID + the standalone page.
+# Never "*" (that lets any website the analyst visits reach the local model) and no longer
+# "chrome-extension://*" (that let EVERY installed Chrome extension reach it). The ID below
+# is fixed by the "key" field in manifest.json, so it is identical on every machine.
+# Note this is a browser-boundary control: it stops other web origins and other extensions,
+# but requests carrying no Origin header (any local process) are always allowed by Ollama,
+# and Ollama additionally permits localhost/127.0.0.1 on any port by default.
+$sotiOrigins = "chrome-extension://$ExtensionId,http://localhost:8765,http://127.0.0.1:8765"
+Write-Info "Configuring OLLAMA_ORIGINS to this extension ID + standalone page only..."
+Write-Info "  Pinned extension: chrome-extension://$ExtensionId"
 [System.Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", $sotiOrigins, "User")
 $env:OLLAMA_ORIGINS = $sotiOrigins
+
+# SECURITY: enforce local-only inference. Ollama can route work to its cloud (remote models
+# and web search). Customer case content must never leave the machine, so disable those
+# features at the server instead of relying on the extension only ever asking for a local
+# model. Must be set before the server starts - the restart below applies it.
+Write-Info "Configuring OLLAMA_NO_CLOUD=1 (disables Ollama cloud inference + web search)..."
+[System.Environment]::SetEnvironmentVariable("OLLAMA_NO_CLOUD", "1", "User")
+$env:OLLAMA_NO_CLOUD = "1"
 
 # Speed: flash attention + quantized KV cache. On CPU-only / low-RAM laptops this lowers
 # memory bandwidth and can speed up inference. It does NOT change answer quality.
@@ -225,8 +283,11 @@ if (Test-Path $appExe) {
     Write-Info "Starting Ollama tray app..."
     Start-Process -FilePath $appExe
 } else {
+    # "serve" is required: bare `ollama` launches an interactive menu, not the API server,
+    # so with -WindowStyle Hidden it would sit invisible forever and the API check below
+    # would time out.
     Write-Info "Starting Ollama backend..."
-    Start-Process -FilePath $ollamaExe -WindowStyle Hidden
+    Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden
 }
 Start-Sleep -Seconds 3
 if (-not (Wait-OllamaApi)) {

@@ -114,7 +114,7 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 2. **Deploy via managed/enterprise policy** (force-installed, pinned version), **not** the standalone page.
 3. ~~Remove the unused `declarativeNetRequest` permission~~ — **done**; consider further narrowing `tabs`/`scripting`.
 4. ~~Add HTML-escaping in `md()`~~ — **done** (defence-in-depth alongside CSP).
-5. **Harden the Ollama host:** bind to localhost, set `OLLAMA_ORIGINS`, keep it off the network.
+5. ~~**Harden the Ollama host:** bind to localhost, set `OLLAMA_ORIGINS`, keep it off the network.~~ — **done**; `OLLAMA_ORIGINS` is pinned to this extension's ID and `OLLAMA_NO_CLOUD=1` enforces local-only inference (see §15.1–15.2).
 6. **Produce the organisational GDPR artefacts** (see §11) — the code supports these but cannot *be* them.
 7. **Commission an independent penetration test** of the packed extension.
 
@@ -166,6 +166,11 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 - **Scoped `OLLAMA_ORIGINS`** in the installer from `*` to the extension + standalone origins only (see §14.1).
 - **Made winget (verified package) the primary Ollama install path** ahead of the remote-script installer (see §14.2).
 - **Hardened the Pulse-sync domain check** from a substring match to strict hostname parsing (see §14.4).
+- **Pinned the extension ID** via a `key` in `manifest.json`, replacing `chrome-extension://*` in `OLLAMA_ORIGINS` (see §15.1).
+- **Enforced local-only inference** with `OLLAMA_NO_CLOUD=1` (see §15.2).
+- **Added Authenticode verification** of the downloaded `OllamaSetup.exe` before it is executed (see §15.3).
+- **Fixed the backend fallback** to launch `ollama serve` rather than the interactive CLI (see §15.4).
+- **Added a rollback/uninstall procedure** (`UNINSTALL.md`).
 
 ---
 
@@ -202,3 +207,65 @@ A dynamic pentest was performed against the running application (live browser: n
 - **ReDoS** — all 506 regex literals scanned; the one flagged pattern ran in 4 ms against a 300 KB pathological payload. No catastrophic backtracking.
 - **No** `eval`/`new Function`/dynamic-string timers in app code; **no** hardcoded secrets; download filenames are hardcoded (no path traversal); tab/case names use `.textContent`.
 - **Network egress** during full normal usage: only `127.0.0.1:11434` (Ollama), `pulse.soti.net` (first-party), and local files.
+
+---
+
+## 15. Third-party installer review — findings & resolutions
+
+An external static review of `setup_local_ai.bat` / `setup_local_ai.ps1` (dated 17 July 2026)
+was assessed against the code and re-tested dynamically. Its verdict — *no malware, moderate
+corporate risk, changes required before managed deployment* — was confirmed. All seven of its
+technical findings were reproduced. Resolutions below; scope was the **installer only**, so it
+does not supersede §14.
+
+### 15.1 [HIGH → RESOLVED] `chrome-extension://*` allowed every installed extension
+- **Found:** `OLLAMA_ORIGINS` used `chrome-extension://*`. **Proven live** — arbitrary extension
+  origins received `200` + a matching `Access-Control-Allow-Origin` from the local model. This
+  was the residual gap left open by §14.1.
+- **Resolved:** `manifest.json` now carries a `key`, fixing the extension ID at
+  `odkmlcpmfgdfoikmcmhoongggbepbdna` on every machine; the installer pins `OLLAMA_ORIGINS` to
+  that exact ID. A `-ExtensionId` parameter (validated `^[a-p]{32}$`) covers Web Store /
+  enterprise-policy rollouts.
+- **Verified:** the ID was confirmed as ground truth by packing the extension with Chrome's own
+  `--pack-extension` and reading the `crx_id` from the CRX3 header. Against a live instance:
+  our ID `200`; two other extension IDs `403`; `evil.example.com` `403`; standalone page `200`.
+- **Scope limit (documented, accepted):** `OLLAMA_ORIGINS` is a browser-boundary control only.
+  Requests with no `Origin` header (any local process) are always served, and Ollama
+  independently allows `localhost`/`127.0.0.1` on any port plus `app://`, `tauri://` and
+  `vscode-webview://`. Verified; not removable via `OLLAMA_ORIGINS`.
+
+### 15.2 [MEDIUM → RESOLVED] Local-only operation was assumed, not enforced
+- **Found:** the installer never disabled Ollama's cloud features (remote inference, web search).
+- **Resolved:** the installer now sets `OLLAMA_NO_CLOUD=1` (User scope) before starting the server.
+- **Verified:** against a **clean** Ollama profile the server reports `OLLAMA_NO_CLOUD:false` by
+  default and `true` with the variable set — i.e. Ollama ships with cloud **enabled**, so this is
+  a real change of default, not a no-op. Local inference is unaffected (`/api/chat` on a local
+  model returns `200`; a `*-cloud` model returns `403`).
+
+### 15.3 [MEDIUM → RESOLVED] Unverified installer executable
+- **Found:** the `OllamaSetup.exe` fallback downloaded and silently executed a binary with no
+  integrity check — the same supply-chain exposure as §14.2, which the external review did not flag.
+- **Resolved:** `Test-InstallerSignature` verifies Authenticode status **and** publisher
+  (`CN=Ollama Inc.`) before execution; a failing binary is deleted, not run.
+- **Verified:** genuine Ollama binary accepted; a byte-tampered copy rejected (`HashMismatch`);
+  an unsigned file rejected; a validly-signed Google binary rejected (wrong publisher).
+- **Residual:** the `install.ps1` fetch-and-eval fallback remains as accepted risk per §14.2.
+
+### 15.4 [LOW → RESOLVED] Backend fallback never started the server
+- **Found:** the non-tray fallback ran `ollama.exe` with no argument. Confirmed on 0.32.1 this
+  launches an **interactive menu**, not the API — so with `-WindowStyle Hidden` it hung invisibly
+  until the API check timed out. A functional bug, not merely a reliability concern.
+- **Resolved:** now `-ArgumentList "serve"`. **Verified:** API answers and the log shows `Listening on`.
+
+### 15.5 [INFO → RESOLVED] Documentation understated the download
+- `gemma4:e2b` is **7.2 GB** (measured), not the ~2 GB stated in the UI and README. Corrected in
+  both, plus the installer banner; disk guidance (~12 GB) added to `UNINSTALL.md`.
+
+### 15.6 [ADVISED → DONE] Rollback procedure
+- `UNINSTALL.md` documents every machine change and how to reverse it, and records that the
+  installer needs no Administrator rights and makes no machine-scope, firewall, or registry changes.
+
+### 15.7 Open — organisational, not code
+- **IT/Security approval remains required** before deployment on a SOTI-managed device. The tool
+  installs third-party software, opens a local API, and processes customer case content; no code
+  change removes that requirement.
