@@ -9167,7 +9167,11 @@ $('btnSyncSF').onclick = async () => {
         toast('Salesforce sync requires the Chrome extension', 'w');
         return;
     }
-    toast('Syncing from Salesforce...', 'i');
+    // The content script scrolls the case feed to the bottom before scraping so
+    // the WHOLE email chain is captured, not just the newest posts Salesforce
+    // happens to have rendered. That takes a few seconds on a long case — say so,
+    // otherwise the button looks dead.
+    toast('Syncing from Salesforce — loading full email chain...', 'i');
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) return;
@@ -9213,7 +9217,15 @@ $('btnSyncSF').onclick = async () => {
             saveState();
             renderTabs();
             renderLogs();
-            toast(`Synced Case ${data.caseNumber || 'data'}`, 's');
+            const posts = data.feedItemCount ? ` (${data.feedItemCount} feed posts)` : '';
+            toast(`Synced Case ${data.caseNumber || 'data'}${posts}`, 's');
+            // If the feed loader hit a cap rather than genuinely running out of
+            // posts, say so — a silently-truncated chain would quietly skew every
+            // downstream summary, and the fix is simply to sync again.
+            const cutShort = ['time-budget', 'exhausted-rounds'].includes(data.feedLoad?.reason);
+            if (cutShort) {
+                toast('Feed was still loading when the sync timed out — click Sync again for the rest of the chain', 'w');
+            }
             updateAllValidations();
         }
     } catch (err) { toast('Sync failed', 'e'); }
