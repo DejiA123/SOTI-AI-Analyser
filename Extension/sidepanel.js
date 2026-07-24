@@ -3918,6 +3918,20 @@ function buildCaseContextForPrompt(ci, small) {
 // correspondence — the model then invented a timeline for messages it never saw. These
 // helpers strip ONLY provable boilerplate so the ENTIRE chain (every actual message) fits.
 
+// The header that introduces a quoted/forwarded Outlook-style message. It MUST match whether
+// "From:" and "Sent:" sit on ONE line (some scrapers flatten the header) OR — the common real
+// case — on TWO consecutive lines:
+//     From: George Lam <George.Lam@soti.net>
+//     Sent: Thursday, March 6, 2025 10:19 AM
+// An earlier pattern used "From:\s?[^\n]{0,160}?\bSent:", but [^\n] can never cross the line
+// break between the From: and Sent: lines, so on a normal pasted/synced thread NOTHING matched:
+// the whole chain collapsed into a single un-split blob and every quoted email (including the
+// ORIGINAL, oldest message) was invisible to the chronology / lifecycle / message enumeration.
+// Fix: bound the From-line run with [^\n] but then allow ONE optional line break before "Sent:".
+// Kept as a source string so it can be embedded in both lookahead (split) and search (tail-cut)
+// regexes without drift. Case-insensitive; callers add the 'i' flag.
+const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\t]';
+
 // Name variants used to find the sender's own signature block ("Donaldson, Geoffrey" signs
 // as "Geoffrey Donaldson"). Short names are excluded — too likely to appear in real prose.
 function senderNameVariants(sender) {
@@ -3934,8 +3948,19 @@ function senderNameVariants(sender) {
 // message that already exists elsewhere in the chain, so cutting it loses nothing.
 function cleanEmailBody(body, sender, cutReplyTail) {
     let t = String(body || '');
+    // A pasted/forwarded Outlook message begins with its OWN routing header
+    // (From:/Sent:/To:/Cc:/Subject: lines). That header is pure metadata — the sender and
+    // date are already captured on the entry — so leaving it in makes every gist/snippet
+    // read "From:… Sent:… To:…" instead of the actual message. Strip the leading header block
+    // only when it is unmistakably one: a From: line followed by header-keyword lines that
+    // include BOTH Sent: and Subject: (so a body that merely opens with the word "From:" is
+    // never truncated). The message text is whatever follows the Subject: line.
+    const leadHdr = t.match(/^[ \t]*From:[^\n]*(?:\r?\n[ \t]*(?:Sent|To|Cc|Bcc|Subject|Importance|Sensitivity|Reply-To|Date):[^\n]*)+\r?\n?/i);
+    if (leadHdr && /\r?\n[ \t]*Sent:/i.test(leadHdr[0]) && /\r?\n?[ \t]*Subject:/i.test(leadHdr[0])) {
+        t = t.slice(leadHdr[0].length);
+    }
     if (cutReplyTail) {
-        const tail = t.search(/(?:^|[\n\s])(?:-{3,}\s*Original Message\s*-{3,}|From:\s?[^\n]{0,160}?\bSent:\s)/i);
+        const tail = t.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_SRC + ')', 'i'));
         if (tail > 10) t = t.slice(0, tail); // only cut when a real body precedes the tail
     }
     // Proofpoint / mail-scanner banners and external-sender warnings
@@ -3991,11 +4016,14 @@ function parseEmailChainEntries(raw) {
     if (parts.length === 1 && !HEADER_RE.test(parts[0])) {
         // Single pasted blob: split into messages at quoted-reply headers (Outlook style,
         // newest first — same order as the scraper) instead of treating them as one body.
-        const pieces = parts[0].split(/(?=(?:^|\n)From:\s?[^\n]{0,160}?\bSent:\s)/).map(p => p.trim()).filter(Boolean);
+        const splitRe = new RegExp('(?=(?:^|\\n)[ \\t]*' + REPLY_HEADER_SRC + ')', 'i');
+        const pieces = parts[0].split(splitRe).map(p => p.trim()).filter(Boolean);
         if (pieces.length > 1) {
             return pieces.map(p => {
-                const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/);
-                const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Subject:|\n|$)/);
+                // Sender/date sit on their own lines in the two-line header form; both patterns
+                // stop at the newline, so they read the correct field without bleeding across.
+                const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/i);
+                const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Cc:|\s+Subject:|\n|$)/i);
                 return { time: sm ? sm[1].trim() : '', type: '', sender: m ? m[1].trim() : '', body: p };
             });
         }
@@ -4043,8 +4071,12 @@ function buildEmailChainSection(ci, small, capOverride) {
         const flat = body.replace(/\s+/g, ' ').trim();
         if (flat.length <= max) return flat;
         const head = flat.slice(0, max);
+        // Require the multi-word labels to keep their internal space ("Serial Number", not
+        // "SerialNumber"). Otherwise a JSON FIELD NAME like "serialNumber": "..." in a pasted
+        // API response matched as an identifier and leaked "[also: serialNumber]" (the key
+        // itself, not a value) into the gist — which the model then parroted into its summary.
         const keep = ((flat.match(/https?:\/\/[^\s<>()]+/g) || []).concat(
-            flat.match(/\b(?:Registration Code|Instance ID|Serial(?:\s+Numbers?)?|Case(?:\s+numbers?)?|Error(?:\s+codes?)?)\s*:?\s*[A-Za-z0-9][A-Za-z0-9-]{3,}/gi) || []
+            flat.match(/\b(?:Registration Code|Instance ID|Serial\s+Numbers?|Case\s+numbers?|Error\s+codes?)\s*:?\s*[A-Za-z0-9][A-Za-z0-9-]{3,}/gi) || []
         )).filter(k => !head.includes(k));
         return head + '…' + (keep.length ? ` [also: ${keep.slice(0, 3).join(' | ')}]` : '');
     };
@@ -4105,7 +4137,7 @@ function getCleanChainEntries(raw) {
     // so the marker means "this sender is support", not "this sender quoted support".
     const cutTail = (body) => {
         const s = String(body || '');
-        const idx = s.search(/(?:^|[\n\s])(?:-{3,}\s*Original Message\s*-{3,}|From:\s?[^\n]{0,160}?\bSent:\s)/i);
+        const idx = s.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_SRC + ')', 'i'));
         return idx > 10 ? s.slice(0, idx) : s;
     };
     return parseEmailChainEntries(raw)
