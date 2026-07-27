@@ -127,6 +127,11 @@ function md(t) {
         .replace(/([a-zA-Z:).*\"])\s*(\d+\.\s+[A-Z])/g, (match, p1, p2, offset, string) => {
             let before = string.slice(Math.max(0, offset - 15), offset);
             if (/(Step|Method)\s*$/i.test(before)) return match;
+            // "...regression in MobiControl 2026.1.1. Checking with dev" — the trailing "1." is
+            // the last octet of a dotted VERSION NUMBER ending a sentence, not the start of a
+            // numbered list. Splitting there turned the rest of the sentence into an <ol> item
+            // and swallowed the bullet that followed, tearing chain-timeline entries in half.
+            if (p1 === '.' && /\d$/.test(before)) return match;
             return p1 + '\n\n' + p2;
         })
         
@@ -4823,6 +4828,89 @@ function splitChainNarrative(text) {
     return { overview: stripOverview(t), status: '' };
 }
 
+// ---- QA review checkpoints (the "(QA)" button only) ----
+// Everything below is MEASURED from the entry timestamps and roles in JavaScript — turnaround
+// times, unanswered messages, who owes the next reply. None of it is generated, so a QA
+// reviewer can quote these figures straight into a case audit without verifying them against
+// the chain by hand. Out-of-office auto-replies are never counted as a reply: an OOO is
+// exactly the case where the clock kept running.
+function buildChainQAChecks(rows, facts, lc) {
+    const DAY = 864e5;
+    const oldestFirst = rows.slice().reverse();
+    const dayGap = (a, b) => Math.max(0, Math.round((b - a) / DAY));
+
+    // Walk forward pairing each customer message with the FIRST SOTI Support reply that
+    // follows it. A customer who chases before any reply does not open a second gap — the
+    // wait is still measured from their first unanswered message, which is what QA cares about.
+    const gaps = [];
+    let waiting = null;             // the oldest customer message still unanswered
+    let customerMsgs = 0;
+    for (const r of oldestFirst) {
+        if (typeof r.entry.ts !== 'number') continue;
+        if (r.role === 'customer') {
+            customerMsgs++;
+            if (!waiting) waiting = r;
+        } else if (r.role === 'SOTI Support' && waiting) {
+            gaps.push({ days: dayGap(waiting.entry.ts, r.entry.ts), asked: waiting, answered: r });
+            waiting = null;
+        }
+    }
+
+    const sorted = gaps.map(g => g.days).sort((a, b) => a - b);
+    const median = sorted.length
+        ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2]
+            : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2))
+        : null;
+    const worst = gaps.slice().sort((a, b) => b.days - a.days).filter(g => g.days >= 3).slice(0, 3);
+    const newestTs = typeof facts.newest.ts === 'number' ? facts.newest.ts : null;
+    const sinceLast = newestTs === null ? null : dayGap(newestTs, Date.now());
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+    const out = [];
+    out.push('## QA review checkpoints\n');
+    out.push('*Measured directly from the chain\'s timestamps and message roles — every figure below is extracted, not written by the model.*\n');
+
+    // Count from facts so this never contradicts the header above it; anything the chain gives
+    // no parsable date for cannot be timed, and is called out rather than silently dropped.
+    const undated = facts.counts.customer - customerMsgs;
+    if (facts.counts.customer) {
+        out.push(`- **Support responsiveness:** ${plural(facts.counts.customer, 'customer message')} in the chain, ${plural(gaps.length, 'measurable customer→SOTI turnaround')}`
+            + (median !== null ? ` — median **${plural(median, 'day')}**, longest **${plural(sorted[sorted.length - 1], 'day')}**.` : '.')
+            + (undated > 0 ? ` (${undated} carr${undated === 1 ? 'ies' : 'y'} no parsable date and ${undated === 1 ? 'is' : 'are'} excluded from these figures.)` : ''));
+    }
+    if (worst.length) {
+        out.push('- **Longest waits for a SOTI reply:** ' + worst.map(g =>
+            `**${plural(g.days, 'day')}** (${g.asked.sender} on ${formatChainDate(g.asked.entry, { shortMonth: true, noTime: true })} → replied ${formatChainDate(g.answered.entry, { shortMonth: true, noTime: true })})`
+        ).join('; ') + '.');
+    } else if (gaps.length) {
+        out.push('- **Longest waits for a SOTI reply:** none over 3 days — every customer message was answered promptly.');
+    }
+    if (waiting) {
+        const open = typeof waiting.entry.ts === 'number' ? dayGap(waiting.entry.ts, Date.now()) : null;
+        out.push(`- **Unanswered:** ${waiting.sender}'s message of ${formatChainDate(waiting.entry, { shortMonth: true, noTime: true })} has no SOTI Support reply in the chain`
+            + (open !== null ? ` — **${plural(open, 'day')}** and counting.` : '.'));
+    }
+    out.push(`- **Ball is with:** ${facts.newest.role === 'customer' ? '**SOTI Support** — the newest entry is from the customer'
+        : facts.newest.role === 'SOTI Support' ? '**the customer** — the newest entry is from SOTI Support'
+        : facts.newest.role ? `not determinable from the newest entry — it is ${/^[aeiou]/i.test(facts.newest.role) ? 'an' : 'a'} ${facts.newest.role}, not correspondence`
+        : 'unclear — the newest entry is from a sender with no identifiable role'}`
+        + ` (${facts.newest.sender || 'unknown sender'}, ${formatChainDate(facts.newest, { shortMonth: true, noTime: true }) || facts.newest.time || 'undated'}).`);
+    if (sinceLast !== null) {
+        out.push(`- **Silence since the last message:** ${plural(sinceLast, 'day')}.`);
+    }
+    if (facts.counts.ooo) {
+        out.push(`- **Out-of-office auto-replies in the chain:** ${facts.counts.ooo} — these are excluded from the turnaround figures above.`);
+    }
+    out.push(`- **Case activity recorded:** ${plural(facts.counts.call, 'phone call log')}, ${plural(facts.counts.internal, 'internal note')}`
+        + (facts.jiras.length ? `, development ticket${facts.jiras.length === 1 ? '' : 's'} ${facts.jiras.join(', ')}.` : ', no development ticket referenced.'));
+    if (lc.state === 'closure') {
+        out.push(`- **Closure evidence:** the chain shows the case resolved / in closure${lc.customerConfirmed ? ', with the customer confirming it can be closed' : ', but WITHOUT an explicit customer confirmation'}${lc.supportClosingSent ? ' and the closure email sent' : ''}.`);
+    } else if (lc.state === 'active') {
+        out.push('- **Closure evidence:** none — no confirmed resolution and no closure agreement appears anywhere in the correspondence.');
+    }
+    return out.join('\n');
+}
+
 // The deterministic backbone of the report: counts, span, participants, referenced tickets.
 function buildChainFacts(entries, raw, ci, lc) {
     const n = entries.length;
@@ -4852,6 +4940,9 @@ function buildChainFacts(entries, raw, ci, lc) {
 
 // Build the whole answer. Deterministic everywhere it matters; the model only fills in prose
 // and compresses the long messages. onProgress(markdown) streams partial output to the UI.
+// opts.qa — the "Email Chain In-depth Analysis (QA)" button: same report, plus the measured
+// QA review checkpoints section. A typed "summarise the email chain" leaves it off and gets
+// exactly the output it always did.
 async function buildFullChainSummary(ci, opts = {}) {
     const raw = ((ci && ci.email_chain) || '').trim();
     if (!raw) return 'There is no email chain synced for this case yet — sync it from Salesforce (or paste it into Case Info) and ask again.';
@@ -4985,7 +5076,7 @@ async function buildFullChainSummary(ci, opts = {}) {
 
     // ---- assemble ----
     const bits = [];
-    bits.push(`# Email chain summary${(ci && ci.case_number) ? ` — Case ${ci.case_number}` : ''}`);
+    bits.push(`# ${opts.qa ? 'Email chain in-depth analysis (QA)' : 'Email chain summary'}${(ci && ci.case_number) ? ` — Case ${ci.case_number}` : ''}`);
     const stat = [
         `**${facts.n} message${facts.n === 1 ? '' : 's'}**`,
         facts.from && facts.to ? (facts.from === facts.to ? facts.from : `${facts.from} → ${facts.to}`) : '',
@@ -5008,6 +5099,13 @@ async function buildFullChainSummary(ci, opts = {}) {
     if (people) bits.push(people);
     if (facts.jiras.length) bits.push(`**Development tickets referenced:** ${facts.jiras.join(', ')}`);
     if (facts.cases.length) bits.push(`**Other SOTI cases referenced:** ${facts.cases.join(', ')}`);
+
+    // QA first, above the timeline: a reviewer auditing the case wants the measured figures
+    // without scrolling past 100+ timeline entries to reach them.
+    if (opts.qa) {
+        bits.push('');
+        bits.push(buildChainQAChecks(rows, facts, lc));
+    }
 
     if (narrative.overview) {
         bits.push('\n## Overview\n');
@@ -8971,6 +9069,10 @@ ${body}
 //     text (quick actions on open cases: their message is an instruction block that would
 //     poison the research keyword scoring). Ignored when skipResearch is set.
 //   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
+//   forceChainDigest — serve this turn from buildFullChainSummary (the whole-chain map-reduce
+//     digest) instead of a single model call, without depending on isEmailChainSummaryRequest
+//     matching the wording. Used by the Email Chain In-depth Analysis (QA) button.
+//   chainQA — with forceChainDigest, append the measured QA review checkpoints section.
 async function send(overrideText = null, silent = false, opts = {}) {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
@@ -9098,7 +9200,10 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // [CONVERSATION SO FAR] digest — never a log report, never a knowledge-base research run.
     const metaConversationTurn = !opts.freshContext && !silent && isConversationMetaQuestion(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = !opts.forceConversational && !metaConversationTurn && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    // opts.forceChainDigest (the Email Chain In-depth Analysis (QA) button) is exempt: its
+    // instruction text says "analysis", which with logs attached would otherwise route the
+    // turn into log forensics instead of the chain digest the button exists to run.
+    const analysisRun = !opts.forceConversational && !opts.forceChainDigest && !metaConversationTurn && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
@@ -9125,10 +9230,13 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // by echoing the fragments back. This turn is served by buildFullChainSummary instead —
     // deterministic dates/order/authors, the model used only to compress and to write prose.
     // Decided BEFORE the research block so it never pays for a Pulse/Docs lookup it won't use.
+    // opts.forceChainDigest — the (QA) button asks for this path by name rather than relying on
+    // the phrasing detector, and accepts a chain of ANY length: the 3-entry floor exists only so
+    // a passing remark in normal chat doesn't hijack a short chain into a full report.
     const chainDigestTurn = !opts.forceConversational && !analysisRun && !metaConversationTurn
-        && !isGreeting && isEmailChainSummaryRequest(txt)
+        && !isGreeting && (opts.forceChainDigest || isEmailChainSummaryRequest(txt))
         && (() => {
-            try { return getCleanChainEntries((ci.email_chain || '').trim()).length >= 3; }
+            try { return getCleanChainEntries((ci.email_chain || '').trim()).length >= (opts.forceChainDigest ? 1 : 3); }
             catch (e) { return false; }
         })();
 
@@ -9238,6 +9346,7 @@ async function send(overrideText = null, silent = false, opts = {}) {
                 c.msgs.push({ role: 'user', content: txt, hidden: silent });
             }
             const summary = await buildFullChainSummary(ci, {
+                qa: !!opts.chainQA,
                 signal: digestController.signal,
                 onProgress: (partial) => {
                     aib.innerHTML = md(partial);
@@ -10876,13 +10985,60 @@ ${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case fac
     });
 }
 
+// "Email Chain In-depth Analysis (QA)" — the same whole-chain report that a typed
+// "summarise the email chain" produces, on a button, plus the measured QA review checkpoints.
+// It does NOT go through the normal single-call model route: buildFullChainSummary reads EVERY
+// message (map-reduce, many small model calls) and computes the order, dates, authors, roles
+// and counts in JavaScript, so a QA reviewer can trust the timeline as an extract rather than
+// a generation. That is exactly what makes it usable as a case-quality audit.
+async function generateEmailChainQAAnalysis() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const chain = ($('emailChain').value || '').trim();
+    if (!chain) {
+        toast('No email chain yet — sync from Salesforce (Feed tab) or paste the chain into Case Info', 'e');
+        // Open Case Info and put the cursor in the chain box so they can paste straight away.
+        if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
+        $('emailChain').focus();
+        return;
+    }
+    let entryCount = 0;
+    try { entryCount = getCleanChainEntries(chain).length; } catch (e) { entryCount = 0; }
+    if (!entryCount) {
+        toast('The email chain is empty once signatures and disclaimers are stripped — nothing to analyse', 'e');
+        return;
+    }
+
+    // Collapse the Case Info panel so the user lands in the chat and watches the report build
+    // (mirrors Clean Up Meeting Notes / Analyse Now).
+    if ($('bodyL') && $('bodyL').style.display !== 'none') {
+        $('bodyL').style.display = 'none';
+        $('iconL').textContent = '▶';
+        $('panelL').classList.add('collapsed');
+    }
+
+    // The text is what lands in the chat history for this turn, so it reads as the question a
+    // QA reviewer would have asked. The routing itself comes from forceChainDigest, not this.
+    const ask = `Give me a full in-depth QA analysis of this case's email chain — every message in chronological order with its exact date and author, the overview, where the case stands now, and the QA review checkpoints (${entryCount} message${entryCount === 1 ? '' : 's'} in the chain).`;
+
+    await runQuickAIAction('Reading the email chain...', 'Email chain analysis ready', ask, {
+        forceChainDigest: true,
+        chainQA: true,
+        skipResearch: true,
+        copyKind: 'summary'
+    });
+}
+
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 
 // --- WELCOME CARD SHORTCUTS ---
 // The cards on the welcome screen are real one-click AI actions, not decoration:
 // 📋 Case Summary + Next Steps, 📧 Draft an email to the customer, 🔧 Fix the customer's
-// issue for me, 📅 30/60/90 Case Analysis, 🧩 Problem & Resolution Summary (Internal),
-// 📦 Export the full session report. They mirror the top Quick Actions panel.
+// issue for me, 📅 30/60/90 Case Analysis, 🔍 Email Chain In-depth Analysis (QA),
+// 🧩 Problem & Resolution Summary (Internal), 📦 Export the full session report.
+// They mirror the top Quick Actions panel.
 {
     const wireCard = (id, fn) => {
         const el = $(id);
@@ -10894,6 +11050,7 @@ $('btnCleanNotes').onclick = cleanUpMeetingNotes;
     wireCard('wCardLogs', draftCustomerEmail);
     wireCard('wCardMissing', fixCustomerIssue);
     wireCard('wCard306090', generate306090Analysis);
+    wireCard('wCardChainQA', generateEmailChainQAAnalysis);
     wireCard('wCardProbRes', generateProblemResolutionSummary);
     wireCard('wCardExport', () => exportSession());
 }
@@ -10934,6 +11091,7 @@ if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
 if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
 if ($('qaFixIssue')) $('qaFixIssue').onclick = fixCustomerIssue;
 if ($('qa306090')) $('qa306090').onclick = generate306090Analysis;
+if ($('qaChainQA')) $('qaChainQA').onclick = generateEmailChainQAAnalysis;
 if ($('qaProbRes')) $('qaProbRes').onclick = generateProblemResolutionSummary;
 if ($('qaExport')) $('qaExport').onclick = () => exportSession();
 
