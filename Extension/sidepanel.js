@@ -144,10 +144,14 @@ function md(t) {
         // marker pair up with a much later one and bold/italicize entire paragraphs.
         .replace(/\*\*([^\n]+?)\*\*/g, (m, p1) => '<strong>' + p1.trim() + '</strong>')
         .replace(/(^|[\s(])\*([^\s*][^\n*]*?)\*(?=$|[\s).,;:!?])/gm, '$1<em>$2</em>')
-        // Headings consume their trailing newline so no stray <br> opens a gap below them.
-        .replace(/^\s*###\s*(.*)\n?/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>')
-        .replace(/^\s*##\s*(.*)\n?/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>')
-        .replace(/^\s*#\s*(.*)\n?/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>')
+        // Headings KEEP their trailing newline: the list rules below are ^-anchored, so a
+        // heading that swallowed it left the first bullet of the following list without a line
+        // start — it rendered as a literal "- **text**" while every later bullet in the same
+        // list rendered correctly. The newline is stripped again after the <br>/gap conversion
+        // (see the cleanup below), so no stray gap opens under a heading either.
+        .replace(/^[ \t]*###[ \t]*(.*)(\n?)/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>$2')
+        .replace(/^[ \t]*##[ \t]*(.*)(\n?)/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>$2')
+        .replace(/^[ \t]*#[ \t]*(.*)(\n?)/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>$2')
         .replace(/^\s*---\s*$/gm, '<hr style="border:0; border-top:1px solid var(--border); margin:25px 0">')
         // List lines are converted BEFORE newlines become <br> — the old order ran the
         // ^-anchored list rules on a string that no longer had line starts, so only the
@@ -158,6 +162,10 @@ function md(t) {
         .replace(/\n\n/g, '<div style="margin-bottom:18px"></div>')
         .replace(/\n/g, '<br>');
         
+    // A heading's own margin provides the space below it, so drop the line break / paragraph
+    // gap that its (now preserved) trailing newline turned into — otherwise every heading
+    // opens a double gap. Done here, AFTER the list rules have used that newline as an anchor.
+    html = html.replace(/(<\/h[123]>)(?:<br>|<div style="margin-bottom:18px"><\/div>)+/g, '$1');
     // Any ** still present is a stray/unbalanced marker (all real bold pairs were converted
     // above) — showing literal asterisks reads as broken formatting, so drop them.
     html = html.replace(/\*\*/g, '');
@@ -3932,6 +3940,158 @@ function buildCaseContextForPrompt(ci, small) {
 // regexes without drift. Case-insensitive; callers add the 'i' flag.
 const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\t]';
 
+// Support-authored template phrases — customers never write these. Used to tell a SOTI
+// engineer's message from the customer's (lifecycle detection AND the chain digest's role
+// labels), so it lives at module level rather than inside one function.
+const SUPPORT_SIGNATURE_RE = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email/i;
+
+// ---------------------------------------------------------------------------
+// Chain timestamps — putting a scraped feed into TRUE chronological order
+// ---------------------------------------------------------------------------
+// The Salesforce feed is NOT reliably newest-first. Internal notes in particular surface at
+// the position they were last touched, so a real 104-message chain came out of the scraper
+// with (for example) a 12 June note sitting between 21 July and 17 July, and a 20 December
+// note buried in the middle of May. Everything downstream — the "NEWEST/OLDEST" tags in
+// [EMAIL CHAIN], the oldest-first chronology, the lifecycle scan that reads the newest
+// message as "the current state" — assumed the scrape order WAS the chronology, so the model
+// was handed (and faithfully reproduced) a scrambled timeline.
+// Fix: read each entry's own displayed date, sort by it, and only then hand the chain on.
+const CHAIN_MONTHS = {
+    jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+    may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7, sep: 8, sept: 8,
+    september: 8, oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11
+};
+
+// A purely numeric date (11/07/2026) is ambiguous. Resolve the convention from the chain
+// ITSELF: any date whose first component exceeds 12 proves day-first, any whose second
+// component exceeds 12 proves month-first. With no evidence either way, day-first wins —
+// this extension formats and reads dates as en-GB everywhere else.
+function detectChainDateConvention(entries) {
+    let dmy = 0, mdy = 0;
+    for (const e of entries || []) {
+        const m = String((e && e.time) || '').match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
+        if (!m) continue;
+        if (+m[1] > 12 && +m[2] <= 12) dmy++;
+        else if (+m[2] > 12 && +m[1] <= 12) mdy++;
+    }
+    return mdy > dmy ? 'mdy' : 'dmy';
+}
+
+// Parse ONE feed/Outlook timestamp into epoch ms.
+// Returns { ts, confident }: `confident` is false when the string carried no unambiguous
+// date (an ambiguous all-numeric date, or a bare time) — the caller uses that to decide
+// whether the chain is dated well enough to re-sort at all.
+function parseChainTimestamp(raw, opts = {}) {
+    // Narrow/non-breaking spaces come through from Salesforce's formatted dates.
+    const s = String(raw || '').replace(/[   ]/g, ' ').trim();
+    if (!s) return { ts: null, confident: false };
+    const now = (opts.now instanceof Date) ? opts.now : new Date();
+    const monthFirst = opts.convention === 'mdy';
+
+    // Time of day, if the string carries one. Anchored on ":" so it can never eat a date part.
+    let hh = 0, mi = 0, ss = 0;
+    const tm = s.match(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s?m\.?)?/i);
+    if (tm) {
+        hh = +tm[1]; mi = +tm[2]; ss = tm[3] ? +tm[3] : 0;
+        const ap = (tm[4] || '').toLowerCase().replace(/[.\s]/g, '');
+        if (ap === 'pm' && hh < 12) hh += 12;
+        if (ap === 'am' && hh === 12) hh = 0;
+        if (hh > 23 || mi > 59) { hh = 0; mi = 0; ss = 0; }
+    }
+    const at = (y, mo, d) => {
+        if (mo < 0 || mo > 11 || d < 1 || d > 31 || y < 1990 || y > 2200) return null;
+        const dt = new Date(y, mo, d, hh, mi, ss);
+        // Rejects impossible dates (31 February rolls over to March) rather than shifting them.
+        return (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) ? dt.getTime() : null;
+    };
+    const ok = (ts, confident) => ts === null ? { ts: null, confident: false } : { ts, confident };
+
+    // ISO — 2026-07-24
+    let m = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+    if (m) return ok(at(+m[1], +m[2] - 1, +m[3]), true);
+
+    // "24 July 2026" / "24 Jul 2026" / "24th July, 2026"  (Salesforce en-GB feed format)
+    m = s.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})\b/);
+    if (m && CHAIN_MONTHS[m[2].toLowerCase()] !== undefined) {
+        return ok(at(+m[3], CHAIN_MONTHS[m[2].toLowerCase()], +m[1]), true);
+    }
+
+    // "July 24, 2026" / "Jul 24 2026" / Outlook's "Thursday, March 6, 2025 10:19 AM"
+    m = s.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/);
+    if (m && CHAIN_MONTHS[m[1].toLowerCase()] !== undefined) {
+        return ok(at(+m[3], CHAIN_MONTHS[m[1].toLowerCase()], +m[2]), true);
+    }
+
+    // All-numeric — 24/07/2026, 7.24.2026, 24-07-26
+    m = s.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
+    if (m) {
+        const a = +m[1], b = +m[2];
+        let y = +m[3];
+        if (y < 100) y += (y >= 70 ? 1900 : 2000);
+        if (a > 12 && b <= 12) return ok(at(y, b - 1, a), true);   // day-first, proven
+        if (b > 12 && a <= 12) return ok(at(y, a - 1, b), true);   // month-first, proven
+        if (a > 12 || b > 12) return { ts: null, confident: false };
+        return ok(monthFirst ? at(y, a - 1, b) : at(y, b - 1, a), false); // ambiguous
+    }
+
+    // Relative labels the Chatter feed uses for very recent posts.
+    const dayAt = (d) => at(d.getFullYear(), d.getMonth(), d.getDate());
+    if (/\btoday\b/i.test(s)) return ok(dayAt(now), true);
+    if (/\byesterday\b/i.test(s)) return ok(dayAt(new Date(now.getTime() - 864e5)), true);
+    m = s.match(/\b(\d{1,3})\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?)\s*ago\b/i);
+    if (m) {
+        const unit = m[2].toLowerCase();
+        const ms = /^m/.test(unit) ? 6e4 : /^h/.test(unit) ? 36e5 : /^d/.test(unit) ? 864e5 : 6048e5;
+        return { ts: now.getTime() - (+m[1] * ms), confident: true };
+    }
+    return { ts: null, confident: false };
+}
+
+// Sort parsed chain entries NEWEST FIRST by their own displayed dates, and stamp each with
+// the `ts` it was sorted by. Deliberately conservative: a chain whose dates mostly failed to
+// parse (an unfamiliar locale, a fallback scrape with no headers) keeps the scrape order
+// EXACTLY as before, so this can only ever fix ordering, never scramble it.
+function orderChainEntriesNewestFirst(entries, opts = {}) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (list.length < 2) return list.map(e => ({ ...e, ts: parseChainTimestamp(e && e.time).ts }));
+    const now = (opts.now instanceof Date) ? opts.now : new Date();
+    const convention = detectChainDateConvention(list);
+    const parsed = list.map((e, i) => {
+        const p = parseChainTimestamp(e.time, { now, convention });
+        return { ...e, ts: p.ts, tsConfident: p.confident, _feedIdx: i };
+    });
+    const confident = parsed.filter(e => e.ts !== null && e.tsConfident).length;
+    if (confident < 2 || confident / parsed.length < 0.6) {
+        return parsed.map(({ _feedIdx, ...e }) => e); // not dated well enough to trust — leave as scraped
+    }
+    // An undated entry inherits the timestamp of its nearest dated neighbour (looking back
+    // through the feed first, then forward). Combined with the stable sort below, that keeps
+    // it exactly where the feed put it instead of flinging it to one end of the chain.
+    let carry = null;
+    for (const e of parsed) { if (e.ts === null) e.ts = carry; else carry = e.ts; }
+    carry = null;
+    for (let i = parsed.length - 1; i >= 0; i--) {
+        if (parsed[i].ts === null) parsed[i].ts = carry; else carry = parsed[i].ts;
+    }
+    return parsed
+        .slice()
+        .sort((a, b) => (b.ts - a.ts) || (a._feedIdx - b._feedIdx)) // ties keep feed order
+        .map(({ _feedIdx, ...e }) => e);
+}
+
+// Human date for prompts and the digest, from the epoch stamp we sorted by. Falls back to the
+// raw feed string so an unparsed entry still shows the date the engineer sees in Salesforce.
+function formatChainDate(e, opts = {}) {
+    const ts = e && typeof e.ts === 'number' ? e.ts : null;
+    if (ts === null) return String((e && e.time) || '').trim();
+    const d = new Date(ts);
+    const month = opts.shortMonth
+        ? d.toLocaleString('en-GB', { month: 'short' })
+        : d.toLocaleString('en-GB', { month: 'long' });
+    const time = opts.noTime ? '' : `, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return `${d.getDate()} ${month} ${d.getFullYear()}${time}`;
+}
+
 // Name variants used to find the sender's own signature block ("Donaldson, Geoffrey" signs
 // as "Geoffrey Donaldson"). Short names are excluded — too likely to appear in real prose.
 function senderNameVariants(sender) {
@@ -4006,12 +4166,16 @@ function cleanEmailBody(body, sender, cutReplyTail) {
     return t.trim();
 }
 
-// Split a raw chain into ordered entries {header, sender, body}. Handles the scraper format
+// Split a raw chain into entries {time, type, sender, body, ts}. Handles the scraper format
 // ("[time] [TYPE] Sender:\nbody" joined by ==== separators), the fallback scrape (bodies
 // only), and a manually pasted Outlook-style thread (split at each "From:… Sent:…" header,
 // so older quoted messages become entries instead of being cut away).
-function parseEmailChainEntries(raw) {
+// The result is returned in TRUE chronological order (newest first) — see
+// orderChainEntriesNewestFirst — because the Salesforce feed order is not reliably
+// chronological and every caller here treats position as chronology.
+function parseEmailChainEntries(raw, opts = {}) {
     const HEADER_RE = /^\s*\[([^\][]{4,80})\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?([^:\n]{1,80}):\s?/;
+    const order = (list) => opts.keepFeedOrder ? list : orderChainEntriesNewestFirst(list, opts);
     const parts = raw.split(/\n?={20,}\n?/).map(p => p.trim()).filter(Boolean);
     if (parts.length === 1 && !HEADER_RE.test(parts[0])) {
         // Single pasted blob: split into messages at quoted-reply headers (Outlook style,
@@ -4019,16 +4183,16 @@ function parseEmailChainEntries(raw) {
         const splitRe = new RegExp('(?=(?:^|\\n)[ \\t]*' + REPLY_HEADER_SRC + ')', 'i');
         const pieces = parts[0].split(splitRe).map(p => p.trim()).filter(Boolean);
         if (pieces.length > 1) {
-            return pieces.map(p => {
+            return order(pieces.map(p => {
                 // Sender/date sit on their own lines in the two-line header form; both patterns
                 // stop at the newline, so they read the correct field without bleeding across.
                 const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/i);
                 const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Cc:|\s+Subject:|\n|$)/i);
                 return { time: sm ? sm[1].trim() : '', type: '', sender: m ? m[1].trim() : '', body: p };
-            });
+            }));
         }
     }
-    return parts.map(p => {
+    return order(parts.map(p => {
         const m = p.match(HEADER_RE);
         if (!m) return { time: '', type: '', sender: '', body: p };
         return {
@@ -4037,7 +4201,7 @@ function parseEmailChainEntries(raw) {
             sender: m[3].trim(),
             body: p.slice(m[0].length)
         };
-    });
+    }));
 }
 
 // The email correspondence is the LIVE state of the case and must drive "what's next" /
@@ -4081,26 +4245,65 @@ function buildEmailChainSection(ci, small, capOverride) {
         return head + '…' + (keep.length ? ` [also: ${keep.slice(0, 3).join(' | ')}]` : '');
     };
     const lines = entries.map((e, i) => `${marker(e, i)}\n${e.body}`);
-    let total = lines.reduce((a, l) => a + l.length + 2, 0);
-    // Compact OLDEST-first (keep the two newest whole) until the chain fits the cap.
-    for (let i = n - 1; i >= 2 && total > cap; i--) {
-        const compact = `${marker(entries[i], i)} ${gistOf(entries[i].body, 160)}`;
-        // The preserved-references append can make a "gist" LONGER than the original
-        // (short body, long URL) — only take the swap when it actually shrinks the line.
-        if (compact.length >= lines[i].length) continue;
-        total -= (lines[i].length - compact.length);
-        lines[i] = compact;
+    const total = lines.reduce((a, l) => a + l.length + 2, 0);
+    let chain;
+    if (total <= cap) {
+        chain = lines.join('\n\n');
+    } else {
+        // COVERAGE FIRST. The old code compacted the oldest messages to 160-char gists and then
+        // hard-CUT whatever still didn't fit, so on a long chain the older half of the case
+        // simply vanished mid-sentence and the model invented the rest. Instead: give EVERY
+        // message a dated one-line stub as the floor, then spend whatever budget is left
+        // upgrading the NEWEST messages back to their full text.
+        const MIN_GIST = 90;
+        const stubs = entries.map((e, i) => `${marker(e, i)} ${gistOf(e.body, MIN_GIST)}`);
+        const floor = stubs.reduce((a, l) => a + l.length + 2, 0);
+        if (floor <= cap) {
+            const out = stubs.slice();
+            let used = floor;
+            for (let i = 0; i < n; i++) {
+                const grow = lines[i].length - stubs[i].length;
+                if (grow <= 0) continue;
+                if (used + grow > cap) {
+                    // Boundary message: take a partial upgrade with whatever room is left.
+                    const room = cap - used - 40;
+                    if (room > 200) {
+                        const bigger = `${marker(entries[i], i)} ${gistOf(entries[i].body, MIN_GIST + room)}`;
+                        if (bigger.length > stubs[i].length && used + (bigger.length - stubs[i].length) <= cap) {
+                            used += bigger.length - stubs[i].length;
+                            out[i] = bigger;
+                        }
+                    }
+                    break;
+                }
+                used += grow;
+                out[i] = lines[i];
+            }
+            chain = out.join('\n\n');
+        } else {
+            // Even one stub per message overflows the cap. Keep an unbroken run of the NEWEST
+            // messages (the current state) AND of the OLDEST ones (how the case began), and name
+            // the dated range left out in between — so the cut can never be mistaken for the
+            // start or the end of the case.
+            const budget = Math.max(0, cap - 300); // room for the elision note
+            const newBudget = Math.floor(budget * 0.6);
+            const keptNew = [], keptOld = [];
+            let i = 0, j = n - 1, usedN = 0, usedO = 0;
+            while (i <= j && usedN + stubs[i].length + 2 <= newBudget) { keptNew.push(i); usedN += stubs[i].length + 2; i++; }
+            while (j >= i && usedO + stubs[j].length + 2 <= budget - usedN) { keptOld.unshift(j); usedO += stubs[j].length + 2; j--; }
+            const omitted = j - i + 1;
+            const note = omitted > 0
+                ? `…[${omitted} message${omitted === 1 ? '' : 's'} sent between ${formatChainDate(entries[j], { noTime: true }) || 'earlier'} and ${formatChainDate(entries[i], { noTime: true }) || 'later'} are omitted HERE, in the middle of the chain, to fit the context window. The case did NOT start or end at this gap — the oldest and newest messages are both shown.]`
+                : '';
+            chain = [...keptNew.map(k => stubs[k]), note, ...keptOld.map(k => stubs[k])].filter(Boolean).join('\n\n');
+        }
     }
-    let chain = lines.join('\n\n');
-    if (chain.length > cap) {
-        // Even when the cap forces a cut, the model is told exactly how many older messages
-        // were dropped and where the case began — it never mistakes the cut for the start.
-        const oldest = entries[n - 1];
-        const noteFor = (kept) => `\n\n…[context cap reached — the ${kept} NEWEST messages are shown above; ${n - kept} older ones are omitted. The case began with Message ${n}${oldest.time ? ` sent ${oldest.time}` : ''}${oldest.sender ? ` from ${oldest.sender}` : ''}.]`;
-        const body = chain.slice(0, Math.max(0, cap - noteFor(n).length - 8)).trimEnd();
-        chain = body + noteFor((body.match(/(?:^|\n)Message \d+/g) || []).length);
-    }
-    return `[EMAIL CHAIN — the live correspondence BETWEEN THE CUSTOMER AND SOTI SUPPORT for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. These are the CUSTOMER's emails and SOTI Support's replies — NONE of them were written by the person you are chatting with (the SOTI support agent handling this case); they are case context only. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
+    const span = (() => {
+        const a = formatChainDate(entries[n - 1], { noTime: true });
+        const b = formatChainDate(entries[0], { noTime: true });
+        return (a && b && a !== b) ? ` The case runs from ${a} (oldest) to ${b} (newest).` : '';
+    })();
+    return `[EMAIL CHAIN — the live correspondence BETWEEN THE CUSTOMER AND SOTI SUPPORT for this case: ${n} message${n === 1 ? '' : 's'}, sorted into TRUE chronological order, NEWEST FIRST.${span} These are the CUSTOMER's emails and SOTI Support's replies — NONE of them were written by the person you are chatting with (the SOTI support agent handling this case); they are case context only. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -4154,8 +4357,7 @@ function detectCaseLifecycleState(ci) {
     if (!entries || !entries.length) return res;
 
     const AUTO_REPLY = OOO_AUTO_REPLY_RE;
-    // Support-authored template phrases — customers never write these.
-    const SUPPORT_MARKER = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email/i;
+    const SUPPORT_MARKER = SUPPORT_SIGNATURE_RE; // support-authored template phrases (module level)
     // Customer agreeing the case is done ("you can close the case", "issue is resolved", …).
     const CUSTOMER_CONSENT = /\byou can (?:go ahead and )?close\b|\bplease (?:go ahead and )?close\b|\b(?:case|it|ticket) can be closed\b|\bok(?:ay)? to close\b|\benough information\b|\bissue (?:is|was|has been)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\bproblem (?:is|was)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\b(?:it'?s|it is|everything is) working now\b|\bno (?:further|more) (?:questions|assistance|help|support|issues)\b/i;
     // Support announcing/confirming closure (closing email, survey notice, 30-day reopen window).
@@ -4310,22 +4512,46 @@ function buildChainChronology(ci, purpose) {
     try { entries = getCleanChainEntries(raw); } catch (e) { return ''; }
     if (!entries || !entries.length) return '';
     const grounding = purpose === 'grounding';
-    const ordered = entries.slice().reverse().slice(0, 24); // OLDEST first
-    const lines = ordered.map((e, i) => {
+    // OLDEST first. The cap used to be a plain slice(0, 24) of the oldest end, which on any
+    // chain longer than 24 messages silently threw away the NEWEST messages and then labelled
+    // the 24th-oldest one "THE NEWEST MESSAGE" — so the model reported a months-old state as
+    // the current one. Keep both ends instead, and say what was left out in between.
+    const all = entries.slice().reverse();
+    // 26 keeps this scaffold at roughly the size it was when it (wrongly) showed only the
+    // oldest 24 — it is injected into the small-model quick-action prompt, where every
+    // kilobyte competes with the case data, so covering both ends must not cost extra budget.
+    const MAX_LINES = 26;
+    let ordered = all, elidedAfter = -1, elidedCount = 0;
+    if (all.length > MAX_LINES) {
+        const oldKeep = Math.floor(MAX_LINES * 0.45); // how the case began
+        const newKeep = MAX_LINES - oldKeep;          // where it stands now
+        ordered = all.slice(0, oldKeep).concat(all.slice(all.length - newKeep));
+        elidedAfter = oldKeep - 1;
+        elidedCount = all.length - MAX_LINES;
+    }
+    const lines = [];
+    ordered.forEach((e, i) => {
         const isNewest = i === ordered.length - 1;
         // The NEWEST message defines the current status — give it a longer gist so decisive
-        // tail content (e.g. "refer to SOTI support case C01641726") is never cut away.
-        const gist = e.body.replace(/\s+/g, ' ').trim().slice(0, isNewest ? 260 : 110);
+        // tail content (e.g. "refer to SOTI support case C01641726") is never cut away. The
+        // "…" is appended only when text was ACTUALLY cut: on a short entry ("Case created")
+        // the old unconditional ellipsis implied missing content that was never there.
+        const g = chainOneLine(e.body, isNewest ? 260 : 110);
         const tags = [];
         if (/\bINTERNAL\b/i.test(e.type || '')) tags.push('INTERNAL note');
         if (/\bCALL\b/i.test(e.type || '')) tags.push('phone CALL LOG — a phone call, not an email');
         if (OOO_AUTO_REPLY_RE.test(e.body)) tags.push('out-of-office auto-reply');
-        return `- ${e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${gist}…"`;
+        lines.push(`- ${formatChainDate(e) || e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${g.text}${g.truncated ? '…' : ''}"`);
+        if (i === elidedAfter && elidedCount > 0) {
+            lines.push(`- …[${elidedCount} further message${elidedCount === 1 ? '' : 's'} between ${formatChainDate(all[elidedAfter], { noTime: true }) || 'here'} and ${formatChainDate(ordered[elidedAfter + 1], { noTime: true }) || 'the next line'} — the case continued through them; they are omitted here only to save space]`);
+        }
     });
     const newest = ordered[ordered.length - 1];
+    // Same date rendering as the lines above, so the model can match this pointer to its line.
+    const newestWhen = formatChainDate(newest) || newest.time || '';
     const newestLine = grounding
-        ? `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the current state of the case comes from THIS message; attribute it to THIS author, not an older one.`
-        : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
+        ? `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the current state of the case comes from THIS message; attribute it to THIS author, not an older one.`
+        : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
     // Other SOTI case numbers referenced inside the emails are gold for troubleshooting
     // ("this happened before and was resolved in case X") — extract them deterministically
     // so they can never be lost to gisting/truncation. The CURRENT case's own number (from
@@ -4348,6 +4574,475 @@ function buildChainChronology(ci, purpose) {
         ? `[CASE HISTORY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Use this ONLY to know what troubleshooting/actions were already done and what the current state is — do NOT reproduce it as a dated timeline in your answer. Entries tagged [phone CALL LOG] are phone calls and [INTERNAL note] are internal notes: treat BOTH as troubleshooting actions/findings that belong under "Troubleshoots done", never as customer emails. Entries tagged [out-of-office auto-reply] carry no case signal — ignore them.]`
         : `[EMAIL CHRONOLOGY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Base the Case Timeline section on THIS list (summarize each event in your own words, using the full emails for detail). The FIRST line below is how the case started. Entries tagged [out-of-office auto-reply] or [INTERNAL note] are NOT substantive case correspondence — never present them as the inquiry, an answer, or a status change. Entries tagged [phone CALL LOG] are phone calls — present them in the timeline as calls, not emails.]`;
     return `${header}\n${lines.join('\n')}${newestLine}${refCasesLine}`;
+}
+
+// ============================ FULL EMAIL-CHAIN DIGEST ============================
+// "Give me a full, detailed, accurate summary of the email chain with an accurate timeline."
+//
+// A single model call CANNOT answer that on a long case. A 104-message chain is ~45K raw
+// characters; a small local model (gemma e2b and friends) gets ~11K characters of prompt in
+// total, so the chain arrives pre-truncated and the model — asked to summarize text it can
+// only partly see — echoes the fragments back verbatim, mid-sentence "…" and all, in whatever
+// order it was handed them.
+//
+// So this path does not ask the model to do the whole job. It splits the work:
+//   • DETERMINISTIC (JavaScript, exact, never wrong): the chronological order, every date,
+//     every author, each message's role (customer / SOTI Support / call log / internal note),
+//     the message counts, the date span, the referenced JIRA + case numbers, and the
+//     one-line entry for every message whose cleaned text is already short enough to quote
+//     in full. These are extracted, not generated, so they cannot be hallucinated.
+//   • THE MODEL: only compresses the messages that are genuinely too long to quote, a small
+//     batch at a time so every batch fits the context window comfortably — then writes the
+//     narrative Overview and Current-status prose from a compact digest of the whole case.
+//
+// The result covers EVERY message in the chain, in true chronological order, at any length.
+
+// Does this turn ask for a summary / timeline of the correspondence itself?
+function isEmailChainSummaryRequest(text) {
+    const t = String(text || '').trim();
+    if (!t || t.length > 600) return false;
+    const wantsDigest = /\b(summar\w+|recap|overview|timeline|chronolog\w+|history|breakdown|rundown|run[- ]down|walk\s+me\s+through|what\s+happened|catch\s+me\s+up)\b/i.test(t);
+    if (!wantsDigest) return false;
+    // ...of the CORRESPONDENCE (not of the logs, not of a document, not of this chat).
+    const aboutChain = /\b(e-?mail\s*chain|email-?chain|chain|thread|correspondence|e-?mails?|conversation\s+with\s+the\s+customer|case\s+history|case\s+timeline)\b/i.test(t);
+    if (!aboutChain) return false;
+    // "summarise the log file" / "recap what you told me" belong to other, existing paths.
+    if (/\b(log|logs|log\s*file|forensic|stack\s*trace|this\s+chat|our\s+chat|your\s+(?:last\s+)?answer|what\s+you\s+(?:said|told))\b/i.test(t)) return false;
+    return true;
+}
+
+// Role of one chain entry, decided the same way the lifecycle detector decides it so the two
+// never disagree. lc is a detectCaseLifecycleState() result (customerSender / agentSender).
+// Names are compared with any trailing company parenthetical removed: the feed writes
+// "Viktor Samsonov (Tech Solutions)" but detectCaseLifecycleState deliberately stores the bare
+// "Viktor Samsonov", so a raw comparison never matched and the CUSTOMER's own emails ended up
+// with no role at all (and were counted as "other" in the digest header).
+function chainEntryRole(e, lc) {
+    const type = (e && e.type) || '';
+    if (/\bCALL\b/i.test(type)) return 'phone call log';
+    if (/\bINTERNAL\b/i.test(type)) return 'internal note';
+    const bare = (s) => String(s || '').replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase();
+    const sender = bare(e && e.sender);
+    if (OOO_AUTO_REPLY_RE.test((e && e.body) || '')) return 'out-of-office auto-reply';
+    if (lc && lc.customerSender && sender && sender === bare(lc.customerSender)) return 'customer';
+    if (lc && lc.agentSender && sender && sender === bare(lc.agentSender)) return 'SOTI Support';
+    if (SUPPORT_SIGNATURE_RE.test((e && e.sigBody) || (e && e.body) || '')) return 'SOTI Support';
+    return '';
+}
+
+// Flatten a cleaned body to one line, cut at a SENTENCE boundary where possible so a timeline
+// entry never ends mid-word (the "…began happening in bulk starting 20 November 2025. …" the
+// old fixed-160-char gist produced is exactly what this avoids). Returns { text, truncated }.
+function chainOneLine(body, max) {
+    const flat = String(body || '').replace(/\s+/g, ' ').trim();
+    if (flat.length <= max) return { text: flat, truncated: false };
+    const head = flat.slice(0, max);
+    // Longest prefix ending in sentence punctuation that is followed by a space or the cut.
+    // "2024.1.2" and "e.g" style dots are not followed by a space, so version numbers survive.
+    const sentence = (head.match(/^[\s\S]*[.!?](?=\s|$)/) || [''])[0];
+    if (sentence.length >= Math.floor(max * 0.4)) return { text: sentence.trim(), truncated: true };
+    const space = head.lastIndexOf(' ');
+    return { text: (space > 0 ? head.slice(0, space) : head).trim(), truncated: true };
+}
+
+// Every message that needs the model, grouped into calls that each fit the context window.
+// Short messages never reach here — their cleaned text IS the timeline line, quoted exactly.
+// maxChars bounds the MESSAGE payload of one call; the ~1.1K instruction preamble and the
+// per-item header/quote marks are accounted for by the +90 below, so the finished prompt for a
+// small model lands around 4–5K characters (~2K tokens) — a fast prefill that leaves the whole
+// output budget free.
+function buildChainDigestBatches(items, opts = {}) {
+    const maxPerBatch = Math.max(1, opts.maxPerBatch || 8);
+    const maxChars = Math.max(600, opts.maxChars || 3000);
+    const batches = [];
+    let cur = [], curChars = 0;
+    for (const it of items) {
+        const cost = it.text.length + 90; // + the "[n] date — sender (role):" line and quote marks
+        if (cur.length && (cur.length >= maxPerBatch || curChars + cost > maxChars)) {
+            batches.push(cur); cur = []; curChars = 0;
+        }
+        cur.push(it); curChars += cost;
+    }
+    if (cur.length) batches.push(cur);
+    return batches;
+}
+
+// Parse "[3] the model's one-liner" back into a map of index → line. Tolerant of the shapes a
+// small model actually emits ("3.", "3)", "**[3]**", a stray bullet) and of extra prose lines,
+// which are ignored rather than allowed to shift every later message onto the wrong date.
+function parseChainDigestLines(out) {
+    const map = new Map();
+    for (const rawLine of String(out || '').split('\n')) {
+        const m = rawLine.trim().match(/^[-*\s]*(?:\*\*)?\[?(\d{1,3})\]?(?:\*\*)?\s*[.):\-–—]?\s+(.*)$/);
+        if (!m) continue;
+        let text = m[2].replace(/^\**\s*/, '').replace(/\s*\**$/, '').trim();
+        text = text.replace(/^["'“”]+|["'“”]+$/g, '').trim();
+        if (text.length < 3) continue;
+        const n = parseInt(m[1], 10);
+        if (!map.has(n)) map.set(n, text);
+    }
+    return map;
+}
+
+// One model call. Returns a Map(localIndex → one-line summary); an empty Map on ANY failure,
+// so a dead/slow Ollama degrades to the deterministic gists instead of breaking the answer.
+async function summarizeChainBatch(batch, opts = {}) {
+    const empty = new Map();
+    try {
+        if (!LOCAL_AI_MODEL) return empty;
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const listed = batch.map((it, i) =>
+            `[${i + 1}] ${it.date}${it.role ? ` — ${it.sender} (${it.role})` : ` — ${it.sender}`}:\n"""${it.text}"""`
+        ).join('\n\n');
+        const n = batch.length;
+        const system = 'You compress support-case messages into one factual line each. You never add information, never merge messages, never skip one, and never copy a message out verbatim. Output ONLY the numbered lines.';
+        const user = `Below are ${n} message${n === 1 ? '' : 's'} from a SOTI support case, in order.
+
+Write EXACTLY ${n} line${n === 1 ? '' : 's'}, one per message, in the SAME order, in this format:
+[1] <what this message actually says or does>
+${n > 1 ? `[2] <…>\n…up to [${n}]` : ''}
+
+RULES:
+- One line per message. Never merge two messages into one line and never split one across two.
+- Maximum 30 words per line. Write it as a statement of what happened, in the past tense.
+- KEEP every concrete detail: names, versions, device names/IDs, error text and status codes, database fields and values, counts, ticket IDs (e.g. MCMR-42071), case numbers, dates mentioned INSIDE the message, and any commitment or request made.
+- DROP greetings, thanks, signatures, disclaimers and "I hope you are well" filler.
+- If a message is only an acknowledgement, say exactly that (e.g. "Acknowledged the customer's reply and said the developers were informed").
+- Output nothing except the ${n} numbered line${n === 1 ? '' : 's'} — no heading, no preamble, no blank lines, no closing remark.
+
+MESSAGES:
+${listed}`;
+        const res = await fetch(`${baseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: opts.signal || null,
+            body: JSON.stringify({
+                model: LOCAL_AI_MODEL,
+                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                stream: false,
+                keep_alive: -1,
+                ...(isThinkingModel ? { think: false } : {}),
+                options: {
+                    // The SESSION context size, never a bespoke one: changing num_ctx between
+                    // requests makes Ollama re-allocate the KV cache (a full model reload, tens
+                    // of seconds on CPU) and this path issues many calls in a row.
+                    num_ctx: opts.numCtx || 8192,
+                    temperature: 0.0,
+                    top_p: 0.9,
+                    repeat_penalty: 1.1,
+                    num_predict: Math.min(1400, 70 * n + 120)
+                }
+            })
+        });
+        if (!res.ok) return empty;
+        const data = await res.json();
+        const msg = data.message || {};
+        let out = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking || '';
+        out = out.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+        return parseChainDigestLines(out);
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e; // the user cancelled — stop the whole digest
+        console.warn('[Chain digest] batch failed', e);
+        return empty;
+    }
+}
+
+// A model that "summarizes" by copying its input back is worse than no model at all — the
+// exact failure this whole path exists to fix. Reject a line that is essentially the source
+// text (or that just parrots the instructions) and keep the deterministic gist instead.
+function chainDigestLineIsEcho(line, source) {
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const a = norm(line), b = norm(source);
+    if (!a) return true;
+    if (/^(message|email|entry)\s+\d+\b/i.test(line.trim())) return true;
+    if (a.length > 40 && b.startsWith(a.slice(0, Math.min(a.length, 120)))) return true;
+    return b.includes(a) && a.length > 60;
+}
+
+// Narrative prose (Overview + where the case stands now) from a COMPACT digest of the whole
+// case — never from the raw chain, which is exactly what does not fit. Returns '' on failure;
+// the caller then ships the deterministic report on its own.
+async function writeChainNarrative(brief, opts = {}) {
+    try {
+        if (!LOCAL_AI_MODEL) return '';
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const system = 'You are a senior SOTI support engineer writing a briefing for a colleague who is picking up this case. You use ONLY the facts given to you. You never invent a fact, a date, a name, a version or an outcome, and you never copy the input back verbatim.';
+        const user = `Here is a mechanically-extracted digest of a SOTI support case's entire email chain. Every date, name and event in it is exact.
+
+${brief}
+
+Write EXACTLY these two sections and nothing else — no preamble, no heading above them, no closing remark:
+
+Overview: 4 to 7 sentences of continuous prose. What the customer reported, on what product/environment, what the technical symptom is, what support and development have done about it across the case, and how the case has developed. Name people and dates where they matter. Do NOT write a bullet list here and do NOT restate the timeline message by message.
+
+Current status: 2 to 4 sentences. Where the case stands RIGHT NOW, based on the newest entries only, naming who said what and when, plus what is outstanding.`;
+        const res = await fetch(`${baseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: opts.signal || null,
+            body: JSON.stringify({
+                model: LOCAL_AI_MODEL,
+                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                stream: false,
+                keep_alive: -1,
+                ...(isThinkingModel ? { think: false } : {}),
+                options: { num_ctx: opts.numCtx || 8192, temperature: 0.1, top_p: 0.9, repeat_penalty: 1.1, num_predict: 700 }
+            })
+        });
+        if (!res.ok) return '';
+        const data = await res.json();
+        const msg = data.message || {};
+        let out = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking || '';
+        return out.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e;
+        console.warn('[Chain digest] narrative failed', e);
+        return '';
+    }
+}
+
+// A section label as a small model actually writes it: "Overview:", "**Overview:**",
+// "## Overview", "__Overview__:" — emphasis markers can sit on either side of the colon.
+const chainLabelRx = (word, anchored) => new RegExp(
+    (anchored ? '^' : '') + '\\s*(?:#{1,4}\\s*)?(?:\\*\\*|__)?\\s*' + word + '\\s*(?:\\*\\*|__)?\\s*:?\\s*(?:\\*\\*|__)?\\s*', 'i');
+
+// Split the model's narrative into its two sections. A small model drops or renames headings
+// often enough that a fallback split (last paragraph = the status) is worth having.
+function splitChainNarrative(text) {
+    const t = String(text || '').trim();
+    if (!t) return { overview: '', status: '' };
+    const stripOverview = (s) => s.replace(chainLabelRx('overview', true), '').trim();
+    const m = t.match(new RegExp('^([\\s\\S]*?)(?:^|\\n)' + chainLabelRx('current\\s*status', false).source, 'i'));
+    if (m) return { overview: stripOverview(m[1]), status: t.slice(m[0].length).trim() };
+    const paras = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+    if (paras.length >= 2) {
+        return { overview: stripOverview(paras.slice(0, -1).join('\n\n')), status: paras[paras.length - 1] };
+    }
+    return { overview: stripOverview(t), status: '' };
+}
+
+// The deterministic backbone of the report: counts, span, participants, referenced tickets.
+function buildChainFacts(entries, raw, ci, lc) {
+    const n = entries.length;
+    const counts = { customer: 0, support: 0, call: 0, internal: 0, ooo: 0, other: 0 };
+    for (const e of entries) {
+        const role = e.role;
+        if (role === 'customer') counts.customer++;
+        else if (role === 'SOTI Support') counts.support++;
+        else if (role === 'phone call log') counts.call++;
+        else if (role === 'internal note') counts.internal++;
+        else if (role === 'out-of-office auto-reply') counts.ooo++;
+        else counts.other++;
+    }
+    const oldest = entries[n - 1], newest = entries[0];
+    const from = formatChainDate(oldest, { noTime: true });
+    const to = formatChainDate(newest, { noTime: true });
+    let days = null;
+    if (typeof oldest.ts === 'number' && typeof newest.ts === 'number') {
+        days = Math.max(0, Math.round((newest.ts - oldest.ts) / 864e5));
+    }
+    const uniq = (arr) => [...new Set(arr)];
+    const jiras = uniq((raw.match(/\b[A-Z]{2,6}-\d{3,6}\b/g) || []).filter(x => !/^(?:TLS|SQL|API|SHA|AES|RSA|UTC|GMT)-/i.test(x)));
+    const ownCase = (((ci && ci.case_number) || '').trim().toUpperCase());
+    const cases = uniq(raw.match(/\bC0\d{6,8}\b/g) || []).filter(x => x.toUpperCase() !== ownCase);
+    return { n, counts, from, to, days, jiras, cases, oldest, newest, lc };
+}
+
+// Build the whole answer. Deterministic everywhere it matters; the model only fills in prose
+// and compresses the long messages. onProgress(markdown) streams partial output to the UI.
+async function buildFullChainSummary(ci, opts = {}) {
+    const raw = ((ci && ci.email_chain) || '').trim();
+    if (!raw) return 'There is no email chain synced for this case yet — sync it from Salesforce (or paste it into Case Info) and ask again.';
+
+    const lc = detectCaseLifecycleState(ci) || {};
+    let entries = getCleanChainEntries(raw).map(e => ({ ...e, role: chainEntryRole(e, lc) }));
+    if (!entries.length) return 'The email chain for this case is empty once signatures and disclaimers are stripped — there is nothing to summarise.';
+
+    const facts = buildChainFacts(entries, raw, ci, lc);
+    const small = isSmallLocalModel();
+    // A message this short is already a one-liner once the boilerplate is gone: quote it
+    // EXACTLY rather than spending a model call (and a hallucination risk) compressing it.
+    const QUOTE_LIMIT = 190;
+    const MODEL_INPUT_CAP = small ? 800 : 2200;
+
+    const rows = entries.map((e, i) => {
+        const one = chainOneLine(e.body, QUOTE_LIMIT);
+        return {
+            idx: i,
+            entry: e,
+            date: formatChainDate(e) || e.time || 'undated',
+            sender: (e.sender || 'Unknown').trim(),
+            role: e.role,
+            line: one.text,
+            exact: !one.truncated,               // quoted in full → cannot be wrong
+            needsModel: one.truncated,
+            text: chainOneLine(e.body, MODEL_INPUT_CAP).text
+        };
+    });
+
+    const pending = rows.filter(r => r.needsModel);
+    const batches = buildChainDigestBatches(pending, {
+        maxPerBatch: small ? 8 : 20,
+        maxChars: small ? 3000 : 14000
+    });
+    // Hard ceiling on model work so a 400-message chain can never run for an hour; anything
+    // past it keeps its deterministic gist, which is accurate, just less compressed. Both
+    // ceilings cover ~300 long messages (small batches are smaller but there are more of them).
+    const MAX_BATCHES = small ? 30 : 15;
+    const runBatches = batches.slice(0, MAX_BATCHES);
+
+    const numCtx = await getSessionCtx(LOCAL_AI_MODEL).catch(() => 8192);
+    let done = 0;
+    for (const batch of runBatches) {
+        if (opts.signal && opts.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+        if (opts.onProgress) {
+            const pct = Math.round((done / runBatches.length) * 100);
+            opts.onProgress(`**Reading the email chain — ${facts.n} messages, ${facts.from} → ${facts.to}.**\n\nCondensing the long messages: pass ${done + 1} of ${runBatches.length} (${pct}%)\n\n<div class="thinking-dot"></div>`);
+        }
+        const got = await summarizeChainBatch(batch, { signal: opts.signal, numCtx });
+        batch.forEach((item, k) => {
+            const line = got.get(k + 1);
+            if (line && !chainDigestLineIsEcho(line, item.text)) {
+                rows[item.idx].line = line.replace(/\s+/g, ' ').trim();
+                rows[item.idx].exact = false;
+            } else {
+                rows[item.idx].line = rows[item.idx].line + '…'; // deterministic gist stands
+            }
+        });
+        done++;
+        await paintYield(0);
+    }
+    // Messages in batches past the ceiling never reached the model — mark their gist as the
+    // extract it is, so the report is honest about which lines are trimmed rather than condensed.
+    for (const r of rows) {
+        if (r.needsModel && r.line === chainOneLine(r.entry.body, QUOTE_LIMIT).text) r.line += '…';
+    }
+
+    if (opts.onProgress) opts.onProgress(`**Reading the email chain — ${facts.n} messages, ${facts.from} → ${facts.to}.**\n\nWriting the summary…\n\n<div class="thinking-dot"></div>`);
+
+    // ---- the compact brief the narrative pass gets (never the raw chain) ----
+    const oldestFirst = rows.slice().reverse();
+    const monthKey = (r) => {
+        const ts = r.entry.ts;
+        if (typeof ts !== 'number') return 'Undated';
+        const d = new Date(ts);
+        return `${d.toLocaleString('en-GB', { month: 'long' })} ${d.getFullYear()}`;
+    };
+    const months = [];
+    for (const r of oldestFirst) {
+        const k = monthKey(r);
+        if (!months.length || months[months.length - 1].key !== k) months.push({ key: k, rows: [] });
+        months[months.length - 1].rows.push(r);
+    }
+    const briefLine = (r, max) => `- ${r.date} — ${r.sender}${r.role ? ` (${r.role})` : ''}: ${chainOneLine(r.line, max).text}`;
+    // The fixed part: the facts, how it started, and where it is now. Small and always sent.
+    const briefHead = [
+        `CASE: ${(ci && ci.case_number) || 'n/a'}${ci && ci.product ? ` · product ${ci.product}` : ''}${ci && ci.soti_version ? ` · version ${ci.soti_version}` : ''}${ci && ci.platform ? ` · platform ${ci.platform}` : ''}`,
+        `CHAIN: ${facts.n} messages from ${facts.from} to ${facts.to}${facts.days !== null ? ` (${facts.days} days)` : ''} — ${facts.counts.customer} from the customer, ${facts.counts.support} from SOTI Support, ${facts.counts.call} phone call logs, ${facts.counts.internal} internal notes.`,
+        lc.customerSender ? `CUSTOMER: ${lc.customerSender}` : '',
+        lc.agentSender ? `SOTI SUPPORT ENGINEER: ${lc.agentSender}` : '',
+        facts.jiras.length ? `DEVELOPMENT TICKETS REFERENCED: ${facts.jiras.join(', ')}` : '',
+        facts.cases.length ? `OTHER SOTI CASES REFERENCED: ${facts.cases.join(', ')}` : '',
+        (ci && ci.issue_summary) ? `REPORTED ISSUE: ${String(ci.issue_summary).replace(/\s+/g, ' ').trim().slice(0, 600)}` : '',
+        '',
+        'HOW THE CASE STARTED (oldest entries):',
+        oldestFirst.slice(0, 4).map(r => briefLine(r, 170)).join('\n')
+    ].filter(l => l !== '').join('\n');
+    const briefTail = [
+        'THE MOST RECENT ENTRIES (newest last — the current state of the case):',
+        oldestFirst.slice(-8).map(r => briefLine(r, 190)).join('\n'),
+        '',
+        `THE NEWEST ENTRY OF ALL is from ${facts.newest.sender || 'unknown'}${facts.newest.role ? ` (${facts.newest.role})` : ''} on ${formatChainDate(facts.newest) || facts.newest.time}. The current status MUST come from it.`
+    ].join('\n');
+    // The month-by-month middle is the only elastic part — it gets whatever budget is left, so
+    // a 9-month case and a 3-month case both produce a prompt the model can actually digest.
+    const briefBudget = small ? 4200 : 13000;
+    let rollUp = '';
+    for (const [perMonth, lineLen] of [[3, 120], [2, 110], [1, 100], [1, 70]]) {
+        rollUp = months.map(mo => `${mo.key} — ${mo.rows.length} entr${mo.rows.length === 1 ? 'y' : 'ies'}:\n` +
+            mo.rows.slice(0, perMonth).map(r => `  ${briefLine(r, lineLen)}`).join('\n')).join('\n');
+        if (briefHead.length + rollUp.length + briefTail.length + 80 <= briefBudget) break;
+    }
+    if (briefHead.length + rollUp.length + briefTail.length + 80 > briefBudget) {
+        // Still over (a case spanning years) — fall back to bare per-month counts.
+        rollUp = months.map(mo => `${mo.key} — ${mo.rows.length} entr${mo.rows.length === 1 ? 'y' : 'ies'}`).join('\n');
+    }
+    const brief = `${briefHead}\n\nHOW THE CASE PROGRESSED (month by month):\n${rollUp}\n\n${briefTail}`;
+
+    let narrative = { overview: '', status: '' };
+    try {
+        narrative = splitChainNarrative(await writeChainNarrative(brief, { signal: opts.signal, numCtx }));
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e;
+    }
+    // The prose slots into "## Overview" / "## Where the case stands now" — a heading the model
+    // invented inside its own text would fracture that structure, so flatten any it emitted.
+    for (const k of ['overview', 'status']) {
+        narrative[k] = String(narrative[k] || '').replace(/^\s*#{1,6}\s+/gm, '').trim();
+    }
+
+    // ---- assemble ----
+    const bits = [];
+    bits.push(`# Email chain summary${(ci && ci.case_number) ? ` — Case ${ci.case_number}` : ''}`);
+    const stat = [
+        `**${facts.n} message${facts.n === 1 ? '' : 's'}**`,
+        facts.from && facts.to ? (facts.from === facts.to ? facts.from : `${facts.from} → ${facts.to}`) : '',
+        facts.days !== null ? `${facts.days} day${facts.days === 1 ? '' : 's'}` : ''
+    ].filter(Boolean).join(' · ');
+    bits.push(stat);
+    const mix = [
+        facts.counts.customer ? `${facts.counts.customer} from the customer` : '',
+        facts.counts.support ? `${facts.counts.support} from SOTI Support` : '',
+        facts.counts.call ? `${facts.counts.call} phone call log${facts.counts.call === 1 ? '' : 's'}` : '',
+        facts.counts.internal ? `${facts.counts.internal} internal note${facts.counts.internal === 1 ? '' : 's'}` : '',
+        facts.counts.ooo ? `${facts.counts.ooo} out-of-office auto-repl${facts.counts.ooo === 1 ? 'y' : 'ies'}` : '',
+        facts.counts.other ? `${facts.counts.other} other` : ''
+    ].filter(Boolean).join(' · ');
+    if (mix) bits.push(mix);
+    const people = [
+        lc.customerSender ? `**Customer:** ${lc.customerSender}` : '',
+        lc.agentSender ? `**SOTI Support:** ${lc.agentSender}` : ''
+    ].filter(Boolean).join(' · ');
+    if (people) bits.push(people);
+    if (facts.jiras.length) bits.push(`**Development tickets referenced:** ${facts.jiras.join(', ')}`);
+    if (facts.cases.length) bits.push(`**Other SOTI cases referenced:** ${facts.cases.join(', ')}`);
+
+    if (narrative.overview) {
+        bits.push('\n## Overview\n');
+        bits.push(narrative.overview);
+    }
+
+    bits.push('\n## Timeline — oldest first\n');
+    for (const mo of months) {
+        bits.push(`### ${mo.key}`);
+        for (const r of mo.rows) {
+            const when = formatChainDate(r.entry, { shortMonth: true }) || r.entry.time || 'undated';
+            const tag = r.role ? ` *(${r.role})*` : '';
+            bits.push(`- **${when}** — ${r.sender}${tag}: ${r.line}`);
+        }
+        bits.push('');
+    }
+
+    bits.push('## Where the case stands now\n');
+    if (narrative.status) {
+        bits.push(narrative.status);
+    } else {
+        // No model prose available — state it from the facts rather than leaving a gap.
+        bits.push(`The newest entry is from **${facts.newest.sender || 'an unknown sender'}**${facts.newest.role ? ` (${facts.newest.role})` : ''} on **${formatChainDate(facts.newest) || facts.newest.time}**: ${rows[0].line}`);
+    }
+    if (lc.state === 'closure') {
+        bits.push(`\n*Case state (detected from the chain): the case is resolved / in closure${lc.customerConfirmed ? ' — the customer has confirmed it can be closed' : ''}${lc.supportClosingSent ? ' and the closure email has been sent' : ''}.*`);
+    } else if (lc.state === 'active') {
+        bits.push('\n*Case state (detected from the chain): still OPEN — no confirmed resolution and no closure agreement appears anywhere in the correspondence.*');
+    }
+
+    const skipped = batches.length - runBatches.length;
+    if (skipped > 0) {
+        bits.push(`\n*Note: this chain is long enough that ${skipped} batch${skipped === 1 ? '' : 'es'} of the longest messages were kept as trimmed extracts (marked with …) instead of being condensed further. Every message is still listed above, with its exact date and author.*`);
+    }
+    return bits.join('\n');
 }
 
 // Clean, case-derived query for quick-action research. The quick-action prompt itself is
@@ -8425,9 +9120,21 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // and that must not switch the prompt away from the conversational route.
     const needsDeepPulse = !opts.forceConversational && !countQuestionTurn && !metaConversationTurn && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
 
+    // "Summarise the email chain / give me the timeline" on a real chain. A single model call
+    // cannot do this: on a long case the chain arrives pre-truncated and a small model answers
+    // by echoing the fragments back. This turn is served by buildFullChainSummary instead —
+    // deterministic dates/order/authors, the model used only to compress and to write prose.
+    // Decided BEFORE the research block so it never pays for a Pulse/Docs lookup it won't use.
+    const chainDigestTurn = !opts.forceConversational && !analysisRun && !metaConversationTurn
+        && !isGreeting && isEmailChainSummaryRequest(txt)
+        && (() => {
+            try { return getCleanChainEntries((ci.email_chain || '').trim()).length >= 3; }
+            catch (e) { return false; }
+        })();
+
     let supportingRefSection = "";
     let knownFixesSection = "";
-    if (!isGreeting && !forensicRun) {
+    if (!isGreeting && !forensicRun && !chainDigestTurn) {
         if (opts.skipResearch || metaConversationTurn) {
             // Quick-action AND chat-meta turns must be grounded in the CASE / conversation only —
             // clear research left over from an earlier question so a stray "MCMR"/"version" token
@@ -8516,10 +9223,42 @@ async function send(overrideText = null, silent = false, opts = {}) {
     }
 
     try {
+        // ---- FULL EMAIL-CHAIN DIGEST (map-reduce over the whole chain) ----
+        // Runs many small model calls instead of one oversized one, so a chain of any length
+        // is covered end to end. Everything that must be exact — order, dates, authors, counts —
+        // is computed here in JS, never generated.
+        if (chainDigestTurn) {
+            const digestController = new AbortController();
+            streamControllers.set(c.id, digestController);
+            // Same history bookkeeping as the normal path: overwrite a trailing user turn left
+            // by an aborted send rather than stacking a second one.
+            if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
+                c.msgs[c.msgs.length - 1] = { role: 'user', content: txt, hidden: silent };
+            } else {
+                c.msgs.push({ role: 'user', content: txt, hidden: silent });
+            }
+            const summary = await buildFullChainSummary(ci, {
+                signal: digestController.signal,
+                onProgress: (partial) => {
+                    aib.innerHTML = md(partial);
+                    chatScrollToBottomIfSticky();
+                }
+            });
+            aib.innerHTML = md(summary);
+            chatScrollToBottomIfSticky();
+            const digestMsg = { role: 'assistant', content: summary, fbQuestion: txt, copyKind: 'summary' };
+            c.msgs.push(digestMsg);
+            c.lastSentAt = Date.now();
+            saveState();
+            attachCopyUI(aib, digestMsg);
+            attachFeedbackUI(aib, c, digestMsg);
+            return; // the finally block below still runs and clears the busy flags
+        }
+
         let sysPrompt = "";
         let modelMessages = [];
         let userMsgForModel = txt;
-        
+
         if (isGreeting) {
             sysPrompt = "You are the SOTI Tier-3 AI Analyser, a senior escalation engineer for the SOTI ONE Suite (MobiControl, SOTI Connect, SOTI XSight). The person greeting you is a SOTI Technical Support Agent — your SOTI Support colleague — NOT a customer, so greet them as a colleague (never thank them for contacting SOTI Support). Respond politely to the greeting, ask how you can help with their case, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
             userMsgForModel = txt;
