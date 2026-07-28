@@ -80,6 +80,27 @@ let PULSE_SEARCH_RESULTS = "";
 let DOCS_SEARCH_RESULTS = "";
 let RESEARCHED_ARTICLE_CONTENT = "";
 let VERSIONS = [], AGENT_VERSIONS = [], IDENTITY_VERSIONS = [];
+
+// ---- MCMR CITATION CONTROL (a cited MCMR must be RIGHT, or not cited at all) ----
+// An MCMR code is a promise to the customer that their exact defect is fixed in a named
+// build, so a near-miss is worse than silence: a case summary once cited "MCMR-35305"
+// (device agents disconnecting/reconnecting) as the reference for an internal-server-error-
+// after-upgrade case, purely because that code sat inside a wholesale release-notes dump
+// the model was handed. Two mechanisms replace that guesswork:
+//   • VERIFIED_MCMR_ENTRIES — only release-notes lines that pass a STRICT deterministic
+//     symptom match against this case reach the prompt, and each one is recorded here with
+//     the version it shipped in. This is the allow-list the model is told to cite from.
+//   • MCMR_CITATION_MODE — 'strict' for case/troubleshooting turns (allow-list only),
+//     'open' only when the agent explicitly asked to see release notes / resolved issues
+//     (then the whole listing is legitimately quotable, because the listing IS the answer).
+// enforceMcmrCitations() then deletes any MCMR the model produces outside that set, so a
+// wrong code can never reach the customer even if the model ignores the instruction.
+let VERIFIED_MCMR_ENTRIES = [];      // [{ code, version, product, line }]
+let MCMR_CITATION_MODE = 'strict';   // 'strict' | 'open'
+function resetMcmrCitationState(mode = 'strict') {
+    VERIFIED_MCMR_ENTRIES = [];
+    MCMR_CITATION_MODE = mode;
+}
 const PULSE_ORIGIN = 'https://pulse.soti.net';
 const DOCS_ORIGIN = 'https://docs.soti.net';
 let PULSE_RELEASE_NOTE_CATALOG = {};
@@ -127,6 +148,11 @@ function md(t) {
         .replace(/([a-zA-Z:).*\"])\s*(\d+\.\s+[A-Z])/g, (match, p1, p2, offset, string) => {
             let before = string.slice(Math.max(0, offset - 15), offset);
             if (/(Step|Method)\s*$/i.test(before)) return match;
+            // "...regression in MobiControl 2026.1.1. Checking with dev" — the trailing "1." is
+            // the last octet of a dotted VERSION NUMBER ending a sentence, not the start of a
+            // numbered list. Splitting there turned the rest of the sentence into an <ol> item
+            // and swallowed the bullet that followed, tearing chain-timeline entries in half.
+            if (p1 === '.' && /\d$/.test(before)) return match;
             return p1 + '\n\n' + p2;
         })
         
@@ -144,10 +170,14 @@ function md(t) {
         // marker pair up with a much later one and bold/italicize entire paragraphs.
         .replace(/\*\*([^\n]+?)\*\*/g, (m, p1) => '<strong>' + p1.trim() + '</strong>')
         .replace(/(^|[\s(])\*([^\s*][^\n*]*?)\*(?=$|[\s).,;:!?])/gm, '$1<em>$2</em>')
-        // Headings consume their trailing newline so no stray <br> opens a gap below them.
-        .replace(/^\s*###\s*(.*)\n?/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>')
-        .replace(/^\s*##\s*(.*)\n?/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>')
-        .replace(/^\s*#\s*(.*)\n?/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>')
+        // Headings KEEP their trailing newline: the list rules below are ^-anchored, so a
+        // heading that swallowed it left the first bullet of the following list without a line
+        // start — it rendered as a literal "- **text**" while every later bullet in the same
+        // list rendered correctly. The newline is stripped again after the <br>/gap conversion
+        // (see the cleanup below), so no stray gap opens under a heading either.
+        .replace(/^[ \t]*###[ \t]*(.*)(\n?)/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>$2')
+        .replace(/^[ \t]*##[ \t]*(.*)(\n?)/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>$2')
+        .replace(/^[ \t]*#[ \t]*(.*)(\n?)/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>$2')
         .replace(/^\s*---\s*$/gm, '<hr style="border:0; border-top:1px solid var(--border); margin:25px 0">')
         // List lines are converted BEFORE newlines become <br> — the old order ran the
         // ^-anchored list rules on a string that no longer had line starts, so only the
@@ -158,6 +188,10 @@ function md(t) {
         .replace(/\n\n/g, '<div style="margin-bottom:18px"></div>')
         .replace(/\n/g, '<br>');
         
+    // A heading's own margin provides the space below it, so drop the line break / paragraph
+    // gap that its (now preserved) trailing newline turned into — otherwise every heading
+    // opens a double gap. Done here, AFTER the list rules have used that newline as an anchor.
+    html = html.replace(/(<\/h[123]>)(?:<br>|<div style="margin-bottom:18px"><\/div>)+/g, '$1');
     // Any ** still present is a stray/unbalanced marker (all real bold pairs were converted
     // above) — showing literal asterisks reads as broken formatting, so drop them.
     html = html.replace(/\*\*/g, '');
@@ -255,6 +289,7 @@ function sanitizeAssistantResponse(text) {
 function getDefaultCI() {
     return {
         caseNum: '', sotiVer: '', platform: '', agentVer: '', caseAge: '',
+        enviro: '', dsCfg: '', affDev: '',
         scrubAccount: '', scrubCustomer: '',
         meetingNotes: 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:',
         issueSummary: '', product: '', emailChain: '',
@@ -326,6 +361,12 @@ function buildCaseCiFromForm() {
         platform: $('platform').value,
         agentVer: $('agentVer').value,
         caseAge: $('caseAge').value,
+        // Environment / MC Hosted / Affected Devices were edited and validated like every other
+        // field but were never written into the case record, so switching tabs silently wiped
+        // them — and MC Hosted in particular now drives who collects the logs.
+        enviro: $('enviro').value,
+        dsCfg: $('dsCfg').value,
+        affDev: $('affDev').value,
         scrubAccount: $('scrubAccount').value,
         scrubCustomer: $('scrubCustomer').value,
         meetingNotes: $('meetingNotes').value,
@@ -635,6 +676,9 @@ function switchCase(id) {
         $('platform').value = c.ci.platform || '';
         $('agentVer').value = c.ci.agentVer || '';
         $('caseAge').value = c.ci.caseAge || '';
+        $('enviro').value = c.ci.enviro || '';
+        $('dsCfg').value = c.ci.dsCfg || '';
+        $('affDev').value = c.ci.affDev || '';
         $('scrubAccount').value = c.ci.scrubAccount || '';
         $('scrubCustomer').value = c.ci.scrubCustomer || '';
         $('meetingNotes').value = c.ci.meetingNotes || '';
@@ -3899,7 +3943,9 @@ function buildCaseContextForPrompt(ci, small) {
     // issue_summary is deliberately EXCLUDED on small models: the effective issue text is
     // always injected separately as [ISSUE SUMMARY], and duplicating ~0.5K inside [CASE]
     // just spends budget the email chain and research need.
-    for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'case_age_days']) {
+    // mc_hosted is two words and decides who can collect the logs — it earns its place in even
+    // the tightest small-model budget.
+    for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'case_age_days', 'mc_hosted']) {
         if (ci[k]) out[k] = ci[k];
     }
     const mn = ci.meeting_notes;
@@ -3918,6 +3964,172 @@ function buildCaseContextForPrompt(ci, small) {
 // correspondence — the model then invented a timeline for messages it never saw. These
 // helpers strip ONLY provable boilerplate so the ENTIRE chain (every actual message) fits.
 
+// The header that introduces a quoted/forwarded Outlook-style message. It MUST match whether
+// "From:" and "Sent:" sit on ONE line (some scrapers flatten the header) OR — the common real
+// case — on TWO consecutive lines:
+//     From: George Lam <George.Lam@soti.net>
+//     Sent: Thursday, March 6, 2025 10:19 AM
+// An earlier pattern used "From:\s?[^\n]{0,160}?\bSent:", but [^\n] can never cross the line
+// break between the From: and Sent: lines, so on a normal pasted/synced thread NOTHING matched:
+// the whole chain collapsed into a single un-split blob and every quoted email (including the
+// ORIGINAL, oldest message) was invisible to the chronology / lifecycle / message enumeration.
+// Fix: bound the From-line run with [^\n] but then allow ONE optional line break before "Sent:".
+// Kept as a source string so it can be embedded in both lookahead (split) and search (tail-cut)
+// regexes without drift. Case-insensitive; callers add the 'i' flag.
+const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\t]';
+
+// Support-authored template phrases — customers never write these. Used to tell a SOTI
+// engineer's message from the customer's (lifecycle detection AND the chain digest's role
+// labels), so it lives at module level rather than inside one function.
+const SUPPORT_SIGNATURE_RE = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email/i;
+
+// ---------------------------------------------------------------------------
+// Chain timestamps — putting a scraped feed into TRUE chronological order
+// ---------------------------------------------------------------------------
+// The Salesforce feed is NOT reliably newest-first. Internal notes in particular surface at
+// the position they were last touched, so a real 104-message chain came out of the scraper
+// with (for example) a 12 June note sitting between 21 July and 17 July, and a 20 December
+// note buried in the middle of May. Everything downstream — the "NEWEST/OLDEST" tags in
+// [EMAIL CHAIN], the oldest-first chronology, the lifecycle scan that reads the newest
+// message as "the current state" — assumed the scrape order WAS the chronology, so the model
+// was handed (and faithfully reproduced) a scrambled timeline.
+// Fix: read each entry's own displayed date, sort by it, and only then hand the chain on.
+const CHAIN_MONTHS = {
+    jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+    may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7, sep: 8, sept: 8,
+    september: 8, oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11
+};
+
+// A purely numeric date (11/07/2026) is ambiguous. Resolve the convention from the chain
+// ITSELF: any date whose first component exceeds 12 proves day-first, any whose second
+// component exceeds 12 proves month-first. With no evidence either way, day-first wins —
+// this extension formats and reads dates as en-GB everywhere else.
+function detectChainDateConvention(entries) {
+    let dmy = 0, mdy = 0;
+    for (const e of entries || []) {
+        const m = String((e && e.time) || '').match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
+        if (!m) continue;
+        if (+m[1] > 12 && +m[2] <= 12) dmy++;
+        else if (+m[2] > 12 && +m[1] <= 12) mdy++;
+    }
+    return mdy > dmy ? 'mdy' : 'dmy';
+}
+
+// Parse ONE feed/Outlook timestamp into epoch ms.
+// Returns { ts, confident }: `confident` is false when the string carried no unambiguous
+// date (an ambiguous all-numeric date, or a bare time) — the caller uses that to decide
+// whether the chain is dated well enough to re-sort at all.
+function parseChainTimestamp(raw, opts = {}) {
+    // Narrow/non-breaking spaces come through from Salesforce's formatted dates.
+    const s = String(raw || '').replace(/[   ]/g, ' ').trim();
+    if (!s) return { ts: null, confident: false };
+    const now = (opts.now instanceof Date) ? opts.now : new Date();
+    const monthFirst = opts.convention === 'mdy';
+
+    // Time of day, if the string carries one. Anchored on ":" so it can never eat a date part.
+    let hh = 0, mi = 0, ss = 0;
+    const tm = s.match(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s?m\.?)?/i);
+    if (tm) {
+        hh = +tm[1]; mi = +tm[2]; ss = tm[3] ? +tm[3] : 0;
+        const ap = (tm[4] || '').toLowerCase().replace(/[.\s]/g, '');
+        if (ap === 'pm' && hh < 12) hh += 12;
+        if (ap === 'am' && hh === 12) hh = 0;
+        if (hh > 23 || mi > 59) { hh = 0; mi = 0; ss = 0; }
+    }
+    const at = (y, mo, d) => {
+        if (mo < 0 || mo > 11 || d < 1 || d > 31 || y < 1990 || y > 2200) return null;
+        const dt = new Date(y, mo, d, hh, mi, ss);
+        // Rejects impossible dates (31 February rolls over to March) rather than shifting them.
+        return (dt.getFullYear() === y && dt.getMonth() === mo && dt.getDate() === d) ? dt.getTime() : null;
+    };
+    const ok = (ts, confident) => ts === null ? { ts: null, confident: false } : { ts, confident };
+
+    // ISO — 2026-07-24
+    let m = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+    if (m) return ok(at(+m[1], +m[2] - 1, +m[3]), true);
+
+    // "24 July 2026" / "24 Jul 2026" / "24th July, 2026"  (Salesforce en-GB feed format)
+    m = s.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})\b/);
+    if (m && CHAIN_MONTHS[m[2].toLowerCase()] !== undefined) {
+        return ok(at(+m[3], CHAIN_MONTHS[m[2].toLowerCase()], +m[1]), true);
+    }
+
+    // "July 24, 2026" / "Jul 24 2026" / Outlook's "Thursday, March 6, 2025 10:19 AM"
+    m = s.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/);
+    if (m && CHAIN_MONTHS[m[1].toLowerCase()] !== undefined) {
+        return ok(at(+m[3], CHAIN_MONTHS[m[1].toLowerCase()], +m[2]), true);
+    }
+
+    // All-numeric — 24/07/2026, 7.24.2026, 24-07-26
+    m = s.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
+    if (m) {
+        const a = +m[1], b = +m[2];
+        let y = +m[3];
+        if (y < 100) y += (y >= 70 ? 1900 : 2000);
+        if (a > 12 && b <= 12) return ok(at(y, b - 1, a), true);   // day-first, proven
+        if (b > 12 && a <= 12) return ok(at(y, a - 1, b), true);   // month-first, proven
+        if (a > 12 || b > 12) return { ts: null, confident: false };
+        return ok(monthFirst ? at(y, a - 1, b) : at(y, b - 1, a), false); // ambiguous
+    }
+
+    // Relative labels the Chatter feed uses for very recent posts.
+    const dayAt = (d) => at(d.getFullYear(), d.getMonth(), d.getDate());
+    if (/\btoday\b/i.test(s)) return ok(dayAt(now), true);
+    if (/\byesterday\b/i.test(s)) return ok(dayAt(new Date(now.getTime() - 864e5)), true);
+    m = s.match(/\b(\d{1,3})\s*(m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?)\s*ago\b/i);
+    if (m) {
+        const unit = m[2].toLowerCase();
+        const ms = /^m/.test(unit) ? 6e4 : /^h/.test(unit) ? 36e5 : /^d/.test(unit) ? 864e5 : 6048e5;
+        return { ts: now.getTime() - (+m[1] * ms), confident: true };
+    }
+    return { ts: null, confident: false };
+}
+
+// Sort parsed chain entries NEWEST FIRST by their own displayed dates, and stamp each with
+// the `ts` it was sorted by. Deliberately conservative: a chain whose dates mostly failed to
+// parse (an unfamiliar locale, a fallback scrape with no headers) keeps the scrape order
+// EXACTLY as before, so this can only ever fix ordering, never scramble it.
+function orderChainEntriesNewestFirst(entries, opts = {}) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (list.length < 2) return list.map(e => ({ ...e, ts: parseChainTimestamp(e && e.time).ts }));
+    const now = (opts.now instanceof Date) ? opts.now : new Date();
+    const convention = detectChainDateConvention(list);
+    const parsed = list.map((e, i) => {
+        const p = parseChainTimestamp(e.time, { now, convention });
+        return { ...e, ts: p.ts, tsConfident: p.confident, _feedIdx: i };
+    });
+    const confident = parsed.filter(e => e.ts !== null && e.tsConfident).length;
+    if (confident < 2 || confident / parsed.length < 0.6) {
+        return parsed.map(({ _feedIdx, ...e }) => e); // not dated well enough to trust — leave as scraped
+    }
+    // An undated entry inherits the timestamp of its nearest dated neighbour (looking back
+    // through the feed first, then forward). Combined with the stable sort below, that keeps
+    // it exactly where the feed put it instead of flinging it to one end of the chain.
+    let carry = null;
+    for (const e of parsed) { if (e.ts === null) e.ts = carry; else carry = e.ts; }
+    carry = null;
+    for (let i = parsed.length - 1; i >= 0; i--) {
+        if (parsed[i].ts === null) parsed[i].ts = carry; else carry = parsed[i].ts;
+    }
+    return parsed
+        .slice()
+        .sort((a, b) => (b.ts - a.ts) || (a._feedIdx - b._feedIdx)) // ties keep feed order
+        .map(({ _feedIdx, ...e }) => e);
+}
+
+// Human date for prompts and the digest, from the epoch stamp we sorted by. Falls back to the
+// raw feed string so an unparsed entry still shows the date the engineer sees in Salesforce.
+function formatChainDate(e, opts = {}) {
+    const ts = e && typeof e.ts === 'number' ? e.ts : null;
+    if (ts === null) return String((e && e.time) || '').trim();
+    const d = new Date(ts);
+    const month = opts.shortMonth
+        ? d.toLocaleString('en-GB', { month: 'short' })
+        : d.toLocaleString('en-GB', { month: 'long' });
+    const time = opts.noTime ? '' : `, ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return `${d.getDate()} ${month} ${d.getFullYear()}${time}`;
+}
+
 // Name variants used to find the sender's own signature block ("Donaldson, Geoffrey" signs
 // as "Geoffrey Donaldson"). Short names are excluded — too likely to appear in real prose.
 function senderNameVariants(sender) {
@@ -3934,8 +4146,19 @@ function senderNameVariants(sender) {
 // message that already exists elsewhere in the chain, so cutting it loses nothing.
 function cleanEmailBody(body, sender, cutReplyTail) {
     let t = String(body || '');
+    // A pasted/forwarded Outlook message begins with its OWN routing header
+    // (From:/Sent:/To:/Cc:/Subject: lines). That header is pure metadata — the sender and
+    // date are already captured on the entry — so leaving it in makes every gist/snippet
+    // read "From:… Sent:… To:…" instead of the actual message. Strip the leading header block
+    // only when it is unmistakably one: a From: line followed by header-keyword lines that
+    // include BOTH Sent: and Subject: (so a body that merely opens with the word "From:" is
+    // never truncated). The message text is whatever follows the Subject: line.
+    const leadHdr = t.match(/^[ \t]*From:[^\n]*(?:\r?\n[ \t]*(?:Sent|To|Cc|Bcc|Subject|Importance|Sensitivity|Reply-To|Date):[^\n]*)+\r?\n?/i);
+    if (leadHdr && /\r?\n[ \t]*Sent:/i.test(leadHdr[0]) && /\r?\n?[ \t]*Subject:/i.test(leadHdr[0])) {
+        t = t.slice(leadHdr[0].length);
+    }
     if (cutReplyTail) {
-        const tail = t.search(/(?:^|[\n\s])(?:-{3,}\s*Original Message\s*-{3,}|From:\s?[^\n]{0,160}?\bSent:\s)/i);
+        const tail = t.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_SRC + ')', 'i'));
         if (tail > 10) t = t.slice(0, tail); // only cut when a real body precedes the tail
     }
     // Proofpoint / mail-scanner banners and external-sender warnings
@@ -3981,26 +4204,33 @@ function cleanEmailBody(body, sender, cutReplyTail) {
     return t.trim();
 }
 
-// Split a raw chain into ordered entries {header, sender, body}. Handles the scraper format
+// Split a raw chain into entries {time, type, sender, body, ts}. Handles the scraper format
 // ("[time] [TYPE] Sender:\nbody" joined by ==== separators), the fallback scrape (bodies
 // only), and a manually pasted Outlook-style thread (split at each "From:… Sent:…" header,
 // so older quoted messages become entries instead of being cut away).
-function parseEmailChainEntries(raw) {
+// The result is returned in TRUE chronological order (newest first) — see
+// orderChainEntriesNewestFirst — because the Salesforce feed order is not reliably
+// chronological and every caller here treats position as chronology.
+function parseEmailChainEntries(raw, opts = {}) {
     const HEADER_RE = /^\s*\[([^\][]{4,80})\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?([^:\n]{1,80}):\s?/;
+    const order = (list) => opts.keepFeedOrder ? list : orderChainEntriesNewestFirst(list, opts);
     const parts = raw.split(/\n?={20,}\n?/).map(p => p.trim()).filter(Boolean);
     if (parts.length === 1 && !HEADER_RE.test(parts[0])) {
         // Single pasted blob: split into messages at quoted-reply headers (Outlook style,
         // newest first — same order as the scraper) instead of treating them as one body.
-        const pieces = parts[0].split(/(?=(?:^|\n)From:\s?[^\n]{0,160}?\bSent:\s)/).map(p => p.trim()).filter(Boolean);
+        const splitRe = new RegExp('(?=(?:^|\\n)[ \\t]*' + REPLY_HEADER_SRC + ')', 'i');
+        const pieces = parts[0].split(splitRe).map(p => p.trim()).filter(Boolean);
         if (pieces.length > 1) {
-            return pieces.map(p => {
-                const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/);
-                const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Subject:|\n|$)/);
+            return order(pieces.map(p => {
+                // Sender/date sit on their own lines in the two-line header form; both patterns
+                // stop at the newline, so they read the correct field without bleeding across.
+                const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/i);
+                const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Cc:|\s+Subject:|\n|$)/i);
                 return { time: sm ? sm[1].trim() : '', type: '', sender: m ? m[1].trim() : '', body: p };
-            });
+            }));
         }
     }
-    return parts.map(p => {
+    return order(parts.map(p => {
         const m = p.match(HEADER_RE);
         if (!m) return { time: '', type: '', sender: '', body: p };
         return {
@@ -4009,7 +4239,7 @@ function parseEmailChainEntries(raw) {
             sender: m[3].trim(),
             body: p.slice(m[0].length)
         };
-    });
+    }));
 }
 
 // The email correspondence is the LIVE state of the case and must drive "what's next" /
@@ -4043,32 +4273,75 @@ function buildEmailChainSection(ci, small, capOverride) {
         const flat = body.replace(/\s+/g, ' ').trim();
         if (flat.length <= max) return flat;
         const head = flat.slice(0, max);
+        // Require the multi-word labels to keep their internal space ("Serial Number", not
+        // "SerialNumber"). Otherwise a JSON FIELD NAME like "serialNumber": "..." in a pasted
+        // API response matched as an identifier and leaked "[also: serialNumber]" (the key
+        // itself, not a value) into the gist — which the model then parroted into its summary.
         const keep = ((flat.match(/https?:\/\/[^\s<>()]+/g) || []).concat(
-            flat.match(/\b(?:Registration Code|Instance ID|Serial(?:\s+Numbers?)?|Case(?:\s+numbers?)?|Error(?:\s+codes?)?)\s*:?\s*[A-Za-z0-9][A-Za-z0-9-]{3,}/gi) || []
+            flat.match(/\b(?:Registration Code|Instance ID|Serial\s+Numbers?|Case\s+numbers?|Error\s+codes?)\s*:?\s*[A-Za-z0-9][A-Za-z0-9-]{3,}/gi) || []
         )).filter(k => !head.includes(k));
         return head + '…' + (keep.length ? ` [also: ${keep.slice(0, 3).join(' | ')}]` : '');
     };
     const lines = entries.map((e, i) => `${marker(e, i)}\n${e.body}`);
-    let total = lines.reduce((a, l) => a + l.length + 2, 0);
-    // Compact OLDEST-first (keep the two newest whole) until the chain fits the cap.
-    for (let i = n - 1; i >= 2 && total > cap; i--) {
-        const compact = `${marker(entries[i], i)} ${gistOf(entries[i].body, 160)}`;
-        // The preserved-references append can make a "gist" LONGER than the original
-        // (short body, long URL) — only take the swap when it actually shrinks the line.
-        if (compact.length >= lines[i].length) continue;
-        total -= (lines[i].length - compact.length);
-        lines[i] = compact;
+    const total = lines.reduce((a, l) => a + l.length + 2, 0);
+    let chain;
+    if (total <= cap) {
+        chain = lines.join('\n\n');
+    } else {
+        // COVERAGE FIRST. The old code compacted the oldest messages to 160-char gists and then
+        // hard-CUT whatever still didn't fit, so on a long chain the older half of the case
+        // simply vanished mid-sentence and the model invented the rest. Instead: give EVERY
+        // message a dated one-line stub as the floor, then spend whatever budget is left
+        // upgrading the NEWEST messages back to their full text.
+        const MIN_GIST = 90;
+        const stubs = entries.map((e, i) => `${marker(e, i)} ${gistOf(e.body, MIN_GIST)}`);
+        const floor = stubs.reduce((a, l) => a + l.length + 2, 0);
+        if (floor <= cap) {
+            const out = stubs.slice();
+            let used = floor;
+            for (let i = 0; i < n; i++) {
+                const grow = lines[i].length - stubs[i].length;
+                if (grow <= 0) continue;
+                if (used + grow > cap) {
+                    // Boundary message: take a partial upgrade with whatever room is left.
+                    const room = cap - used - 40;
+                    if (room > 200) {
+                        const bigger = `${marker(entries[i], i)} ${gistOf(entries[i].body, MIN_GIST + room)}`;
+                        if (bigger.length > stubs[i].length && used + (bigger.length - stubs[i].length) <= cap) {
+                            used += bigger.length - stubs[i].length;
+                            out[i] = bigger;
+                        }
+                    }
+                    break;
+                }
+                used += grow;
+                out[i] = lines[i];
+            }
+            chain = out.join('\n\n');
+        } else {
+            // Even one stub per message overflows the cap. Keep an unbroken run of the NEWEST
+            // messages (the current state) AND of the OLDEST ones (how the case began), and name
+            // the dated range left out in between — so the cut can never be mistaken for the
+            // start or the end of the case.
+            const budget = Math.max(0, cap - 300); // room for the elision note
+            const newBudget = Math.floor(budget * 0.6);
+            const keptNew = [], keptOld = [];
+            let i = 0, j = n - 1, usedN = 0, usedO = 0;
+            while (i <= j && usedN + stubs[i].length + 2 <= newBudget) { keptNew.push(i); usedN += stubs[i].length + 2; i++; }
+            while (j >= i && usedO + stubs[j].length + 2 <= budget - usedN) { keptOld.unshift(j); usedO += stubs[j].length + 2; j--; }
+            const omitted = j - i + 1;
+            const note = omitted > 0
+                ? `…[${omitted} message${omitted === 1 ? '' : 's'} sent between ${formatChainDate(entries[j], { noTime: true }) || 'earlier'} and ${formatChainDate(entries[i], { noTime: true }) || 'later'} are omitted HERE, in the middle of the chain, to fit the context window. The case did NOT start or end at this gap — the oldest and newest messages are both shown.]`
+                : '';
+            chain = [...keptNew.map(k => stubs[k]), note, ...keptOld.map(k => stubs[k])].filter(Boolean).join('\n\n');
+        }
     }
-    let chain = lines.join('\n\n');
-    if (chain.length > cap) {
-        // Even when the cap forces a cut, the model is told exactly how many older messages
-        // were dropped and where the case began — it never mistakes the cut for the start.
-        const oldest = entries[n - 1];
-        const noteFor = (kept) => `\n\n…[context cap reached — the ${kept} NEWEST messages are shown above; ${n - kept} older ones are omitted. The case began with Message ${n}${oldest.time ? ` sent ${oldest.time}` : ''}${oldest.sender ? ` from ${oldest.sender}` : ''}.]`;
-        const body = chain.slice(0, Math.max(0, cap - noteFor(n).length - 8)).trimEnd();
-        chain = body + noteFor((body.match(/(?:^|\n)Message \d+/g) || []).length);
-    }
-    return `[EMAIL CHAIN — the live correspondence BETWEEN THE CUSTOMER AND SOTI SUPPORT for this case: ${n} message${n === 1 ? '' : 's'}, ordered NEWEST FIRST. These are the CUSTOMER's emails and SOTI Support's replies — NONE of them were written by the person you are chatting with (the SOTI support agent handling this case); they are case context only. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
+    const span = (() => {
+        const a = formatChainDate(entries[n - 1], { noTime: true });
+        const b = formatChainDate(entries[0], { noTime: true });
+        return (a && b && a !== b) ? ` The case runs from ${a} (oldest) to ${b} (newest).` : '';
+    })();
+    return `[EMAIL CHAIN — the live correspondence BETWEEN THE CUSTOMER AND SOTI SUPPORT for this case: ${n} message${n === 1 ? '' : 's'}, sorted into TRUE chronological order, NEWEST FIRST.${span} These are the CUSTOMER's emails and SOTI Support's replies — NONE of them were written by the person you are chatting with (the SOTI support agent handling this case); they are case context only. "Message 1 of ${n}" is the MOST RECENT message and reflects the CURRENT state of the case; "Message ${n} of ${n}" is the OLDEST — the very first message/email of the case. Boilerplate (signatures, legal disclaimers, quoted duplicates of earlier emails) has been stripped; every actual message in the case is present below, each tagged with its OWN "Sent:" date and "From:" author. The "Message i of N" numbers are INTERNAL markers for YOUR orientation only — NEVER write "Message 5" or "(Message 5)" in your answer; refer to a message naturally by its author and Sent date instead (e.g. "in his email of 6 July 2026, Geoffrey reported…"). This is the source of truth for the current status and for what to do next; it SUPERSEDES [ISSUE SUMMARY], which is only the ORIGINAL reported problem and may already be resolved or moved past by later emails.]\n${chain}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -4105,12 +4378,183 @@ function getCleanChainEntries(raw) {
     // so the marker means "this sender is support", not "this sender quoted support".
     const cutTail = (body) => {
         const s = String(body || '');
-        const idx = s.search(/(?:^|[\n\s])(?:-{3,}\s*Original Message\s*-{3,}|From:\s?[^\n]{0,160}?\bSent:\s)/i);
+        const idx = s.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_SRC + ')', 'i'));
         return idx > 10 ? s.slice(0, idx) : s;
     };
     return parseEmailChainEntries(raw)
         .map(e => ({ ...e, sigBody: cutTail(e.body), body: cleanEmailBody(e.body, e.sender, scraperFormat) }))
         .filter(e => e.body && !/^system$/i.test((e.sender || '').trim()));
+}
+
+// ---------------------------------------------------------------------------
+// DECISIVE CASE SIGNALS — the facts a summary is never allowed to omit
+// ---------------------------------------------------------------------------
+// A summary of "Internal Server Error After an Upgrade" reported the case as resolved and
+// never mentioned that the customer had written, 22 hours earlier, "Im seeing the same error
+// again … we are having customer calling for troubleshooting but we are unable to assist
+// them". Nothing was broken in the parsing — that email was extracted, cleaned and placed in
+// the chronology correctly. It was DROPPED because the chronology presents every message as an
+// equal one-line bullet (trimmed to 110 chars, which cut the impact clause), and because the
+// Summary spec says to describe where the case stands "from the newest message" — and the
+// newest message was a call log saying it was fixed. So the prompt actively steered past the
+// regression.
+//
+// A recurrence, an explicit urgency demand, a statement of business impact, and a next step
+// SOTI has already committed to are not ordinary chain content: each one changes what the
+// engineer does next, and each must therefore survive summarisation. They are extracted here
+// deterministically, quoted verbatim with author and date, and injected as facts the answer is
+// required to carry — the same treatment the codebase already gives the lifecycle state.
+// Deliberately NOT a bare "(error|issue) … returned": "the API returned an error code" is a
+// description of the fault, not a report that the fault came back. Recurrence needs either an
+// explicit "same … again", or a verb whose subject IS the fault ("the issue is back").
+const SIG_RECURRENCE_RE = /\b(?:the |this |that )?(?:same|identical) (?:error|issue|problem|behaviou?r|thing)\b[^.\n]{0,40}\bagain\b|\bsee(?:ing)?\b[^.\n]{0,30}\b(?:error|issue|problem)\b[^.\n]{0,30}\bagain\b|\b(?:error|issue|problem|fault|outage)\b[^.\n]{0,20}\b(?:is|has|had|'s)\s+(?:come\s+)?back\b|\b(?:error|issue|problem|fault)\b[^.\n]{0,20}\bhas returned\b|\bre-?appear(?:ed|ing)\b|\bre-?occurr?(?:ed|ing|ence)\b|\brecurr(?:ed|ing|ence)\b|\bhappening again\b|\bstarted again\b|\bback again\b|\bagain (?:facing|seeing|getting|having|experiencing)\b/i;
+const SIG_URGENCY_RE = /\burgent(?:ly)?\b|\basap\b|\bas soon as possible\b|\bimmediate(?:ly)?\b|\bcritical\b|\bhigh(?:est)? priority\b|\bescalat(?:e|ing|ion)\b|\btop priority\b|\bat the earliest\b/i;
+const SIG_IMPACT_RE = /\b(?:customers?|users?|clients?|staff|technicians?|agents?)\b[^.\n]{0,60}\b(?:calling|complain\w*|affected|impacted|blocked|waiting|cannot|can'?t|unable)\b|\bunable to (?:assist|support|work|operate|serve|help)\b|\b(?:production|business|operations?|service)\b[^.\n]{0,30}\b(?:down|halted|stopped|impacted|affected|at a standstill)\b|\bbusiness impact\b|\bwe are (?:down|blocked|stuck)\b|\bcannot (?:assist|support|serve) (?:our |the )?customers?\b/i;
+
+// Quote the sentence a match sits in, so the prompt carries the customer's own words.
+function quoteAround(text, idx, len, max = 240) {
+    const s = String(text || '');
+    const start = Math.max(s.lastIndexOf('.', idx), s.lastIndexOf('!', idx), s.lastIndexOf('?', idx), s.lastIndexOf('\n', idx)) + 1;
+    let end = s.length;
+    for (const ch of ['.', '!', '?', '\n']) {
+        const p = s.indexOf(ch, idx + len);
+        if (p !== -1 && p < end) end = p;
+    }
+    return s.slice(start, Math.min(end + 1, start + max)).replace(/\s+/g, ' ').trim();
+}
+
+// Scan the cleaned chain for those signals. `entries` is newest-first (getCleanChainEntries),
+// `lc` supplies the customer/agent role split so a customer's urgency is not confused with a
+// support template. Returns { recurrence, urgency, impact, commitments } — each either null or
+// { sender, time, quote }, except commitments which is a string[].
+function detectChainSignals(entries, lc) {
+    const out = { recurrence: null, urgency: null, impact: null, commitments: [], commitmentSource: null, promises: [], promiseSource: null };
+    if (!entries || !entries.length) return out;
+    const custName = ((lc && lc.customerSender) || '').trim().toLowerCase();
+    const isCustomer = (e) => {
+        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) return false;
+        if (custName && e.sender) return String(e.sender).replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase() === custName;
+        return !SUPPORT_SIGNATURE_RE.test(e.sigBody || e.body || '');
+    };
+    const mk = (e, m) => ({ sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), quote: quoteAround(e.body, m.index, m[0].length) });
+
+    // Newest-first: the most recent statement of each kind is the one that still stands.
+    for (const e of entries) {
+        if (!isCustomer(e)) continue;
+        const body = e.body || '';
+        if (!out.recurrence) { const m = body.match(SIG_RECURRENCE_RE); if (m) out.recurrence = mk(e, m); }
+        if (!out.urgency) { const m = body.match(SIG_URGENCY_RE); if (m) out.urgency = mk(e, m); }
+        if (!out.impact) { const m = body.match(SIG_IMPACT_RE); if (m) out.impact = mk(e, m); }
+        if (out.recurrence && out.urgency && out.impact) break;
+    }
+
+    // What SOTI has already told itself it will do next. Call logs and internal notes are
+    // written in the "Summary / Troubleshoots done / Next steps" template, and the actions
+    // under "Next steps" are commitments already made — a summary that omits them sends the
+    // engineer to re-derive a plan that was already agreed (here: "Transferring the case to
+    // the customer's region", which no generated next-steps list ever mentioned).
+    for (const e of entries) {
+        if (!/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
+        const m = (e.body || '').match(/\bnext steps?\s*:\s*([\s\S]{3,600})$/i);
+        if (!m) continue;
+        const items = m[1].split(/\n+|(?<=\.)\s+(?=[A-Z])/).map(s => s.replace(/^[-*\d.)\s]+/, '').trim())
+            .filter(s => s.length > 6 && s.length < 200);
+        if (!items.length) continue;
+        out.commitments = items.slice(0, 5);
+        out.commitmentSource = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), type: /\bCALL\b/i.test(e.type || '') ? 'phone call log' : 'internal note' };
+        break;
+    }
+
+    // What SOTI has PROMISED THE CUSTOMER IN WRITING. This is stronger than an internal note:
+    // the customer has read it and is waiting on it. On the Zebra FOTA case SOTI had already
+    // written "we'll perform backend related checks from our side to cancel/reset the pending
+    // upgrade state" — and the generated plan then told the engineer to cancel from the console
+    // "not the backend", contradicting a promise the customer had already chased twice.
+    // The capture is TEMPERED — it stops before the next "we will / we'll" rather than running
+    // to the character cap. Without that, one promise swallows the next: on the Zebra FOTA case
+    // "we will investigate …" ate 170 characters including the following "we'll perform backend
+    // related checks … to cancel/reset the pending upgrade state", then truncated mid-phrase at
+    // "backend related" — losing the one clause that actually mattered.
+    const PROMISE_LEAD = "\\b(?:we|i)\\s*(?:will|shall|'ll|’ll)\\b";
+    const PROMISE_RE = new RegExp(`${PROMISE_LEAD}\\s+((?:(?!${PROMISE_LEAD})[^.\\n]){8,170})`, 'gi');
+    for (const e of entries) {
+        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
+        if (isCustomer(e)) continue;
+        const found = [];
+        for (const m of String(e.body || '').matchAll(PROMISE_RE)) {
+            const capped = m[1].length >= 170;
+            let t = m[1].replace(/\s+/g, ' ').trim();
+            // Drop the dangling connective a tempered capture leaves behind ("… investigation,").
+            t = t.replace(/[\s,;:–-]+(?:and|but|so|then|also|as part of the investigation)?[\s,;:–-]*$/i, '').trim();
+            if (capped) t = t.replace(/\s+\S*$/, '') + '…';
+            // "we will be happy to help" / "we will get back to you" are pleasantries, not
+            // commitments to a specific action.
+            if (/^(?:be (?:happy|glad|pleased)|get back|revert|await|wait|need|require|appreciate)\b/i.test(t)) continue;
+            if (t.length < 8) continue;
+            found.push(t);
+        }
+        if (!found.length) continue;
+        out.promises = found.slice(0, 3);
+        out.promiseSource = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim() };
+        break;
+    }
+    return out;
+}
+
+// Render the signals as a mandatory block. kind = 'summary' | 'email'.
+function buildCaseSignalsBlock(sig, kind) {
+    if (!sig) return '';
+    const has = sig.recurrence || sig.urgency || sig.impact || (sig.commitments && sig.commitments.length) || (sig.promises && sig.promises.length);
+    if (!has) return '';
+    const q = (s) => `${s.sender}${s.time ? ` (${s.time})` : ''}: "${s.quote}"`;
+    const lines = ['[DECISIVE CASE SIGNALS — extracted verbatim from the chain by exact text match. THESE ARE FACTS. Every one listed here MUST appear in your answer; omitting one is an error, and no other content may displace them.]'];
+    if (sig.recurrence) {
+        lines.push(`- RECURRENCE — the customer reported the SAME issue happening AGAIN after it had previously been treated as fixed. ${q(sig.recurrence)}`);
+    }
+    // Urgency and impact are usually the SAME sentence ("look into this urgently, we have
+    // customers calling and cannot assist them"). Quoting it twice under two headings wastes
+    // prompt budget and reads like two separate escalations.
+    const sameQuote = sig.urgency && sig.impact && sig.urgency.quote === sig.impact.quote;
+    if (sameQuote) {
+        lines.push(`- URGENCY + BUSINESS IMPACT — the customer demanded priority and stated the operational consequence in one breath. ${q(sig.urgency)}`);
+    } else {
+        if (sig.urgency) lines.push(`- URGENCY — the customer explicitly demanded priority. ${q(sig.urgency)}`);
+        if (sig.impact) lines.push(`- BUSINESS IMPACT — the customer stated the operational consequence. ${q(sig.impact)}`);
+    }
+    if (sig.commitments && sig.commitments.length) {
+        const src = sig.commitmentSource;
+        lines.push(`- ALREADY-COMMITTED NEXT STEPS — recorded by ${src ? `${src.sender} in a ${src.type}${src.time ? ` (${src.time})` : ''}` : 'SOTI Support'}: ${sig.commitments.map(c => `"${c}"`).join('; ')}.`);
+    }
+    if (sig.promises && sig.promises.length) {
+        const src = sig.promiseSource;
+        lines.push(`- ALREADY PROMISED TO THE CUSTOMER IN WRITING${src ? ` by ${src.sender}${src.time ? ` (${src.time})` : ''}` : ''}: ${sig.promises.map(c => `"we will ${c}"`).join('; ')}. The customer has read this and is waiting on it.`);
+    }
+    if (kind === 'email') {
+        const asks = [];
+        if (sig.recurrence) asks.push('acknowledge explicitly that the issue RECURRED (do not write as though the first fix held)');
+        if (sig.impact || sig.urgency) asks.push('acknowledge the operational impact the customer described, in their terms');
+        if (sig.commitments && sig.commitments.length) asks.push('state the already-committed next step(s) as things SOTI is doing, never as something newly proposed');
+        lines.push(`Because of this, the email MUST ${asks.join('; ')}. Never send a reply that reads as if the case were quietly resolved.`);
+    } else {
+        if (sig.recurrence) {
+            lines.push('MANDATORY FOR "Summary:" — the recurrence is the single most decisive fact on this case and MUST be stated there, with who reported it and when. A newer message saying the issue was fixed does NOT cancel it: report BOTH, and say plainly that the problem has now returned once after an earlier fix, so any current "resolved" status is provisional.');
+        }
+        if (sig.impact || sig.urgency) {
+            lines.push('MANDATORY FOR "Summary:" — state the customer\'s urgency and/or business impact in their own terms. It is what justifies the case\'s priority and it must not be softened or dropped.');
+        }
+        if (sig.commitments && sig.commitments.length) {
+            // These commitments were written as free text in a call log, so some are vague by
+            // nature ("Monitor the server for stability") — and that exact phrasing is BANNED by
+            // the case-state directive as an unactionable step. Requiring the commitment to be
+            // KEPT but made concrete resolves that contradiction instead of leaving the model to
+            // choose which instruction to break.
+            lines.push('MANDATORY FOR "Next steps:" — every already-committed next step listed above MUST appear as a numbered step, phrased as completing a commitment already made (e.g. "Complete the transfer to …"), and MUST come BEFORE any newly proposed investigation. Do NOT silently replace an agreed action with your own plan. Where a commitment is worded vaguely (e.g. "monitor for stability"), KEEP the commitment but make it executable to the standard demanded above: name exactly what is watched, on which artefact and server role, at what interval, and what observation would count as a relapse. Never reproduce the vague wording verbatim as the step.');
+        }
+        if (sig.promises && sig.promises.length) {
+            lines.push('MANDATORY — SOTI has already promised the actions listed under "ALREADY PROMISED TO THE CUSTOMER IN WRITING". You are FORBIDDEN from writing a step, or any wording, that contradicts, walks back, or refuses one of them. If a cheaper or faster route exists, present it as the first thing to TRY, and keep the promised action as the step that follows if it does not resolve the issue — never as a replacement for it, and never phrased as telling the customer they were wrong to ask.');
+        }
+    }
+    return lines.join('\n');
 }
 
 function detectCaseLifecycleState(ci) {
@@ -4122,14 +4566,17 @@ function detectCaseLifecycleState(ci) {
     if (!entries || !entries.length) return res;
 
     const AUTO_REPLY = OOO_AUTO_REPLY_RE;
-    // Support-authored template phrases — customers never write these.
-    const SUPPORT_MARKER = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email/i;
+    const SUPPORT_MARKER = SUPPORT_SIGNATURE_RE; // support-authored template phrases (module level)
     // Customer agreeing the case is done ("you can close the case", "issue is resolved", …).
     const CUSTOMER_CONSENT = /\byou can (?:go ahead and )?close\b|\bplease (?:go ahead and )?close\b|\b(?:case|it|ticket) can be closed\b|\bok(?:ay)? to close\b|\benough information\b|\bissue (?:is|was|has been)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\bproblem (?:is|was)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\b(?:it'?s|it is|everything is) working now\b|\bno (?:further|more) (?:questions|assistance|help|support|issues)\b/i;
     // Support announcing/confirming closure (closing email, survey notice, 30-day reopen window).
     const SUPPORT_CLOSING = /\bproceed(?:ing)? (?:with|to) (?:the )?closure\b|\bmov(?:e|ing) forward to close\b|\bclos(?:e|ing) (?:of )?(?:the|this) case\b|\bcase (?:is now|has been|will (?:now )?be) closed\b|\breceive a survey\b|\bre-?open(?:ed)?\b[^.\n]{0,80}\b(?:30|thirty) days\b|\b(?:30|thirty) days\b[^.\n]{0,80}\bre-?open/i;
     // Customer saying it is NOT over — a signal like this NEWER than any closure talk reopens the case.
-    const REOPEN_SIGNAL = /\bstill (?:not working|failing|broken|see(?:ing)?|happening|occurr?ing|having|getting)\b|\bissue (?:persists|remains|is back|has returned|re-?occurr?ed)\b|\bnot (?:yet )?(?:resolved|fixed|working)\b|\bre-?open (?:the|this) case\b|\bdid(?:n'?t| not) (?:work|help|fix)\b|\bdoes(?:n'?t| not) work\b|\banother (?:issue|problem|error)\b|\bnew (?:issue|problem|error)\b/i;
+    // RECURRENCE is folded in (module-level, shared with detectChainSignals) so that a customer
+    // writing "I'm seeing the same error again" reopens the case exactly like "issue persists".
+    const REOPEN_SIGNAL = new RegExp(
+        '\\bstill (?:not working|failing|broken|see(?:ing)?|happening|occurr?ing|having|getting)\\b|\\bissue (?:persists|remains|is back|has returned|re-?occurr?ed)\\b|\\bnot (?:yet )?(?:resolved|fixed|working)\\b|\\bre-?open (?:the|this) case\\b|\\bdid(?:n\'?t| not) (?:work|help|fix)\\b|\\bdoes(?:n\'?t| not) work\\b|\\banother (?:issue|problem|error)\\b|\\bnew (?:issue|problem|error)\\b|'
+        + SIG_RECURRENCE_RE.source, 'i');
 
     const usable = entries.filter(e => !AUTO_REPLY.test(e.body));
     if (!usable.length) return res;
@@ -4256,11 +4703,635 @@ function buildCaseStateDirective(lc, kind) {
         : 'The email chain shows NO confirmed resolution and NO closure agreement — this case is STILL OPEN.');
     if (lc.evidence && lc.evidence.length) lines.push(evLines);
     if (kind === 'email') {
-        lines.push('The email MUST move the OPEN case forward: answer the customer\'s most recent unanswered question(s) precisely, or request exactly the missing information needed to proceed — grounded ONLY in the case data and the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH]/[OFFLINE PULSE KNOWLEDGE MATCHES] sections if present. If [RELEASE NOTES] shows this exact issue is fixed in a newer version, state the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and recommend the upgrade. If the chain references an earlier SOTI case that resolved a similar issue, acknowledge it and say support is reviewing that case\'s resolution. NEVER invent findings, links, or commitments.');
+        lines.push('The email MUST move the OPEN case forward: answer the customer\'s most recent unanswered question(s) precisely, or request exactly the missing information needed to proceed — grounded ONLY in the case data and the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH]/[OFFLINE PULSE KNOWLEDGE MATCHES] sections if present. Any information you ask the customer for must be named exactly (which artefact, from which server role, for which time window) and must obey the [LOG ACCESS] block — never ask a Cloud-hosted customer for server-side logs SOTI can collect itself. If the [MCMR RULE] block lists a verified matching fix, state the fix version (written in full, e.g. "2026.1.0") and that MCMR code verbatim and recommend the upgrade; if it lists none, do not mention release notes, MCMR codes, or an upgrade at all. If the chain references an earlier SOTI case that resolved a similar issue, acknowledge it and say support is reviewing that case\'s resolution. NEVER invent findings, links, or commitments.');
     } else {
-        lines.push('Because the case is OPEN, "Next steps:" MUST be a concrete TROUBLESHOOTING plan that moves the case toward resolution. Build the numbered list as: (1) the most likely cause(s) implied by the case evidence, each tied to a specific fact; (2) precise verification/configuration checks — use the exact console paths, settings, and prerequisites from [OFFLINE PULSE KNOWLEDGE MATCHES]/[DEEP RESEARCH]/[PULSE SEARCH]/[DOCS SEARCH] entries that match this issue, never invented ones; (3) the exact missing information to request from the customer — name each item specifically (which log files, the exact error text or a screenshot, device models, OS/agent versions, reproduction details); (4) ONLY if a [RELEASE NOTES] section is present AND shows this exact issue fixed in a newer version, cite the fix version (written in full, e.g. "2026.1.0") and the MCMR code verbatim and make upgrading a numbered step — if [RELEASE NOTES] is absent or says no matching fix, do NOT add any "review release notes" / "upgrade" step at all; (5) if the emails reference an earlier SOTI case as having resolved a similar issue, make reviewing that case\'s resolution an explicit numbered step. Keep steps that are already done OUT of this list (they belong under "Troubleshoots done"). NEVER pad with generic filler ("analyze the context", "escalate to L3", "review documentation", "review release notes"), and NEVER invent steps that are not supported by the case data or those sections.');
+        lines.push('Because the case is OPEN, "Next steps:" MUST be a concrete TROUBLESHOOTING plan that moves the case toward resolution.');
+        // EVERY step must be executable as written. The failure this replaces is the step
+        // "Verify the current server configuration against known stable states for versions
+        // 2026.1.1 and related versions" — grammatical, on-topic, and completely unusable:
+        // no artefact to open, no place to look, no result that would settle anything.
+        lines.push([
+            'EVERY numbered step MUST be executable exactly as written, and MUST contain all three of these:',
+            '  (a) ONE specific action the engineer performs;',
+            '  (b) the EXACT target it acts on — the named log file and which server role it sits on (e.g. MS.log on the Management Server, DS.log on the Deployment Server), the exact Windows service name, the console path, the port, the SQL object, the URL/FQDN, or the exact error string to search for — plus the exact time window when the evidence is time-bound;',
+            '  (c) what result CONFIRMS or RULES OUT the suspected cause, so the step actually decides something.',
+            'A step that names no artefact is FORBIDDEN. These exact shapes are BANNED and must never appear: "verify the current server configuration", "compare against known stable states", "check the configuration/settings", "review the setup/environment", "validate the server", "monitor the server for stability", "check the logs" (without naming which log, on which server, for what string), "review the documentation", "analyze the context", "escalate to L3", "ensure everything is working".',
+            'Build the list in this order: (1) the most likely cause(s) implied by the case evidence, each tied to a specific fact from the case; (2) the checks that confirm or eliminate each cause, taken from the [SOTI CHECKS THAT FIT THIS SYMPTOM] block when present and from [OFFLINE PULSE KNOWLEDGE MATCHES]/[DEEP RESEARCH]/[PULSE SEARCH]/[DOCS SEARCH] entries that match this issue — quote their artefact names, console paths, settings and prerequisites exactly, never invented ones; (3) the evidence still to be gathered, routed EXACTLY as the [LOG ACCESS] block dictates (who collects it, and from where); (4) ONLY if the [MCMR RULE] block lists a verified matching fix, cite that fix version in full (e.g. "2026.1.0") plus its MCMR code verbatim and make upgrading a numbered step — otherwise add NO release-notes or upgrade step at all; (5) if the emails reference an earlier SOTI case as having resolved a similar issue, make reviewing that case\'s resolution an explicit numbered step.',
+            'Keep anything already done OUT of this list (it belongs under "Troubleshoots done"). Five precise steps beat ten vague ones — if you cannot make a step specific, drop it.'
+        ].join('\n'));
     }
     return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// MC HOSTED — who is actually able to collect the server-side evidence
+// ---------------------------------------------------------------------------
+// The "MC Hosted" field in the Case Info panel decides HALF of every next-steps list, and
+// getting it wrong is immediately visible to the customer:
+//   Cloud   — SOTI hosts the server. The support agent has backend access and collects the
+//             logs/configuration THEMSELVES. Asking the customer to export server logs they
+//             cannot even reach is wrong, and it stalls the case for a round trip.
+//   On-Prem — the customer administers the server. SOTI has NO backend access, so every
+//             server-side artefact must be requested from the customer — and because logs
+//             collected unattended routinely come back at the wrong log level, from the wrong
+//             server role, or without the timestamp of the failure, the ask normally includes
+//             a short screen-share to capture them together against a known timestamp.
+// Small local models never infer this from context, so it is injected as a deterministic FACT
+// directive built from the field rather than left to the model to guess.
+function getMcHosted() {
+    const raw = (($('dsCfg') && $('dsCfg').value) || '').trim();
+    if (/cloud/i.test(raw)) return 'Cloud';
+    if (/on-?\s*prem/i.test(raw)) return 'On-Prem';
+    return '';
+}
+
+// kind: 'summary' | 'email' | 'fix'  — what the answer is FOR, which changes the wording of
+// the obligation (a customer-facing email must not say "I pulled your logs from the backend"
+// in the same terms an internal next-steps list does).
+// small: compact wording for CPU-bound models, where every kilobyte of prefill costs seconds.
+function buildLogAccessDirective(kind = 'summary', small = false) {
+    const hosted = getMcHosted();
+
+    if (hosted === 'Cloud') {
+        if (small) {
+            return `[LOG ACCESS — FACT, from the Case Info panel field "MC Hosted" = Cloud]: SOTI hosts this server, so the SUPPORT AGENT pulls the server logs, service state and configuration STRAIGHT FROM THE CLOUD BACKEND. You are FORBIDDEN from writing any step that asks the customer to collect, export, upload or send server-side logs or configuration. Only ask the customer for what exists solely on their side: device-side agent logs / Device Debug Report, a screenshot of what the end user sees, the exact date+time (with time zone) the error occurred, and device model / OS / agent version.`;
+        }
+        const lines = [
+            '[LOG ACCESS — VERIFIED FROM THE CASE INFO PANEL: the "MC Hosted" field is set to CLOUD. THIS IS FACT — DO NOT SECOND-GUESS IT AND DO NOT ASK THE AGENT TO CONFIRM IT.]',
+            'This customer runs a SOTI-hosted (Cloud) deployment, so SOTI Support HAS backend access to the server. The support agent collects the server-side evidence themselves — logs, Windows service state, configuration and database checks — directly from the cloud backend.',
+            '- Every step that needs server-side evidence MUST be written as the AGENT retrieving it from the backend, naming the exact artefact (for example the Management Service log MS.log, the Deployment Server log DS.log, the Windows Application event log, or the specific database check) and the exact time window to look at.',
+            '- You are FORBIDDEN from writing any step that asks the customer to collect, export, zip, upload or send server-side logs or configuration, and from proposing a log-collection meeting with the customer to gather them. That work is the agent\'s, and it can start immediately.',
+            '- The ONLY evidence to request from the customer is what exists solely on their side: the exact date and time (with time zone) the error occurred, a screenshot or the exact error text the end user sees, device-side agent logs / a Device Debug Report, device model, OS version and agent version, and how to reproduce it.'
+        ];
+        if (kind === 'email') {
+            lines.push('- In the email, do NOT ask the customer for server logs. Tell them SOTI is reviewing the server-side logs directly, and ask only for the customer-side details above.');
+        }
+        return lines.join('\n');
+    }
+
+    if (hosted === 'On-Prem') {
+        if (small) {
+            return `[LOG ACCESS — FACT, from the Case Info panel field "MC Hosted" = On-Prem]: the CUSTOMER hosts and administers this server, so SOTI Support has NO backend access. Every server-side artefact must be REQUESTED FROM THE CUSTOMER, named exactly: which log file, on which server role, at which log level, and the exact time window with time zone. Arranging the session with the customer is itself a next step: one numbered step MUST be "Arrange a 30-minute remote session with <the customer contact> to raise the log level on <server role>, reproduce the issue, note the exact timestamp, and collect <named log files> together" — written on its own, never folded into another step.`;
+        }
+        const lines = [
+            '[LOG ACCESS — VERIFIED FROM THE CASE INFO PANEL: the "MC Hosted" field is set to ON-PREM. THIS IS FACT — DO NOT SECOND-GUESS IT.]',
+            'The customer hosts and administers this server themselves, so SOTI Support has NO backend access. Every piece of server-side evidence must come FROM THE CUSTOMER.',
+            '- Each request MUST be specific enough to action without a follow-up: name the exact log file and the server role it lives on (e.g. MS.log on the Management Server, DS.log on the Deployment Server), the log level to raise BEFORE reproducing, and the exact time window with time zone to capture.',
+            '- Logs collected unattended routinely come back at the wrong log level, from the wrong server, or with no coverage of the failure.',
+            '- MANDATORY: because the server is the customer\'s, arranging a working session with them is itself a next step and MUST appear as its OWN numbered step in "Next steps:" — never folded into another step, never left implied, and never reduced to "request the logs". Write it as a bookable action: "Arrange a 30-minute remote session (Teams/WebEx) with <the customer contact> to raise the log level on <server role>, reproduce the issue live, note the exact timestamp, and collect <named log files> together on the call." Name who needs to attend from the customer side when it requires server access they alone hold.',
+            '- Do NOT write steps that assume SOTI can read the server, restart its services, or query its database directly — the agent cannot.'
+        ];
+        if (kind === 'email') {
+            lines.push('- The email MUST ask for those named artefacts explicitly and offer a specific screen-share session to capture them together, rather than a vague "please send us the logs".');
+        }
+        return lines.join('\n');
+    }
+
+    // Field not filled in — the one thing that must NOT happen is guessing, because both
+    // wrong answers are visible to the customer (asking a Cloud customer for logs SOTI
+    // already holds; telling an On-Prem customer SOTI will "check the backend" it cannot reach).
+    if (small) {
+        return `[LOG ACCESS — the "MC Hosted" field in the Case Info panel is EMPTY, so it is UNKNOWN whether SOTI can reach this server's backend]: do NOT assume either way. Make the first evidence step: confirm from the case record whether this deployment is Cloud (SOTI-hosted — the agent pulls the logs from the backend directly, no customer request needed) or On-Prem (customer-hosted — request the named logs from the customer, AND add a SEPARATE numbered step arranging a remote session to reproduce the issue and capture them together with exact timestamps), then follow that route. NEVER write an unconditional "ask the customer to send the logs" step.`;
+    }
+    return [
+        '[LOG ACCESS — the "MC Hosted" field in the Case Info panel is EMPTY, so whether SOTI Support can reach this server\'s backend is UNKNOWN.]',
+        '- Do NOT assume either way, and do NOT write an unconditional "request the logs from the customer" step: on a SOTI-hosted (Cloud) deployment the agent already has backend access and asking the customer wastes a round trip.',
+        '- Instead, make the FIRST evidence-related step: confirm from the case record / the MC Hosted field whether this deployment is Cloud or On-Prem — if Cloud, the agent pulls the named server logs straight from the backend; if On-Prem, the agent requests the named logs from the customer and arranges a short screen-share to reproduce the issue and capture them together with exact timestamps.',
+        '- If it resolves to On-Prem, arranging that session is itself a next step and MUST be written as its OWN numbered step ("Arrange a 30-minute remote session with <the customer contact> to raise the log level on <server role>, reproduce the issue, and collect <named log files> together"), not folded into another step.',
+        '- Every later evidence step must name the exact artefact regardless of which route applies.'
+    ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// SYMPTOM PLAYBOOK — concrete SOTI checks, chosen deterministically
+// ---------------------------------------------------------------------------
+// "Verify the current server configuration against known stable states" is what a model
+// writes when it has no product vocabulary to be specific WITH: the quick actions never
+// injected the product knowledge files (those are only loaded for log-analysis turns), so
+// the model had nothing concrete to name. This table supplies the real artefacts — service
+// names, log files, ports, error signatures, console paths — taken from the SOTI knowledge
+// shipped in knowledge/MobiControl.md and knowledge/MobiControl_Knowledge.md, matched to the
+// case symptom in JavaScript so the selection itself is never a guess.
+//
+// The block is offered as CANDIDATE checks: the model picks the ones the case evidence
+// supports and must not invent others. That keeps the steps specific without inviting
+// hallucination — the artefact names come from the table, not from the model.
+const SYMPTOM_PLAYBOOK = [
+    {
+        id: 'console-500-after-upgrade',
+        // "Internal server error" / HTTP 500 on the console, most often straight after an upgrade.
+        match: /\b(internal server error|http\s*5\d\d|error\s*5\d\d|500 error|server error|service unavailable|502|bad gateway)\b/i,
+        boost: /\b(upgrad\w+|updat\w+|migrat\w+|patch\w+|after the upgrade)\b/i,
+        title: 'Internal Server Error / HTTP 5xx on the SOTI MobiControl web console (frequently post-upgrade)',
+        checks: [
+            'Confirm the "SOTI MobiControl Management Service" Windows service is running and has not been restarting/crash-looping since the upgrade — the web console is hosted INSIDE the Management Service (there is no separate web server), so the 500 follows Management Service health.',
+            'Open MS.log on the Management Server at the EXACT timestamp of the error the customer reported and read the exception behind it — the HTTP 500 is the symptom; MS.log holds the cause.',
+            'In MS.log at that timestamp, look specifically for SqlException, "Login failed for user", "Cannot open database", "Timeout expired" or deadlock entries — after an upgrade the service account\'s SQL rights and the schema migration are the most common causes.',
+            'Verify the upgrade completed on EVERY node and that the Management Service, each Deployment Server and the database schema are all on the same build — hunt "Schema migration failed", "Version mismatch between MS and DS" and "Database version is newer than the installer" in MS.log / DS.log.',
+            'Review the MSI / MCSetup upgrade log for "Return value 3" and "returned actual error code 1603": the real cause is in the lines immediately ABOVE the first "Return value 3" (ignore "Closing MSIHANDLE" and "Note: 1: 2265" noise).',
+            'Reproduce the failure against the exact console FQDN and capture the HTTP status plus a browser HAR trace, so the failing request can be matched one-to-one with an MS.log entry.',
+            'Check DS.log on each Deployment Server for handshake/certificate errors at the same timestamp — a post-upgrade MS↔DS trust break surfaces to the console as a server error.'
+        ]
+    },
+    {
+        id: 'console-access',
+        match: /\b(cannot access|can'?t access|unable to (?:access|open|load|log ?in|sign ?in)|console (?:is )?(?:down|not loading|unavailable|inaccessible)|web ?console|webconsole|login (?:fails|failed|issue)|blank page)\b/i,
+        title: 'Web console unreachable / will not load or sign in',
+        checks: [
+            'Confirm the "SOTI MobiControl Management Service" Windows service is running on the server — if it is stopped or crash-looping the console URL does not load at all, and restarting it restores the console in most outage cases.',
+            'Confirm HTTPS/TCP 443 is reachable from the browser network (firewall, VPN, load balancer) and that nothing else is bound to that port.',
+            'Verify the certificate presented on the console URL is valid, matches the server FQDN being browsed to, and has a fully trusted chain.',
+            'Confirm the exact enrollment/console FQDN configured at installation resolves from the client network — an internal-only DNS name fails even when the server is healthy.',
+            'Check the SQL dependency: if SQL Server is down, out of disk, or refusing logins, the console fails to load or fails at sign-in. Search MS.log for SqlException / "Login failed for user" at the failure time.',
+            'Separate availability from authentication: if the page loads but the account cannot sign in, test with a LOCAL administrator account — success points at LDAP/SOTI Identity/SSO configuration, not at console availability.'
+        ]
+    },
+    {
+        id: 'devices-offline',
+        match: /\b(offline|not check(?:ing)? ?in|check-?in fail|disconnect\w*|not connect\w*|lost connection|dropped off|stopped reporting|unreachable device)\b/i,
+        title: 'Devices showing offline / not checking in',
+        checks: [
+            'Verify the agent→Deployment Server path itself: agents connect OUTBOUND to the DS on TCP 5494 (Binary) and/or 443 (HTTPS). "The device has internet" does not prove that path — confirm the DS FQDN resolves from the device network and those ports are open to it.',
+            'Check Deployment Server health: if the DS service is stopped or overloaded every device on it drops at once. Many devices dropping at the SAME timestamp points at the server, its host, or SQL — not at the devices.',
+            'Read DS.log at the timestamp the devices dropped for TLS/handshake or "The remote certificate is invalid" errors — a replaced or expired server certificate breaks every agent connection at once.',
+            'In the console, sort by last check-in time to size the blast radius: a single device offline is device-side; a whole group or all devices is server, network or certificate side.',
+            'Confirm on an affected device that the agent is installed and running, the device date/time is correct (TLS fails on a badly skewed clock), and the device was not re-imaged or factory reset without re-enrollment.',
+            'Check the SOTI Signal channel (HTTPS 13131) if push/notification-driven check-ins specifically are failing while manual connections succeed.'
+        ]
+    },
+    {
+        // FOTA — firmware over the air. Zebra LifeGuard OTA and Samsung Knox E-FOTA are
+        // ORCHESTRATED upgrades: SOTI schedules them, the VENDOR's OTA service performs them, and
+        // the console status is only ever as fresh as the last successful sync back from that
+        // vendor service. That is why "stuck at Pending Upgrade" is almost never an enrollment
+        // fault and never a MobiControl-database fault — it is a schedule that has not fired, a
+        // device-side install precondition that is never satisfied, or a status that never synced
+        // back. Every check below is taken from the Pulse LifeGuard OTA / Knox E-FOTA articles.
+        id: 'firmware-ota',
+        match: /\b(fota|e-?fota|lifeguard|life ?guard ?ota|firmware|ota (?:upgrade|update|server|account|status)|zebra ota|pending upgrade|upgrade firmware|cancel (?:the )?(?:firmware|upgrade)|zds|zebra data services)\b/i,
+        // A firmware case that also says the deployment is stuck/pending is unambiguous.
+        boost: /\b(stuck|pending|not chang\w*|no change|still (?:in|at|shows?)|never (?:install\w*|complet\w*)|cancel\w*|re-?initiat\w*)\b/i,
+        title: 'Firmware over-the-air (FOTA) upgrade stuck in Pending Upgrade / needs cancelling — Zebra LifeGuard OTA & Samsung Knox E-FOTA',
+        checks: [
+            'Try the documented console cancellation FIRST, because it is immediate and the customer can do it themselves: SOTI MobiControl 2024.1 and later ships a "Cancel Firmware Upgrade" device action (Device Actions menu on the device or device group). The dialog lists the scheduled upgrades grouped BY FIRMWARE MODEL GROUP — select the affected group, choose Proceed, then Yes. Documented in "Cancelling Scheduled Upgrades" on SOTI Pulse. Check the console build is 2024.1 or later before recommending it.',
+            'The BACKEND cancel/reset the customer asked for remains a legitimate and often necessary route — do NOT refuse it or tell the customer the console action is the only way. It is the correct path when: the console is older than 2024.1 and has no Cancel Firmware Upgrade action; the console action runs but the device stays in Pending Upgrade; or the console and the Zebra OTA service disagree about the device\'s state, which is exactly what a sync that never changes anything looks like. Treat console-first as an ordering of effort, not as a rejection of the customer\'s request, and say plainly which of the two is being done and why.',
+            'Read the REAL status before concluding it is stuck: open the device\'s Device Information panel > Device Details tab > "Firmware Upgrades" section. That section — not the device list column — is where the per-device upgrade state and any failure detail is recorded, and it distinguishes "scheduled, waiting for its install window" from "failed".',
+            'Establish WHERE in the upgrade each device stopped — downloaded-but-not-installed and never-downloaded are different faults with different fixes. In that same "Firmware Upgrades" section, read the scheduled download window and installation window against the device\'s last check-in. Zebra\'s retry behaviour is narrow and is often misquoted: a device that has ALREADY DOWNLOADED the firmware but was offline during its scheduled INSTALLATION window keeps retrying during that window for up to 28 days (come online on day 14 and it installs). A device that never completed the download is not covered by that retry at all. Report which of the two each serial number is in — do not ask the engineer to work it out from dates alone.',
+            'Verify the Zebra LifeGuard OTA account is still logged in for this MobiControl instance: the "Sync LifeGuard OTA Device Status" device action is only available for Zebra devices WITH a logged-in OTA server account, and requires the "Firmware over the air" permission. A repeated sync that changes nothing is the expected outcome when the OTA account session or the operator permission is the thing that is broken, not the device — which makes this the first thing to check on a "synced many times, nothing moved" report.',
+            'Correlate server-side at the exact timestamps of the original deployment and of each "Sync LifeGuard OTA Device Status" attempt: read DS.log on the Deployment Server the devices report to, and MS.log on the Management Server, for the outbound Zebra OTA API call and its response. If MobiControl never received a status change back from the Zebra OTA service, the fault is on the vendor-service side of the integration, not in the console — and that is what justifies the backend reset rather than another console retry.',
+            'Check the install preconditions chosen when the upgrade was scheduled — they hold a device at pending indefinitely and silently: Minimum Battery Level (%) For Installation (upgrades can fail below 30%), "Install Only While Charging" (never installs unless docked/plugged in), and Network Type set to Wi-Fi Only (never installs on a device that only ever sees cellular). Confirm each against the state of the affected devices.',
+            'Confirm each device still meets the LifeGuard OTA prerequisites: it is a Zebra device, it is enrolled as Android Enterprise, Zebra Data Services (ZDS) is enabled on it (enabled by default — a device configuration or lockdown that disables ZDS stops OTA dead), and it meets Zebra\'s FOTA OS and firmware requirements for that model.',
+            'Take the OTA API response code, not a guess: any error surfaced by the upgrade or the sync maps to a documented code in the Zebra OTA API Troubleshooting Guide on SOTI Pulse, which lists each OTA API response code with its description and suggested solution. Quote the code from the console/log and look it up there.',
+            'For Samsung Knox E-FOTA the equivalents are: the "Sync Knox E-FOTA Device Status" device action, the Knox E-FOTA licence/certificate state under Global Settings > Android > Samsung Knox E-FOTA (an EXPIRED validation certificate makes SOTI MobiControl stop processing every status notification from Samsung, which presents exactly as a frozen status), and the "Unenroll for Knox E-FOTA" action.'
+        ]
+    },
+    {
+        id: 'enrollment',
+        // "enrol" must be a REPORTED symptom, not the Salesforce case-template label
+        // ("If Android, please specify enrollment method…") that sits in every single case —
+        // buildCaseSymptomText strips those labels before this table ever sees the text.
+        match: /\b(enroll\w*|provision\w*|afw#|qr code|zero touch|knox|kme|dpc|stuck at connecting|device already enrolled)\b/i,
+        title: 'Enrollment / provisioning failures',
+        checks: [
+            'Read DS.log and MS.log at the exact time of the failed enrollment attempt for DeviceEnrollmentException, "Enrollment rule not found", "Add Devices Rule disabled", "Device already enrolled" or "EMM token expired".',
+            'Confirm the enrollment rule being used is enabled, targets the right device family/platform, and matches the enrollment mode actually being performed (AE fully managed / work profile / COPE / classic).',
+            'Confirm the device network can reach the DS FQDN on 5494 and 443 BEFORE enrollment — a device that cannot reach the DS enrolls partially or shows offline immediately afterwards.',
+            'Check the platform token/credential validity: Android Enterprise binding, APNs certificate expiry for iOS/macOS, or the Zero-Touch/KME configuration referenced by the rule.',
+            'Collect the exact error text shown on the device plus a Device Debug Report (DDR) from a failing device, and the device model, OS version and agent version.'
+        ]
+    },
+    {
+        id: 'sql-database',
+        match: /\b(sql|database|db\b|deadlock|timeout expired|login failed for user|cannot open database|connection pool)\b/i,
+        title: 'SQL / database faults behind the symptom',
+        checks: [
+            'Search MS.log and DS.log for SqlException, "Timeout expired", "Transaction was deadlocked", "Login failed for user", "Cannot open database" and "Connection pool exhausted" at the failure timestamps.',
+            'Confirm the SOTI service account still has its required rights on the MobiControl database (upgrades in particular fail when the installing account lacks sysadmin/dbo).',
+            'Check SQL Server host health at the failure time: free disk for the data and log files, database/log growth, and the SQL Server error log.',
+            'Confirm MS and DS can reach SQL Server on TCP 1433 (or the configured port/instance), including after any network or credential change.'
+        ]
+    },
+    {
+        id: 'certificate',
+        match: /\b(certificat\w*|ssl|tls|handshake|scep|root ca|chain|crl|ocsp|expired cert)\b/i,
+        title: 'Certificate / TLS trust failures',
+        checks: [
+            'Check expiry and chain of the server certificate actually presented on the failing endpoint, and that its subject/SAN matches the FQDN clients use.',
+            'Search MS.log / DS.log for "Handshake failed", "The remote certificate is invalid", "Certificate chain incomplete" or "Root CA not trusted" at the failure timestamps.',
+            'For device-side TLS failures, confirm the device clock is correct and the root CA is present in the device trust store.',
+            'For SCEP/PKI profiles, confirm the certificate template exists, the CA is reachable, and CRL/OCSP endpoints resolve from the server.'
+        ]
+    },
+    {
+        id: 'installer-upgrade',
+        match: /\b(upgrad\w+|install\w*|setup\w*|msi|rollback|migration|1603|return value 3)\b/i,
+        title: 'Installer / upgrade failure',
+        checks: [
+            'In the MSI / MCSetup log, find the FIRST "Return value 3" and read the lines immediately above it — that is the true failure point; "CustomAction ... returned actual error code 1603" names the failing action.',
+            'Check the prerequisite/environment errors earlier in the same session (system-requirements check, .NET runtime, disk space, locked files) — when there is no 1603 those are the root cause, not the rollback line.',
+            'Confirm the upgrade order and completeness: all Management Service nodes first, then every Deployment Server, all on the same build, with the database schema migrated.',
+            'Confirm the account performing the upgrade holds the SQL rights the schema migration needs, and that a database backup exists before re-running it.'
+        ]
+    },
+    {
+        id: 'auth-sso',
+        match: /\b(sso|saml|idp|identity|ldap|active directory|adfs|azure ad|entra|token expired|clock skew|authentication)\b/i,
+        title: 'Authentication / directory / SSO failures',
+        checks: [
+            'Test with a LOCAL administrator account to separate directory/SSO failure from console or service failure.',
+            'Search MS.log for "SAML assertion invalid", "SSO token expired", "Clock skew detected", "LDAP server unreachable" or "Invalid credentials for directory user" at the failure time.',
+            'Confirm the directory host is reachable on 389/636 from the server and that the bind account credentials have not expired or been locked.',
+            'Confirm server and IdP clocks are in sync, and that the SOTI Identity / IdP entity ID, issuer and redirect URL match the FQDN users actually browse to.'
+        ]
+    },
+    {
+        id: 'profile-package',
+        match: /\b(profile|policy|package|application|app deploy\w*|oemconfig|script|run control)\b/i,
+        title: 'Profile / package deployment failures',
+        checks: [
+            'Search MS.log and DS.log for "Profile deployment failed", "Policy conflict", "Package deployment failed", "OEMConfig parse error" or "Script execution failed" at the deployment timestamp.',
+            'Confirm the profile/package assignment actually targets the affected devices, and check for a conflicting profile applying the same setting.',
+            'Confirm package dependencies and device compatibility (platform, OS version, agent version) for the affected device models.',
+            'Collect a Device Debug Report (DDR) from one affected device to see the agent-side result of the deployment.'
+        ]
+    },
+    {
+        id: 'performance',
+        // NOT perform\w*: "after performing the Sync LifeGuard OTA Device Status action" and
+        // "we will perform backend checks" are the VERB, and they scored the slowness family
+        // onto cases with no slowness in them at all. Only the noun forms are symptom words.
+        match: /\b(slow\w*|performance|performing (?:slowly|poorly|badly)|latency|hang\w*|freez\w*|unresponsive|timeout|high cpu|memory)\b/i,
+        title: 'Slowness / timeouts',
+        checks: [
+            'Correlate the slow periods with MS.log and DS.log timeout/deadlock entries and with SQL Server waits, blocking and deadlock reports at the same timestamps.',
+            'Check device load distribution across Deployment Servers and the health of the "SOTI MobiControl Search Server" service if console search/lists are the slow part.',
+            'Check host resources (CPU, memory, disk latency) on the Management Server, Deployment Servers and the SQL host during the slow window.',
+            'Establish whether the slowness is console-wide, one feature, or one device group — that split isolates MS, SQL, or a DS.'
+        ]
+    }
+];
+
+// Pick the playbook families this case's evidence actually supports and render them as
+// candidate checks. maxFamilies/maxChecks keep the block affordable on small local models.
+function buildSymptomPlaybook(caseText, opts = {}) {
+    const text = String(caseText || '').replace(/\s+/g, ' ').trim();
+    if (!text || text.length < 12) return '';
+    const maxFamilies = opts.maxFamilies || 2;
+    const maxChecks = opts.maxChecks || 6;
+
+    const scored = [];
+    for (const fam of SYMPTOM_PLAYBOOK) {
+        const m = text.match(fam.match);
+        if (!m) continue;
+        // Distinct matched phrases, not raw occurrences: one word repeated by a quoted email
+        // tail must not outrank a family that genuinely matches two different signals.
+        let score = new Set((text.match(new RegExp(fam.match.source, 'gi')) || []).map(s => s.toLowerCase())).size;
+        if (fam.boost && fam.boost.test(text)) score += 3;
+        scored.push({ fam, score });
+    }
+    if (!scored.length) return '';
+    scored.sort((a, b) => b.score - a.score);
+
+    // RELEVANCE FLOOR. Broad families match on a single incidental word — "upgrade" pulls the
+    // MSI/installer family into a FIRMWARE upgrade case, whose checks (find "Return value 3" in
+    // the MSI log) are nonsense there. When one family clearly owns the case, a runner-up that
+    // scored a fraction of it is not a second opinion, it is a second SUBJECT, and every check
+    // in it is a next step the engineer might waste a round trip on. Keep runners-up only when
+    // they are within a third of the leader.
+    const floor = Math.max(2, Math.ceil(scored[0].score / 3));
+    const keep = scored.filter((s, i) => i === 0 || s.score >= floor);
+
+    const parts = keep.slice(0, maxFamilies).map(({ fam }) =>
+        `${fam.title}:\n${fam.checks.slice(0, maxChecks).map(c => `- ${c}`).join('\n')}`
+    );
+    return `[SOTI CHECKS THAT FIT THIS SYMPTOM — real SOTI MobiControl service names, log files, ports and error signatures, selected mechanically from the case text. These are CANDIDATES: use the ones this case's evidence actually supports, quote the artefact names exactly as written here, and do NOT invent additional product behaviour, menu paths or file names. Anything already done belongs under the "done" section, not in the next steps.]\n${parts.join('\n\n')}`;
+}
+
+// ---------------------------------------------------------------------------
+// MCMR CITATION ENFORCEMENT
+// ---------------------------------------------------------------------------
+const MCMR_CODE_RE = /\bMCMR[-\s]?(\d{3,7})\b/gi;
+
+// Every MCMR code appearing in a blob, normalised to "MCMR-12345".
+function collectMcmrCodes(text) {
+    const out = new Set();
+    for (const m of String(text || '').matchAll(MCMR_CODE_RE)) out.add(`MCMR-${m[1]}`);
+    return out;
+}
+
+// ---- Symptom ↔ release-notes matching (the gate every citable MCMR must pass) ----
+// Bag-of-words matching alone is what produced the wrong citation: an "internal server error
+// after an upgrade" case is written almost entirely in vocabulary that appears in EVERY
+// resolved-issue line ("error", "server", "upgrade", "issue", "device"), so a couple of hits
+// proves nothing. Matching therefore runs on two channels:
+//   • PHRASE — a contiguous 2-3 word sequence from the case that carries at least one
+//     non-generic word ("internal server error", "qr code enrollment") appearing verbatim in
+//     the release-notes line. This is decisive on its own.
+//   • BAG-OF-WORDS — the fallback, now requiring 3 hits AND 2 DISTINCTIVE (non-generic) words,
+//     up from 2 hits and 1, which is the bar the mis-cited entry slipped through.
+const RN_SCAN_STOPWORDS = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with',
+    'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could',
+    'should', 'about', 'doing', 'it', 'for', 'been', 'being', 'also', 'than', 'then', 'them', 'these', 'those', 'while',
+    'after', 'before', 'during', 'because', 'please', 'thanks', 'regards', 'hello', 'customer', 'client', 'troubleshoot']);
+const RN_SCAN_STOP3 = new Set(['not', 'has', 'can', 'out', 'off', 'get', 'got', 'did', 'was', 'the', 'and', 'for', 'are',
+    'its', 'any', 'all', 'you', 'our', 'how', 'why', 'who', 'his', 'her', 'had', 'but', 'use', 'via', 'per', 'now', 'one',
+    'two', 'see', 'too', 'yet', 'own', 'due']);
+// Vocabulary that appears in nearly every resolved-issue line — hits on these carry no
+// evidential weight on their own.
+const RN_GENERIC_WORDS = new Set(['error', 'errors', 'fail', 'failed', 'failing', 'fails', 'failure', 'issue', 'issues',
+    'device', 'devices', 'update', 'updates', 'updated', 'updating', 'upgrade', 'upgraded', 'upgrading', 'version', 'versions',
+    'support', 'console', 'android', 'working', 'works', 'work', 'message', 'messages', 'command', 'commands',
+    'send', 'sending', 'sent', 'push', 'pushed', 'latest', 'using', 'server', 'servers', 'displayed', 'display', 'caused',
+    'causing', 'stopped', 'mobicontrol', 'action', 'actions', 'kicked', 'went', 'thru', 'through', 'shows',
+    'showing', 'saying', 'says', 'getting', 'gets', 'fixed', 'resolved', 'problem', 'problems', 'case', 'cases',
+    'open', 'opened', 'report', 'reported', 'reporting', 'call', 'called', 'confirm', 'confirmed', 'user', 'users',
+    // MDM LIFECYCLE / PROCESS VOCABULARY. These are the words that made a Zebra LifeGuard OTA
+    // case cite four unrelated fixes: "pending", "status", "changed", "sync", "deployed" and
+    // "enterprise" are rare in any ONE resolved-issue line, so a corpus-frequency (IDF) test
+    // scores them as decisive — but they describe the MDM lifecycle itself and therefore appear
+    // in every case AND in a large share of notes, so overlapping on them proves nothing. The
+    // decisive terms in that case (fota, lifeguard, firmware, zebra, ota) matched nothing at
+    // all, and the entry was cited anyway. A citable line must now share real technical
+    // vocabulary — a feature, component, platform artefact or error string — with the case.
+    'pending', 'status', 'statuses', 'state', 'states', 'change', 'changed', 'changes', 'changing',
+    'sync', 'synced', 'syncing', 'synchronize', 'synchronized', 'synchronization',
+    'deploy', 'deployed', 'deploying', 'deployment', 'deployments', 'enterprise',
+    'install', 'installs', 'installed', 'installing', 'installation', 'uninstall', 'uninstalled',
+    'remove', 'removed', 'removing', 'delete', 'deleted', 'deleting', 'apply', 'applied', 'applying',
+    'enable', 'enabled', 'enabling', 'disable', 'disabled', 'disabling', 'select', 'selected', 'selecting',
+    'complete', 'completed', 'request', 'requests', 'requested', 'attempt', 'attempts', 'attempted',
+    'receive', 'received', 'return', 'returned', 'returns', 'appear', 'appears', 'appeared',
+    'incorrect', 'incorrectly', 'correct', 'correctly', 'unable', 'missing', 'available',
+    'perform', 'performed', 'performing', 'created', 'create', 'creating', 'added', 'add', 'adding',
+    'setting', 'settings', 'configure', 'configured', 'configuring', 'configuration', 'configurations',
+    'option', 'options', 'value', 'values', 'field', 'fields', 'list', 'lists', 'page', 'pages', 'view', 'views']);
+// Glue words that must not appear inside a phrase — a window containing one is not a
+// meaningful technical phrase ("error after an upgrade" says nothing).
+const RN_PHRASE_GLUE = new Set(['the', 'a', 'an', 'of', 'to', 'and', 'in', 'on', 'for', 'with', 'that', 'this', 'is', 'was',
+    'are', 'were', 'be', 'been', 'has', 'have', 'had', 'it', 'its', 'they', 'their', 'them', 'we', 'our', 'you', 'your',
+    'but', 'or', 'at', 'by', 'as', 'from', 'not', 'no', 'so', 'if', 'when', 'after', 'before', 'during', 'while', 'then']);
+
+function normalizeScanText(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildSymptomScanTokens(text) {
+    const norm = normalizeScanText(text);
+    const words = norm.split(' ').filter(Boolean);
+
+    const kept = [...new Set(words.filter(w =>
+        (w.length > 3 && !RN_SCAN_STOPWORDS.has(w)) ||
+        (w.length === 3 && /^[a-z]+$/.test(w) && !RN_SCAN_STOP3.has(w))
+    ))];
+    const variants = kept.map(w => {
+        const v = [w];
+        const stem = w.replace(/(ings?|ed|es|s)$/, '');
+        if (stem.length >= 4 && stem !== w) v.push(stem);
+        return v;
+    });
+
+    const phrases = new Set();
+    for (let size = 3; size >= 2; size--) {
+        for (let i = 0; i + size <= words.length; i++) {
+            const win = words.slice(i, i + size);
+            if (win.some(w => w.length < 3 || RN_PHRASE_GLUE.has(w) || RN_SCAN_STOPWORDS.has(w))) continue;
+            // A phrase made only of generic vocabulary ("server error") is no more decisive
+            // than the words themselves — it must carry at least one distinctive term.
+            if (!win.some(w => !RN_GENERIC_WORDS.has(w))) continue;
+            phrases.add(win.join(' '));
+            if (phrases.size >= 60) break;
+        }
+    }
+    return { variants, phrases: [...phrases] };
+}
+
+// { hits, distinct, phrase } for one release-notes line against the case symptom.
+function scoreReleaseNoteLine(line, tokens) {
+    const norm = ' ' + normalizeScanText(line) + ' ';
+    let hits = 0, distinct = 0;
+    for (const vs of (tokens.variants || [])) {
+        if (vs.some(v => norm.includes(v))) {
+            hits++;
+            if (!vs.some(v => RN_GENERIC_WORDS.has(v))) distinct++;
+        }
+    }
+    const phrase = (tokens.phrases || []).find(p => norm.includes(' ' + p + ' ')) || '';
+    return { hits, distinct, phrase };
+}
+
+// THE gate. A release-notes line may only be shown to the model — and therefore only be
+// cited — when it clears this.
+function releaseNoteLineMatchesSymptom(line, tokens) {
+    const s = scoreReleaseNoteLine(line, tokens);
+    return { ...s, matched: !!s.phrase || (s.hits >= 3 && s.distinct >= 2) };
+}
+
+// Record the MCMR codes carried by a line that passed the gate, so the prompt can name them
+// as the allow-list and enforceMcmrCitations can hold the answer to it.
+function recordVerifiedMcmrLine(line, version, product) {
+    for (const code of collectMcmrCodes(line)) {
+        if (VERIFIED_MCMR_ENTRIES.some(e => e.code === code)) continue;
+        VERIFIED_MCMR_ENTRIES.push({ code, version: version || '', product: product || '', line: String(line).slice(0, 240) });
+    }
+}
+
+// The prompt-side rule: name the codes the model MAY cite, and forbid every other one.
+// Injected as data (not as a system rule) so it survives the small-model prompt trimmer.
+function buildMcmrCitationRule(caseText) {
+    const caseCodes = collectMcmrCodes(caseText);
+    if (MCMR_CITATION_MODE === 'open') {
+        return '[MCMR RULE — the agent asked to SEE the release notes, so quote the entries in [RELEASE NOTES] exactly as written. Never merge two entries, never attach an MCMR code to a version other than the one whose section it appears under, and never write an MCMR code that is not printed in this prompt.]';
+    }
+    const lines = ['[MCMR RULE — ABSOLUTE. A wrong MCMR reference is a factual error that reaches the customer, so this is enforced, not advisory.]'];
+    if (VERIFIED_MCMR_ENTRIES.length) {
+        lines.push('These are the ONLY release-notes fixes whose text was deterministically matched to THIS case\'s symptom, and therefore the only ones you may cite:');
+        for (const e of VERIFIED_MCMR_ENTRIES.slice(0, 8)) {
+            lines.push(`- ${e.code} — fixed in ${e.product ? e.product + ' ' : ''}version ${e.version}: "${String(e.line).replace(/^[-\s]+/, '').trim()}"`);
+        }
+        lines.push('Cite one ONLY if it genuinely describes the customer\'s symptom; if none of them does, cite none and do not mention release notes at all. Write the fix version IN FULL exactly as shown (e.g. "2026.1.0", never "26.1.0").');
+    } else {
+        lines.push('NO release-notes entry matched this case\'s symptom. You are therefore FORBIDDEN from writing any MCMR code, any "fixed in version X" claim, and any "review the release notes" / "upgrade to fix this" step in this answer.');
+    }
+    if (caseCodes.size) {
+        lines.push(`You MAY still refer to the development ticket(s) already raised on this case and named in the case data: ${[...caseCodes].join(', ')}.`);
+    }
+    lines.push('Any MCMR code outside the list(s) above — including one that appears elsewhere in this prompt under a different symptom — is WRONG. Never invent, adapt, or guess a code.');
+    return lines.join('\n');
+}
+
+// Deterministic output guard: delete MCMR references the data does not support. Runs AFTER
+// generation because instructions alone are not a guarantee on a small local model — this is.
+// Returns { text, removed: [codes] }.
+function enforceMcmrCitations(text, allowedCodes) {
+    const src = String(text || '');
+    if (!src) return { text: src, removed: [] };
+    const present = collectMcmrCodes(src);
+    const bad = [...present].filter(code => !allowedCodes.has(code));
+    if (!bad.length) return { text: src, removed: [] };
+
+    const badRe = new RegExp(`\\bMCMR[-\\s]?(?:${bad.map(c => c.split('-')[1]).join('|')})\\b`, 'i');
+
+    const kept = [];
+    for (const line of src.split('\n')) {
+        if (!badRe.test(line)) { kept.push(line); continue; }
+        // Drop only the sentence that carries the bad code — the rest of the paragraph or
+        // list item is usually sound. Sentence split keeps "2026.1.0" and "e.g." intact by
+        // only breaking on terminal punctuation followed by a space or end of line.
+        const sentences = line.split(/(?<=[.!?])(?=\s)/);
+        const survivors = sentences.filter(s => !badRe.test(s));
+        const rebuilt = survivors.join('').replace(/\s{2,}/g, ' ').trimEnd();
+        // Nothing but the list marker / numbering (or stray bold markers) left → the whole
+        // step was about the bad reference, so drop the line rather than leave a dangling bullet.
+        if (/^\s*(?:[-*•]|\d+[.)])?\s*\**\s*$/.test(rebuilt)) continue;
+        kept.push(rebuilt);
+    }
+    let out = renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n').trim();
+    out += `\n\n*Note: ${bad.length === 1 ? 'a release-notes reference (' + bad[0] + ') was' : 'release-notes references (' + bad.join(', ') + ') were'} removed — ${bad.length === 1 ? 'it does' : 'they do'} not match this case's symptom in the verified SOTI release-notes data.*`;
+    return { text: out, removed: bad };
+}
+
+// ---------------------------------------------------------------------------
+// VAGUE NEXT-STEP FILTER
+// ---------------------------------------------------------------------------
+// "Verify the current server configuration against known stable states for versions X and
+// related versions" is a step an engineer cannot perform: no artefact, no target, no pass/fail.
+// A step is deleted only when it is BOTH generic-verification phrasing AND carries no concrete
+// anchor at all (no named file, service, port, console path, error string, quoted text,
+// timestamp or ticket). Requiring both conditions is what keeps real steps safe.
+// The object list deliberately excludes bare "server"/"system": they appear in perfectly
+// concrete steps ("confirm the certificate matches the server FQDN"), and the vagueness always
+// lives in the OBJECT being verified ("the configuration", "the setup", "the logs"), not in the
+// noun "server". Including them cost real steps in testing.
+const VAGUE_STEP_RE = /\b(verify|check|review|validate|assess|examine|confirm|monitor|ensure|analy[sz]e|investigate|look into|evaluate|inspect)\b[^.\n]{0,80}?\b(configuration|config|settings?|setup|environment|server state|state of the server|stability|stable states?|best practices?|documentation|docs|release notes|knowledge base|logs|log files?|health|parameters?)\b/i;
+const CONCRETE_ANCHOR_RE = new RegExp([
+    '\\b[\\w.-]+\\.(?:log|txt|xml|config|zip|har|evtx|json|csv)\\b',   // a named file
+    '\\bMCMR-\\d+\\b',                                                  // a defect ticket
+    '\\b(?:C0\\d{6,8})\\b',                                             // a SOTI case number
+    // NOTE: a bare version number is deliberately NOT an anchor. "Verify the configuration
+    // against known stable states for versions 2026.1.1 and related versions" contains one and
+    // is still unactionable — the version says nothing about WHAT the engineer opens or runs.
+    '\\b(?:port|tcp|udp)\\s*\\d{2,5}\\b',                               // a port
+    '\\b\\d{2,5}\\s*/\\s*(?:tcp|udp)\\b',
+    '\\bSOTI MobiControl (?:Management Service|Deployment Server|Search Server)\\b',
+    '\\b(?:MS|DS|DSE)\\.log\\b',
+    '\\b(?:SqlException|Login failed for user|Return value 3|1603|HTTP\\s*\\d{3})\\b',
+    '\\bDevice Debug Report\\b|\\bDDR\\b',
+    '\\bEvent Viewer\\b|\\bApplication event log\\b|\\bWindows Event\\b',
+    '"[^"\\n]{4,}"',                                                    // an exact quoted string
+    '\\b\\w+\\s*(?:>|→|->)\\s*\\w+',                                    // a console path
+    '\\b(?:screen-?share|remote session|Teams|Zoom|WebEx)\\b',          // a concrete meeting ask
+    '\\b\\d{1,2}:\\d{2}\\b'                                             // an exact timestamp
+].join('|'), 'i');
+
+// Which section of the answer a header line opens. "Troubleshoots done" and friends RECORD
+// what already happened: a bullet there is a fact about the past, and must never be edited by
+// the vague-step filter or flagged by the log-access check, however loosely it is worded.
+// Headers arrive as "Next steps:", "**Next steps:**" or a bare bold "**Next steps**", so both
+// shapes are generated from one source string rather than written out twice.
+const sectionHeaderRe = (src) => new RegExp(`^\\s*\\**\\s*(?:${src})\\s*\\**\\s*:?\\s*\\**\\s*$|^\\s*\\**\\s*(?:${src})\\s*:`, 'i');
+const HISTORICAL_SECTION_SRC = 'troubleshoots?\\s+done|troubleshooting steps?|steps? taken|actions? taken|case timeline|summary|case summary|problem|solution|root cause|resolution|research links?|current status|key details';
+const FORWARD_SECTION_SRC = 'next steps?|recommended next steps?|next actions?|the fix[^:\\n]*|how to verify|if it does not resolve|recommendations?';
+const HISTORICAL_SECTION_RE = sectionHeaderRe(HISTORICAL_SECTION_SRC);
+const FORWARD_SECTION_RE = sectionHeaderRe(FORWARD_SECTION_SRC);
+
+// Renumber "1. 2. 3." runs after deletions so the list never reads 1, 2, 4.
+function renumberOrderedSteps(text) {
+    const lines = String(text || '').split('\n');
+    let n = 0;
+    return lines.map(line => {
+        const m = line.match(/^(\s*)(\d+)([.)])(\s+)(.*)$/);
+        if (!m) { if (line.trim() === '') n = 0; return line; }
+        n++;
+        return `${m[1]}${n}${m[3]}${m[4]}${m[5]}`;
+    }).join('\n');
+}
+
+function stripVagueNextSteps(text) {
+    const lines = String(text || '').split('\n');
+    const kept = [];
+    let removed = 0;
+    // Only police the forward-looking section — a "Troubleshoots done" bullet is a record of
+    // what happened and must never be edited, however loosely it is worded.
+    let inNextSteps = false;
+    for (const line of lines) {
+        if (FORWARD_SECTION_RE.test(line)) { inNextSteps = true; kept.push(line); continue; }
+        if (HISTORICAL_SECTION_RE.test(line)) { inNextSteps = false; kept.push(line); continue; }
+        const isStep = /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(line);
+        if (inNextSteps && isStep) {
+            const body = line.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '');
+            if (VAGUE_STEP_RE.test(body) && !CONCRETE_ANCHOR_RE.test(body)) { removed++; continue; }
+        }
+        kept.push(line);
+    }
+    if (!removed) return text;
+    // Never hand back an empty plan: if the filter ate everything, keep the original — a
+    // vague plan still beats no plan, and the directives above make that outcome rare.
+    const out = renumberOrderedSteps(kept.join('\n'));
+    const survivingSteps = (out.match(/^\s*(?:[-*•]|\d+[.)])\s+\S/gm) || []).length;
+    if (!survivingSteps) return text;
+    return out.replace(/\n{3,}/g, '\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// LOG-ACCESS CONTRADICTION FLAG
+// ---------------------------------------------------------------------------
+// The [LOG ACCESS] directive tells the model who collects the evidence; this catches the
+// answer that ignored it. Unlike the MCMR and vague-step guards this one does NOT edit the
+// text: "request the customer to provide further details, including any log files or
+// reproduction details" is half wrong on a Cloud case (the logs) and half right (the
+// reproduction details), and no regex can safely split that. So it appends a correction the
+// engineer can act on, which is honest about what the model got wrong without destroying
+// content that is still useful.
+// Device-side evidence is legitimate to request on ANY deployment, so a clause about agent
+// logs / a Device Debug Report / a screenshot never triggers the flag.
+const DEVICE_SIDE_EVIDENCE_RE = /\b(device[- ]side|agent log|device log|Device Debug Report|DDR|screenshot|screen recording|device model|OS version|agent version)\b/i;
+// `(?:[^.\n]|\.(?!\s))` = stay inside ONE sentence, but still cross the dot in a filename:
+// a plain [^.\n] run stops dead at "MS.log" and missed "Pull MS.log from the cloud backend".
+const CUSTOMER_LOG_REQUEST_RE = /\b(?:ask|asking|request|requesting|have|get|obtain)\b(?:[^.\n]|\.(?!\s)){0,60}\bcustomer\b(?:[^.\n]|\.(?!\s)){0,120}\blogs?\b|\bcustomer\s+to\s+(?:provide|send|share|upload|collect|export|gather)\b(?:[^.\n]|\.(?!\s)){0,100}\blogs?\b/i;
+const AGENT_BACKEND_PULL_RE = /\b(?:pull|retrieve|collect|access|obtain|download)\b(?:[^.\n]|\.(?!\s)){0,60}\b(?:from|on|in|via)\s+the\s+(?:cloud\s+)?backend\b|\bbackend access\b/i;
+
+// Everything except the explicitly-historical sections — i.e. the parts of the answer that
+// tell the engineer what to DO. Text with no section headers at all (a drafted email) is
+// forward-looking in its entirety.
+function collectActionableLines(text) {
+    const out = [];
+    let historical = false;
+    for (const line of String(text || '').split('\n')) {
+        if (HISTORICAL_SECTION_RE.test(line)) { historical = true; continue; }
+        if (FORWARD_SECTION_RE.test(line)) { historical = false; continue; }
+        if (!historical) out.push(line);
+    }
+    return out;
+}
+
+function flagLogAccessMismatch(text, hosted) {
+    const src = String(text || '');
+    if (!src.trim() || !hosted) return src;
+    const actionable = collectActionableLines(src);
+
+    if (hosted === 'Cloud') {
+        const offending = actionable.filter(l => CUSTOMER_LOG_REQUEST_RE.test(l) && !DEVICE_SIDE_EVIDENCE_RE.test(l));
+        if (!offending.length) return src;
+        return src + `\n\n*Check: this case is Cloud-hosted (MC Hosted = Cloud), so you can pull the server logs from the backend yourself — a step above asks the customer for them instead. Collect them directly and ask the customer only for the exact time of the error, the error text/screenshot, and device-side details.*`;
+    }
+
+    if (hosted === 'On-Prem') {
+        const offending = actionable.filter(l => AGENT_BACKEND_PULL_RE.test(l));
+        if (!offending.length) return src;
+        return src + `\n\n*Check: this case is On-Prem (MC Hosted = On-Prem), so SOTI has no backend access — a step above assumes you can collect the evidence from the server yourself. Request each named log from the customer and arrange a screen-share to reproduce the issue and capture them together with exact timestamps.*`;
+    }
+    return src;
+}
+
+// One post-generation pass for every case-writing answer (Case Summary, Draft Email, Fix,
+// 30/60/90): unverifiable MCMR references out, contentless verification steps out, and a
+// flag when the answer collects evidence from the wrong side of the deployment.
+function postValidateCaseAnswer(text, allowedMcmrCodes) {
+    let out = String(text || '');
+    try { out = enforceMcmrCitations(out, allowedMcmrCodes).text; } catch (e) { console.warn('MCMR enforcement failed', e); }
+    try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
+    try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
+    return out;
 }
 
 // Deterministic OLDEST-FIRST chronology of the email chain (date — sender — gist) for
@@ -4278,22 +5349,46 @@ function buildChainChronology(ci, purpose) {
     try { entries = getCleanChainEntries(raw); } catch (e) { return ''; }
     if (!entries || !entries.length) return '';
     const grounding = purpose === 'grounding';
-    const ordered = entries.slice().reverse().slice(0, 24); // OLDEST first
-    const lines = ordered.map((e, i) => {
+    // OLDEST first. The cap used to be a plain slice(0, 24) of the oldest end, which on any
+    // chain longer than 24 messages silently threw away the NEWEST messages and then labelled
+    // the 24th-oldest one "THE NEWEST MESSAGE" — so the model reported a months-old state as
+    // the current one. Keep both ends instead, and say what was left out in between.
+    const all = entries.slice().reverse();
+    // 26 keeps this scaffold at roughly the size it was when it (wrongly) showed only the
+    // oldest 24 — it is injected into the small-model quick-action prompt, where every
+    // kilobyte competes with the case data, so covering both ends must not cost extra budget.
+    const MAX_LINES = 26;
+    let ordered = all, elidedAfter = -1, elidedCount = 0;
+    if (all.length > MAX_LINES) {
+        const oldKeep = Math.floor(MAX_LINES * 0.45); // how the case began
+        const newKeep = MAX_LINES - oldKeep;          // where it stands now
+        ordered = all.slice(0, oldKeep).concat(all.slice(all.length - newKeep));
+        elidedAfter = oldKeep - 1;
+        elidedCount = all.length - MAX_LINES;
+    }
+    const lines = [];
+    ordered.forEach((e, i) => {
         const isNewest = i === ordered.length - 1;
         // The NEWEST message defines the current status — give it a longer gist so decisive
-        // tail content (e.g. "refer to SOTI support case C01641726") is never cut away.
-        const gist = e.body.replace(/\s+/g, ' ').trim().slice(0, isNewest ? 260 : 110);
+        // tail content (e.g. "refer to SOTI support case C01641726") is never cut away. The
+        // "…" is appended only when text was ACTUALLY cut: on a short entry ("Case created")
+        // the old unconditional ellipsis implied missing content that was never there.
+        const g = chainOneLine(e.body, isNewest ? 260 : 110);
         const tags = [];
         if (/\bINTERNAL\b/i.test(e.type || '')) tags.push('INTERNAL note');
         if (/\bCALL\b/i.test(e.type || '')) tags.push('phone CALL LOG — a phone call, not an email');
         if (OOO_AUTO_REPLY_RE.test(e.body)) tags.push('out-of-office auto-reply');
-        return `- ${e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${gist}…"`;
+        lines.push(`- ${formatChainDate(e) || e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${g.text}${g.truncated ? '…' : ''}"`);
+        if (i === elidedAfter && elidedCount > 0) {
+            lines.push(`- …[${elidedCount} further message${elidedCount === 1 ? '' : 's'} between ${formatChainDate(all[elidedAfter], { noTime: true }) || 'here'} and ${formatChainDate(ordered[elidedAfter + 1], { noTime: true }) || 'the next line'} — the case continued through them; they are omitted here only to save space]`);
+        }
     });
     const newest = ordered[ordered.length - 1];
+    // Same date rendering as the lines above, so the model can match this pointer to its line.
+    const newestWhen = formatChainDate(newest) || newest.time || '';
     const newestLine = grounding
-        ? `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the current state of the case comes from THIS message; attribute it to THIS author, not an older one.`
-        : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newest.time ? `, sent ${newest.time}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
+        ? `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the current state of the case comes from THIS message; attribute it to THIS author, not an older one.`
+        : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
     // Other SOTI case numbers referenced inside the emails are gold for troubleshooting
     // ("this happened before and was resolved in case X") — extract them deterministically
     // so they can never be lost to gisting/truncation. The CURRENT case's own number (from
@@ -4318,15 +5413,621 @@ function buildChainChronology(ci, purpose) {
     return `${header}\n${lines.join('\n')}${newestLine}${refCasesLine}`;
 }
 
+// ============================ FULL EMAIL-CHAIN DIGEST ============================
+// "Give me a full, detailed, accurate summary of the email chain with an accurate timeline."
+//
+// A single model call CANNOT answer that on a long case. A 104-message chain is ~45K raw
+// characters; a small local model (gemma e2b and friends) gets ~11K characters of prompt in
+// total, so the chain arrives pre-truncated and the model — asked to summarize text it can
+// only partly see — echoes the fragments back verbatim, mid-sentence "…" and all, in whatever
+// order it was handed them.
+//
+// So this path does not ask the model to do the whole job. It splits the work:
+//   • DETERMINISTIC (JavaScript, exact, never wrong): the chronological order, every date,
+//     every author, each message's role (customer / SOTI Support / call log / internal note),
+//     the message counts, the date span, the referenced JIRA + case numbers, and the
+//     one-line entry for every message whose cleaned text is already short enough to quote
+//     in full. These are extracted, not generated, so they cannot be hallucinated.
+//   • THE MODEL: only compresses the messages that are genuinely too long to quote, a small
+//     batch at a time so every batch fits the context window comfortably — then writes the
+//     narrative Overview and Current-status prose from a compact digest of the whole case.
+//
+// The result covers EVERY message in the chain, in true chronological order, at any length.
+
+// Does this turn ask for a summary / timeline of the correspondence itself?
+function isEmailChainSummaryRequest(text) {
+    const t = String(text || '').trim();
+    if (!t || t.length > 600) return false;
+    const wantsDigest = /\b(summar\w+|recap|overview|timeline|chronolog\w+|history|breakdown|rundown|run[- ]down|walk\s+me\s+through|what\s+happened|catch\s+me\s+up)\b/i.test(t);
+    if (!wantsDigest) return false;
+    // ...of the CORRESPONDENCE (not of the logs, not of a document, not of this chat).
+    const aboutChain = /\b(e-?mail\s*chain|email-?chain|chain|thread|correspondence|e-?mails?|conversation\s+with\s+the\s+customer|case\s+history|case\s+timeline)\b/i.test(t);
+    if (!aboutChain) return false;
+    // "summarise the log file" / "recap what you told me" belong to other, existing paths.
+    if (/\b(log|logs|log\s*file|forensic|stack\s*trace|this\s+chat|our\s+chat|your\s+(?:last\s+)?answer|what\s+you\s+(?:said|told))\b/i.test(t)) return false;
+    return true;
+}
+
+// Role of one chain entry, decided the same way the lifecycle detector decides it so the two
+// never disagree. lc is a detectCaseLifecycleState() result (customerSender / agentSender).
+// Names are compared with any trailing company parenthetical removed: the feed writes
+// "Viktor Samsonov (Tech Solutions)" but detectCaseLifecycleState deliberately stores the bare
+// "Viktor Samsonov", so a raw comparison never matched and the CUSTOMER's own emails ended up
+// with no role at all (and were counted as "other" in the digest header).
+function chainEntryRole(e, lc) {
+    const type = (e && e.type) || '';
+    if (/\bCALL\b/i.test(type)) return 'phone call log';
+    if (/\bINTERNAL\b/i.test(type)) return 'internal note';
+    const bare = (s) => String(s || '').replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase();
+    const sender = bare(e && e.sender);
+    if (OOO_AUTO_REPLY_RE.test((e && e.body) || '')) return 'out-of-office auto-reply';
+    if (lc && lc.customerSender && sender && sender === bare(lc.customerSender)) return 'customer';
+    if (lc && lc.agentSender && sender && sender === bare(lc.agentSender)) return 'SOTI Support';
+    if (SUPPORT_SIGNATURE_RE.test((e && e.sigBody) || (e && e.body) || '')) return 'SOTI Support';
+    return '';
+}
+
+// Flatten a cleaned body to one line, cut at a SENTENCE boundary where possible so a timeline
+// entry never ends mid-word (the "…began happening in bulk starting 20 November 2025. …" the
+// old fixed-160-char gist produced is exactly what this avoids). Returns { text, truncated }.
+function chainOneLine(body, max) {
+    const flat = String(body || '').replace(/\s+/g, ' ').trim();
+    if (flat.length <= max) return { text: flat, truncated: false };
+    const head = flat.slice(0, max);
+    // Longest prefix ending in sentence punctuation that is followed by a space or the cut.
+    // "2024.1.2" and "e.g" style dots are not followed by a space, so version numbers survive.
+    const sentence = (head.match(/^[\s\S]*[.!?](?=\s|$)/) || [''])[0];
+    if (sentence.length >= Math.floor(max * 0.4)) return { text: sentence.trim(), truncated: true };
+    const space = head.lastIndexOf(' ');
+    return { text: (space > 0 ? head.slice(0, space) : head).trim(), truncated: true };
+}
+
+// Every message that needs the model, grouped into calls that each fit the context window.
+// Short messages never reach here — their cleaned text IS the timeline line, quoted exactly.
+// maxChars bounds the MESSAGE payload of one call; the ~1.1K instruction preamble and the
+// per-item header/quote marks are accounted for by the +90 below, so the finished prompt for a
+// small model lands around 4–5K characters (~2K tokens) — a fast prefill that leaves the whole
+// output budget free.
+function buildChainDigestBatches(items, opts = {}) {
+    const maxPerBatch = Math.max(1, opts.maxPerBatch || 8);
+    const maxChars = Math.max(600, opts.maxChars || 3000);
+    const batches = [];
+    let cur = [], curChars = 0;
+    for (const it of items) {
+        const cost = it.text.length + 90; // + the "[n] date — sender (role):" line and quote marks
+        if (cur.length && (cur.length >= maxPerBatch || curChars + cost > maxChars)) {
+            batches.push(cur); cur = []; curChars = 0;
+        }
+        cur.push(it); curChars += cost;
+    }
+    if (cur.length) batches.push(cur);
+    return batches;
+}
+
+// Parse "[3] the model's one-liner" back into a map of index → line. Tolerant of the shapes a
+// small model actually emits ("3.", "3)", "**[3]**", a stray bullet) and of extra prose lines,
+// which are ignored rather than allowed to shift every later message onto the wrong date.
+function parseChainDigestLines(out) {
+    const map = new Map();
+    for (const rawLine of String(out || '').split('\n')) {
+        const m = rawLine.trim().match(/^[-*\s]*(?:\*\*)?\[?(\d{1,3})\]?(?:\*\*)?\s*[.):\-–—]?\s+(.*)$/);
+        if (!m) continue;
+        let text = m[2].replace(/^\**\s*/, '').replace(/\s*\**$/, '').trim();
+        text = text.replace(/^["'“”]+|["'“”]+$/g, '').trim();
+        if (text.length < 3) continue;
+        const n = parseInt(m[1], 10);
+        if (!map.has(n)) map.set(n, text);
+    }
+    return map;
+}
+
+// One model call. Returns a Map(localIndex → one-line summary); an empty Map on ANY failure,
+// so a dead/slow Ollama degrades to the deterministic gists instead of breaking the answer.
+async function summarizeChainBatch(batch, opts = {}) {
+    const empty = new Map();
+    try {
+        if (!LOCAL_AI_MODEL) return empty;
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const listed = batch.map((it, i) =>
+            `[${i + 1}] ${it.date}${it.role ? ` — ${it.sender} (${it.role})` : ` — ${it.sender}`}:\n"""${it.text}"""`
+        ).join('\n\n');
+        const n = batch.length;
+        const system = 'You compress support-case messages into one factual line each. You never add information, never merge messages, never skip one, and never copy a message out verbatim. Output ONLY the numbered lines.';
+        const user = `Below are ${n} message${n === 1 ? '' : 's'} from a SOTI support case, in order.
+
+Write EXACTLY ${n} line${n === 1 ? '' : 's'}, one per message, in the SAME order, in this format:
+[1] <what this message actually says or does>
+${n > 1 ? `[2] <…>\n…up to [${n}]` : ''}
+
+RULES:
+- One line per message. Never merge two messages into one line and never split one across two.
+- Maximum 30 words per line. Write it as a statement of what happened, in the past tense.
+- KEEP every concrete detail: names, versions, device names/IDs, error text and status codes, database fields and values, counts, ticket IDs (e.g. MCMR-42071), case numbers, dates mentioned INSIDE the message, and any commitment or request made.
+- DROP greetings, thanks, signatures, disclaimers and "I hope you are well" filler.
+- If a message is only an acknowledgement, say exactly that (e.g. "Acknowledged the customer's reply and said the developers were informed").
+- Output nothing except the ${n} numbered line${n === 1 ? '' : 's'} — no heading, no preamble, no blank lines, no closing remark.
+
+MESSAGES:
+${listed}`;
+        const res = await fetch(`${baseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: opts.signal || null,
+            body: JSON.stringify({
+                model: LOCAL_AI_MODEL,
+                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                stream: false,
+                keep_alive: -1,
+                ...(isThinkingModel ? { think: false } : {}),
+                options: {
+                    // The SESSION context size, never a bespoke one: changing num_ctx between
+                    // requests makes Ollama re-allocate the KV cache (a full model reload, tens
+                    // of seconds on CPU) and this path issues many calls in a row.
+                    num_ctx: opts.numCtx || 8192,
+                    temperature: 0.0,
+                    top_p: 0.9,
+                    repeat_penalty: 1.1,
+                    num_predict: Math.min(1400, 70 * n + 120)
+                }
+            })
+        });
+        if (!res.ok) return empty;
+        const data = await res.json();
+        const msg = data.message || {};
+        let out = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking || '';
+        out = out.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+        return parseChainDigestLines(out);
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e; // the user cancelled — stop the whole digest
+        console.warn('[Chain digest] batch failed', e);
+        return empty;
+    }
+}
+
+// A model that "summarizes" by copying its input back is worse than no model at all — the
+// exact failure this whole path exists to fix. Reject a line that is essentially the source
+// text (or that just parrots the instructions) and keep the deterministic gist instead.
+function chainDigestLineIsEcho(line, source) {
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const a = norm(line), b = norm(source);
+    if (!a) return true;
+    if (/^(message|email|entry)\s+\d+\b/i.test(line.trim())) return true;
+    if (a.length > 40 && b.startsWith(a.slice(0, Math.min(a.length, 120)))) return true;
+    return b.includes(a) && a.length > 60;
+}
+
+// Narrative prose (Overview + where the case stands now) from a COMPACT digest of the whole
+// case — never from the raw chain, which is exactly what does not fit. Returns '' on failure;
+// the caller then ships the deterministic report on its own.
+async function writeChainNarrative(brief, opts = {}) {
+    try {
+        if (!LOCAL_AI_MODEL) return '';
+        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const system = 'You are a senior SOTI support engineer writing a briefing for a colleague who is picking up this case. You use ONLY the facts given to you. You never invent a fact, a date, a name, a version or an outcome, and you never copy the input back verbatim.';
+        const user = `Here is a mechanically-extracted digest of a SOTI support case's entire email chain. Every date, name and event in it is exact.
+
+${brief}
+
+Write EXACTLY these two sections and nothing else — no preamble, no heading above them, no closing remark:
+
+Overview: 4 to 7 sentences of continuous prose. What the customer reported, on what product/environment, what the technical symptom is, what support and development have done about it across the case, and how the case has developed. Name people and dates where they matter. Do NOT write a bullet list here and do NOT restate the timeline message by message.
+
+Current status: 2 to 4 sentences. Where the case stands RIGHT NOW, based on the newest entries only, naming who said what and when, plus what is outstanding.`;
+        const res = await fetch(`${baseUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: opts.signal || null,
+            body: JSON.stringify({
+                model: LOCAL_AI_MODEL,
+                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+                stream: false,
+                keep_alive: -1,
+                ...(isThinkingModel ? { think: false } : {}),
+                options: { num_ctx: opts.numCtx || 8192, temperature: 0.1, top_p: 0.9, repeat_penalty: 1.1, num_predict: 700 }
+            })
+        });
+        if (!res.ok) return '';
+        const data = await res.json();
+        const msg = data.message || {};
+        let out = msg.content || msg.reasoning_content || msg.reasoning || msg.thinking || '';
+        return out.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '').replace(/<\|think\|>[\s\S]*?(?:<\|\/?think\|>|$)/gi, '').trim();
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e;
+        console.warn('[Chain digest] narrative failed', e);
+        return '';
+    }
+}
+
+// A section label as a small model actually writes it: "Overview:", "**Overview:**",
+// "## Overview", "__Overview__:" — emphasis markers can sit on either side of the colon.
+const chainLabelRx = (word, anchored) => new RegExp(
+    (anchored ? '^' : '') + '\\s*(?:#{1,4}\\s*)?(?:\\*\\*|__)?\\s*' + word + '\\s*(?:\\*\\*|__)?\\s*:?\\s*(?:\\*\\*|__)?\\s*', 'i');
+
+// Split the model's narrative into its two sections. A small model drops or renames headings
+// often enough that a fallback split (last paragraph = the status) is worth having.
+function splitChainNarrative(text) {
+    const t = String(text || '').trim();
+    if (!t) return { overview: '', status: '' };
+    const stripOverview = (s) => s.replace(chainLabelRx('overview', true), '').trim();
+    const m = t.match(new RegExp('^([\\s\\S]*?)(?:^|\\n)' + chainLabelRx('current\\s*status', false).source, 'i'));
+    if (m) return { overview: stripOverview(m[1]), status: t.slice(m[0].length).trim() };
+    const paras = t.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+    if (paras.length >= 2) {
+        return { overview: stripOverview(paras.slice(0, -1).join('\n\n')), status: paras[paras.length - 1] };
+    }
+    return { overview: stripOverview(t), status: '' };
+}
+
+// ---- QA review checkpoints (the "(QA)" button only) ----
+// Everything below is MEASURED from the entry timestamps and roles in JavaScript — turnaround
+// times, unanswered messages, who owes the next reply. None of it is generated, so a QA
+// reviewer can quote these figures straight into a case audit without verifying them against
+// the chain by hand. Out-of-office auto-replies are never counted as a reply: an OOO is
+// exactly the case where the clock kept running.
+function buildChainQAChecks(rows, facts, lc) {
+    const DAY = 864e5;
+    const oldestFirst = rows.slice().reverse();
+    const dayGap = (a, b) => Math.max(0, Math.round((b - a) / DAY));
+
+    // Walk forward pairing each customer message with the FIRST SOTI Support reply that
+    // follows it. A customer who chases before any reply does not open a second gap — the
+    // wait is still measured from their first unanswered message, which is what QA cares about.
+    const gaps = [];
+    let waiting = null;             // the oldest customer message still unanswered
+    let customerMsgs = 0;
+    for (const r of oldestFirst) {
+        if (typeof r.entry.ts !== 'number') continue;
+        if (r.role === 'customer') {
+            customerMsgs++;
+            if (!waiting) waiting = r;
+        } else if (r.role === 'SOTI Support' && waiting) {
+            gaps.push({ days: dayGap(waiting.entry.ts, r.entry.ts), asked: waiting, answered: r });
+            waiting = null;
+        }
+    }
+
+    const sorted = gaps.map(g => g.days).sort((a, b) => a - b);
+    const median = sorted.length
+        ? (sorted.length % 2 ? sorted[(sorted.length - 1) / 2]
+            : Math.round((sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2))
+        : null;
+    const worst = gaps.slice().sort((a, b) => b.days - a.days).filter(g => g.days >= 3).slice(0, 3);
+    const newestTs = typeof facts.newest.ts === 'number' ? facts.newest.ts : null;
+    const sinceLast = newestTs === null ? null : dayGap(newestTs, Date.now());
+    const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+    const out = [];
+    out.push('## QA review checkpoints\n');
+    out.push('*Measured directly from the chain\'s timestamps and message roles — every figure below is extracted, not written by the model.*\n');
+
+    // Count from facts so this never contradicts the header above it; anything the chain gives
+    // no parsable date for cannot be timed, and is called out rather than silently dropped.
+    const undated = facts.counts.customer - customerMsgs;
+    if (facts.counts.customer) {
+        out.push(`- **Support responsiveness:** ${plural(facts.counts.customer, 'customer message')} in the chain, ${plural(gaps.length, 'measurable customer→SOTI turnaround')}`
+            + (median !== null ? ` — median **${plural(median, 'day')}**, longest **${plural(sorted[sorted.length - 1], 'day')}**.` : '.')
+            + (undated > 0 ? ` (${undated} carr${undated === 1 ? 'ies' : 'y'} no parsable date and ${undated === 1 ? 'is' : 'are'} excluded from these figures.)` : ''));
+    }
+    if (worst.length) {
+        out.push('- **Longest waits for a SOTI reply:** ' + worst.map(g =>
+            `**${plural(g.days, 'day')}** (${g.asked.sender} on ${formatChainDate(g.asked.entry, { shortMonth: true, noTime: true })} → replied ${formatChainDate(g.answered.entry, { shortMonth: true, noTime: true })})`
+        ).join('; ') + '.');
+    } else if (gaps.length) {
+        out.push('- **Longest waits for a SOTI reply:** none over 3 days — every customer message was answered promptly.');
+    }
+    if (waiting) {
+        const open = typeof waiting.entry.ts === 'number' ? dayGap(waiting.entry.ts, Date.now()) : null;
+        out.push(`- **Unanswered:** ${waiting.sender}'s message of ${formatChainDate(waiting.entry, { shortMonth: true, noTime: true })} has no SOTI Support reply in the chain`
+            + (open !== null ? ` — **${plural(open, 'day')}** and counting.` : '.'));
+    }
+    out.push(`- **Ball is with:** ${facts.newest.role === 'customer' ? '**SOTI Support** — the newest entry is from the customer'
+        : facts.newest.role === 'SOTI Support' ? '**the customer** — the newest entry is from SOTI Support'
+        : facts.newest.role ? `not determinable from the newest entry — it is ${/^[aeiou]/i.test(facts.newest.role) ? 'an' : 'a'} ${facts.newest.role}, not correspondence`
+        : 'unclear — the newest entry is from a sender with no identifiable role'}`
+        + ` (${facts.newest.sender || 'unknown sender'}, ${formatChainDate(facts.newest, { shortMonth: true, noTime: true }) || facts.newest.time || 'undated'}).`);
+    if (sinceLast !== null) {
+        out.push(`- **Silence since the last message:** ${plural(sinceLast, 'day')}.`);
+    }
+    if (facts.counts.ooo) {
+        out.push(`- **Out-of-office auto-replies in the chain:** ${facts.counts.ooo} — these are excluded from the turnaround figures above.`);
+    }
+    out.push(`- **Case activity recorded:** ${plural(facts.counts.call, 'phone call log')}, ${plural(facts.counts.internal, 'internal note')}`
+        + (facts.jiras.length ? `, development ticket${facts.jiras.length === 1 ? '' : 's'} ${facts.jiras.join(', ')}.` : ', no development ticket referenced.'));
+    if (lc.state === 'closure') {
+        out.push(`- **Closure evidence:** the chain shows the case resolved / in closure${lc.customerConfirmed ? ', with the customer confirming it can be closed' : ', but WITHOUT an explicit customer confirmation'}${lc.supportClosingSent ? ' and the closure email sent' : ''}.`);
+    } else if (lc.state === 'active') {
+        out.push('- **Closure evidence:** none — no confirmed resolution and no closure agreement appears anywhere in the correspondence.');
+    }
+    return out.join('\n');
+}
+
+// The deterministic backbone of the report: counts, span, participants, referenced tickets.
+function buildChainFacts(entries, raw, ci, lc) {
+    const n = entries.length;
+    const counts = { customer: 0, support: 0, call: 0, internal: 0, ooo: 0, other: 0 };
+    for (const e of entries) {
+        const role = e.role;
+        if (role === 'customer') counts.customer++;
+        else if (role === 'SOTI Support') counts.support++;
+        else if (role === 'phone call log') counts.call++;
+        else if (role === 'internal note') counts.internal++;
+        else if (role === 'out-of-office auto-reply') counts.ooo++;
+        else counts.other++;
+    }
+    const oldest = entries[n - 1], newest = entries[0];
+    const from = formatChainDate(oldest, { noTime: true });
+    const to = formatChainDate(newest, { noTime: true });
+    let days = null;
+    if (typeof oldest.ts === 'number' && typeof newest.ts === 'number') {
+        days = Math.max(0, Math.round((newest.ts - oldest.ts) / 864e5));
+    }
+    const uniq = (arr) => [...new Set(arr)];
+    const jiras = uniq((raw.match(/\b[A-Z]{2,6}-\d{3,6}\b/g) || []).filter(x => !/^(?:TLS|SQL|API|SHA|AES|RSA|UTC|GMT)-/i.test(x)));
+    const ownCase = (((ci && ci.case_number) || '').trim().toUpperCase());
+    const cases = uniq(raw.match(/\bC0\d{6,8}\b/g) || []).filter(x => x.toUpperCase() !== ownCase);
+    return { n, counts, from, to, days, jiras, cases, oldest, newest, lc };
+}
+
+// Build the whole answer. Deterministic everywhere it matters; the model only fills in prose
+// and compresses the long messages. onProgress(markdown) streams partial output to the UI.
+// opts.qa — the "Email Chain In-depth Analysis (QA)" button: same report, plus the measured
+// QA review checkpoints section. A typed "summarise the email chain" leaves it off and gets
+// exactly the output it always did.
+async function buildFullChainSummary(ci, opts = {}) {
+    const raw = ((ci && ci.email_chain) || '').trim();
+    if (!raw) return 'There is no email chain synced for this case yet — sync it from Salesforce (or paste it into Case Info) and ask again.';
+
+    const lc = detectCaseLifecycleState(ci) || {};
+    let entries = getCleanChainEntries(raw).map(e => ({ ...e, role: chainEntryRole(e, lc) }));
+    if (!entries.length) return 'The email chain for this case is empty once signatures and disclaimers are stripped — there is nothing to summarise.';
+
+    const facts = buildChainFacts(entries, raw, ci, lc);
+    const small = isSmallLocalModel();
+    // A message this short is already a one-liner once the boilerplate is gone: quote it
+    // EXACTLY rather than spending a model call (and a hallucination risk) compressing it.
+    const QUOTE_LIMIT = 190;
+    const MODEL_INPUT_CAP = small ? 800 : 2200;
+
+    const rows = entries.map((e, i) => {
+        const one = chainOneLine(e.body, QUOTE_LIMIT);
+        return {
+            idx: i,
+            entry: e,
+            date: formatChainDate(e) || e.time || 'undated',
+            sender: (e.sender || 'Unknown').trim(),
+            role: e.role,
+            line: one.text,
+            exact: !one.truncated,               // quoted in full → cannot be wrong
+            needsModel: one.truncated,
+            text: chainOneLine(e.body, MODEL_INPUT_CAP).text
+        };
+    });
+
+    const pending = rows.filter(r => r.needsModel);
+    const batches = buildChainDigestBatches(pending, {
+        maxPerBatch: small ? 8 : 20,
+        maxChars: small ? 3000 : 14000
+    });
+    // Hard ceiling on model work so a 400-message chain can never run for an hour; anything
+    // past it keeps its deterministic gist, which is accurate, just less compressed. Both
+    // ceilings cover ~300 long messages (small batches are smaller but there are more of them).
+    const MAX_BATCHES = small ? 30 : 15;
+    const runBatches = batches.slice(0, MAX_BATCHES);
+
+    const numCtx = await getSessionCtx(LOCAL_AI_MODEL).catch(() => 8192);
+    let done = 0;
+    for (const batch of runBatches) {
+        if (opts.signal && opts.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+        if (opts.onProgress) {
+            const pct = Math.round((done / runBatches.length) * 100);
+            opts.onProgress(`**Reading the email chain — ${facts.n} messages, ${facts.from} → ${facts.to}.**\n\nCondensing the long messages: pass ${done + 1} of ${runBatches.length} (${pct}%)\n\n<div class="thinking-dot"></div>`);
+        }
+        const got = await summarizeChainBatch(batch, { signal: opts.signal, numCtx });
+        batch.forEach((item, k) => {
+            const line = got.get(k + 1);
+            if (line && !chainDigestLineIsEcho(line, item.text)) {
+                rows[item.idx].line = line.replace(/\s+/g, ' ').trim();
+                rows[item.idx].exact = false;
+            } else {
+                rows[item.idx].line = rows[item.idx].line + '…'; // deterministic gist stands
+            }
+        });
+        done++;
+        await paintYield(0);
+    }
+    // Messages in batches past the ceiling never reached the model — mark their gist as the
+    // extract it is, so the report is honest about which lines are trimmed rather than condensed.
+    for (const r of rows) {
+        if (r.needsModel && r.line === chainOneLine(r.entry.body, QUOTE_LIMIT).text) r.line += '…';
+    }
+
+    if (opts.onProgress) opts.onProgress(`**Reading the email chain — ${facts.n} messages, ${facts.from} → ${facts.to}.**\n\nWriting the summary…\n\n<div class="thinking-dot"></div>`);
+
+    // ---- the compact brief the narrative pass gets (never the raw chain) ----
+    const oldestFirst = rows.slice().reverse();
+    const monthKey = (r) => {
+        const ts = r.entry.ts;
+        if (typeof ts !== 'number') return 'Undated';
+        const d = new Date(ts);
+        return `${d.toLocaleString('en-GB', { month: 'long' })} ${d.getFullYear()}`;
+    };
+    const months = [];
+    for (const r of oldestFirst) {
+        const k = monthKey(r);
+        if (!months.length || months[months.length - 1].key !== k) months.push({ key: k, rows: [] });
+        months[months.length - 1].rows.push(r);
+    }
+    const briefLine = (r, max) => `- ${r.date} — ${r.sender}${r.role ? ` (${r.role})` : ''}: ${chainOneLine(r.line, max).text}`;
+    // The fixed part: the facts, how it started, and where it is now. Small and always sent.
+    const briefHead = [
+        `CASE: ${(ci && ci.case_number) || 'n/a'}${ci && ci.product ? ` · product ${ci.product}` : ''}${ci && ci.soti_version ? ` · version ${ci.soti_version}` : ''}${ci && ci.platform ? ` · platform ${ci.platform}` : ''}`,
+        `CHAIN: ${facts.n} messages from ${facts.from} to ${facts.to}${facts.days !== null ? ` (${facts.days} days)` : ''} — ${facts.counts.customer} from the customer, ${facts.counts.support} from SOTI Support, ${facts.counts.call} phone call logs, ${facts.counts.internal} internal notes.`,
+        lc.customerSender ? `CUSTOMER: ${lc.customerSender}` : '',
+        lc.agentSender ? `SOTI SUPPORT ENGINEER: ${lc.agentSender}` : '',
+        facts.jiras.length ? `DEVELOPMENT TICKETS REFERENCED: ${facts.jiras.join(', ')}` : '',
+        facts.cases.length ? `OTHER SOTI CASES REFERENCED: ${facts.cases.join(', ')}` : '',
+        (ci && ci.issue_summary) ? `REPORTED ISSUE: ${String(ci.issue_summary).replace(/\s+/g, ' ').trim().slice(0, 600)}` : '',
+        '',
+        'HOW THE CASE STARTED (oldest entries):',
+        oldestFirst.slice(0, 4).map(r => briefLine(r, 170)).join('\n')
+    ].filter(l => l !== '').join('\n');
+    const briefTail = [
+        'THE MOST RECENT ENTRIES (newest last — the current state of the case):',
+        oldestFirst.slice(-8).map(r => briefLine(r, 190)).join('\n'),
+        '',
+        `THE NEWEST ENTRY OF ALL is from ${facts.newest.sender || 'unknown'}${facts.newest.role ? ` (${facts.newest.role})` : ''} on ${formatChainDate(facts.newest) || facts.newest.time}. The current status MUST come from it.`
+    ].join('\n');
+    // The month-by-month middle is the only elastic part — it gets whatever budget is left, so
+    // a 9-month case and a 3-month case both produce a prompt the model can actually digest.
+    const briefBudget = small ? 4200 : 13000;
+    let rollUp = '';
+    for (const [perMonth, lineLen] of [[3, 120], [2, 110], [1, 100], [1, 70]]) {
+        rollUp = months.map(mo => `${mo.key} — ${mo.rows.length} entr${mo.rows.length === 1 ? 'y' : 'ies'}:\n` +
+            mo.rows.slice(0, perMonth).map(r => `  ${briefLine(r, lineLen)}`).join('\n')).join('\n');
+        if (briefHead.length + rollUp.length + briefTail.length + 80 <= briefBudget) break;
+    }
+    if (briefHead.length + rollUp.length + briefTail.length + 80 > briefBudget) {
+        // Still over (a case spanning years) — fall back to bare per-month counts.
+        rollUp = months.map(mo => `${mo.key} — ${mo.rows.length} entr${mo.rows.length === 1 ? 'y' : 'ies'}`).join('\n');
+    }
+    const brief = `${briefHead}\n\nHOW THE CASE PROGRESSED (month by month):\n${rollUp}\n\n${briefTail}`;
+
+    let narrative = { overview: '', status: '' };
+    try {
+        narrative = splitChainNarrative(await writeChainNarrative(brief, { signal: opts.signal, numCtx }));
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e;
+    }
+    // The prose slots into "## Overview" / "## Where the case stands now" — a heading the model
+    // invented inside its own text would fracture that structure, so flatten any it emitted.
+    for (const k of ['overview', 'status']) {
+        narrative[k] = String(narrative[k] || '').replace(/^\s*#{1,6}\s+/gm, '').trim();
+    }
+
+    // ---- assemble ----
+    const bits = [];
+    bits.push(`# ${opts.qa ? 'Email chain in-depth analysis (QA)' : 'Email chain summary'}${(ci && ci.case_number) ? ` — Case ${ci.case_number}` : ''}`);
+    const stat = [
+        `**${facts.n} message${facts.n === 1 ? '' : 's'}**`,
+        facts.from && facts.to ? (facts.from === facts.to ? facts.from : `${facts.from} → ${facts.to}`) : '',
+        facts.days !== null ? `${facts.days} day${facts.days === 1 ? '' : 's'}` : ''
+    ].filter(Boolean).join(' · ');
+    bits.push(stat);
+    const mix = [
+        facts.counts.customer ? `${facts.counts.customer} from the customer` : '',
+        facts.counts.support ? `${facts.counts.support} from SOTI Support` : '',
+        facts.counts.call ? `${facts.counts.call} phone call log${facts.counts.call === 1 ? '' : 's'}` : '',
+        facts.counts.internal ? `${facts.counts.internal} internal note${facts.counts.internal === 1 ? '' : 's'}` : '',
+        facts.counts.ooo ? `${facts.counts.ooo} out-of-office auto-repl${facts.counts.ooo === 1 ? 'y' : 'ies'}` : '',
+        facts.counts.other ? `${facts.counts.other} other` : ''
+    ].filter(Boolean).join(' · ');
+    if (mix) bits.push(mix);
+    const people = [
+        lc.customerSender ? `**Customer:** ${lc.customerSender}` : '',
+        lc.agentSender ? `**SOTI Support:** ${lc.agentSender}` : ''
+    ].filter(Boolean).join(' · ');
+    if (people) bits.push(people);
+    if (facts.jiras.length) bits.push(`**Development tickets referenced:** ${facts.jiras.join(', ')}`);
+    if (facts.cases.length) bits.push(`**Other SOTI cases referenced:** ${facts.cases.join(', ')}`);
+
+    // QA first, above the timeline: a reviewer auditing the case wants the measured figures
+    // without scrolling past 100+ timeline entries to reach them.
+    if (opts.qa) {
+        bits.push('');
+        bits.push(buildChainQAChecks(rows, facts, lc));
+    }
+
+    if (narrative.overview) {
+        bits.push('\n## Overview\n');
+        bits.push(narrative.overview);
+    }
+
+    bits.push('\n## Timeline — oldest first\n');
+    for (const mo of months) {
+        bits.push(`### ${mo.key}`);
+        for (const r of mo.rows) {
+            const when = formatChainDate(r.entry, { shortMonth: true }) || r.entry.time || 'undated';
+            const tag = r.role ? ` *(${r.role})*` : '';
+            bits.push(`- **${when}** — ${r.sender}${tag}: ${r.line}`);
+        }
+        bits.push('');
+    }
+
+    bits.push('## Where the case stands now\n');
+    if (narrative.status) {
+        bits.push(narrative.status);
+    } else {
+        // No model prose available — state it from the facts rather than leaving a gap.
+        bits.push(`The newest entry is from **${facts.newest.sender || 'an unknown sender'}**${facts.newest.role ? ` (${facts.newest.role})` : ''} on **${formatChainDate(facts.newest) || facts.newest.time}**: ${rows[0].line}`);
+    }
+    if (lc.state === 'closure') {
+        bits.push(`\n*Case state (detected from the chain): the case is resolved / in closure${lc.customerConfirmed ? ' — the customer has confirmed it can be closed' : ''}${lc.supportClosingSent ? ' and the closure email has been sent' : ''}.*`);
+    } else if (lc.state === 'active') {
+        bits.push('\n*Case state (detected from the chain): still OPEN — no confirmed resolution and no closure agreement appears anywhere in the correspondence.*');
+    }
+
+    const skipped = batches.length - runBatches.length;
+    if (skipped > 0) {
+        bits.push(`\n*Note: this chain is long enough that ${skipped} batch${skipped === 1 ? '' : 'es'} of the longest messages were kept as trimmed extracts (marked with …) instead of being condensed further. Every message is still listed above, with its exact date and author.*`);
+    }
+    return bits.join('\n');
+}
+
 // Clean, case-derived query for quick-action research. The quick-action prompt itself is
 // an instruction block — using it as the research query would poison the release-notes
 // keyword scoring — so research runs on the case's own symptom text instead.
 // "troubleshoot"/"issue" make the research layer treat it as a troubleshooting query
 // (which enables the newer-version release-notes upgrade scan).
+// The case's own symptom text: the reported issue PLUS what the newest emails actually say.
+// The issue summary alone is the problem as first logged — on a case that has moved on ("I'm
+// seeing the same error again after the backend tweak") it is the newest messages that carry
+// the live symptom, and both the research keywords and the symptom playbook depend on having
+// them. Newest-first, capped, boilerplate already stripped by getCleanChainEntries.
+// The SOTI case-intake template that customers fill in ships the SAME question labels on every
+// single case ("If Android, please specify enrollment method (i.e. Android Classic or Android
+// Enterprise):", "OS type and version:", "MC agent version:"…). Those labels are not symptom
+// text, but the symptom matchers cannot tell the difference: a Zebra FOTA case whose only
+// occurrence of the word "enrollment" comes from that label scored the ENROLLMENT playbook family
+// and produced four enrollment next steps for a firmware case. Strip the labels and keep the
+// customer's ANSWERS, which is where the real symptom vocabulary lives.
+const CASE_TEMPLATE_LABEL_RE = new RegExp([
+    'if\\s+android,?\\s*please\\s+specify\\s+(?:the\\s+)?enrol?lment\\s+method\\s*\\([^)]*\\)\\s*:?',
+    'if\\s+android,?\\s*please\\s+specify\\s+(?:the\\s+)?enrol?lment\\s+method\\s*:?',
+    'please\\s+specify\\s+(?:the\\s+)?enrol?lment\\s+method\\s*(?:\\([^)]*\\))?\\s*:?',
+    'device\\s+make\\s+and\\s+model\\s*:?',
+    'os\\s+type\\s+and\\s+version\\s*:?',
+    'mc\\s+agent\\s+version\\s*:?',
+    'detailed\\s+description\\s+of\\s+(?:the\\s+)?issue\\s*:?',
+    'steps\\s+to\\s+reproduce\\s+the\\s+issue\\s*:?',
+    'device\\s+serial\\s+numbers?\\s*:?',
+    'number\\s+of\\s+(?:affected\\s+)?devices\\s+(?:affected|impacted)\\s*:?',
+    'business\\s+impact\\s*:?'
+].join('|'), 'gi');
+
+function stripCaseTemplateLabels(text) {
+    return String(text || '').replace(CASE_TEMPLATE_LABEL_RE, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+function buildCaseSymptomText(maxChars = 900) {
+    const parts = [];
+    const issue = stripCaseTemplateLabels((buildEffectiveIssueSummary(null) || '').replace(/\s+/g, ' ').trim());
+    if (issue) parts.push(issue);
+    try {
+        const entries = getCleanChainEntries(($('emailChain') && $('emailChain').value || '').trim());
+        for (const e of entries.slice(0, 4)) {
+            const body = String(e.body || '').replace(/\s+/g, ' ').trim();
+            if (body.length > 15) parts.push(body.slice(0, 300));
+        }
+    } catch (e) { /* no chain, or unparseable — the issue summary alone still works */ }
+    return parts.join(' ').slice(0, maxChars);
+}
+
 function buildCaseResearchQuery() {
-    const issue = (buildEffectiveIssueSummary(null) || '').replace(/\s+/g, ' ').trim();
-    if (!issue) return '';
-    return ('troubleshoot issue: ' + issue).slice(0, 600);
+    const symptom = buildCaseSymptomText(600);
+    if (!symptom) return '';
+    return ('troubleshoot issue: ' + symptom).slice(0, 700);
 }
 
 // Fair-share allocation: small files take only what they need and donate the surplus
@@ -6822,6 +8523,194 @@ const PulseKB = {
     }
 };
 
+// ---------------------------------------------------------------------------
+// OFFLINE RELEASE NOTES — MCMR fixes read out of knowledge/PulseKnowledge.md
+// ---------------------------------------------------------------------------
+// "Is this already fixed in a newer build?" is the single highest-value question on an aged
+// case, and until now it could ONLY be answered by a live fetch of pulse.soti.net: when Pulse
+// was unreachable, blocked by the corporate proxy, or slow, [RELEASE NOTES] came back empty and
+// the answer silently degraded to "no known fix" — indistinguishable from a real negative.
+// PulseKnowledge.md already contains the scraped Product Notes pages, so the Resolved Issues in
+// them can be parsed locally and put through the SAME symptom gate as the live notes.
+//
+// KNOWN COVERAGE LIMIT — this is why every offline block states its coverage explicitly:
+// the scrape captured the release-notes LANDING page, which renders only the CURRENT release in
+// full (plus, on the agent pages, its maintenance releases). The older versions exist on those
+// pages as navigation links whose content was never fetched. So the offline corpus can prove a
+// fix EXISTS, but it can never prove one does NOT exist. An offline "nothing matched" is
+// therefore reported as "not found in the offline copy, which covers only <versions>" — never as
+// the confident "NO MATCHING FIX FOUND" that the live scan is entitled to emit.
+const OfflineReleaseNotes = {
+    entries: null,      // [{ codes, version, product, line }]
+    coverage: null,     // Map<product, Set<version>>
+    parsing: null,
+
+    // The MCMR code lines in the scrape use a NON-BREAKING HYPHEN (U+2011), not "-", which is
+    // exactly why the plain \bMCMR-\d+\b matcher never saw them. Accept the whole dash block.
+    CODE_RE: /MCMR[\u2010-\u2015\u2212-]?\s?(\d{3,7})/g,
+
+    _productFor(sourceUrl) {
+        const u = String(sourceUrl || '');
+        if (!u.includes('/product-notes/')) return '';
+        if (u.includes('android-agent-release-notes')) return 'Android Agent';
+        if (u.includes('ios-agent-release-notes')) return 'iOS Agent';
+        if (u.includes('linux-agent-release-notes')) return 'Linux Agent';
+        if (u.includes('macos-agent-release-notes')) return 'macOS Agent';
+        if (u.includes('soti-surf-release-notes')) return 'SOTI Surf';
+        if (u.includes('soti-hub-release-notes')) return 'SOTI Hub';
+        if (u.includes('settings-manager-release-notes')) return 'Settings Manager';
+        if (u.includes('cloud-link-release-notes')) return 'Cloud Link';
+        if (u.includes('login-app-for-ios-release-notes')) return 'Login App for iOS';
+        if (u.includes('product-notes/release-notes')) return 'SOTI MobiControl';
+        return '';
+    },
+
+    // Parse one scraped Product Notes article into version-attributed resolved-issue entries.
+    // The scrape is flattened HTML, so the structure to follow is: a version header, then a
+    // section header, then bare "MCMR‑nnnnn" lines each followed by their description line.
+    _parseArticle(text, product, out, coverage) {
+        const lines = String(text || '').split('\n');
+        let version = '';
+        let inResolved = false;
+        const codeOnly = /^MCMR[\u2010-\u2015\u2212-]?\s?\d{3,7}(?:\s+MCMR[\u2010-\u2015\u2212-]?\s?\d{3,7})*$/;
+        for (let i = 0; i < lines.length; i++) {
+            const s = lines[i].trim();
+            if (!s) continue;
+
+            // "2026.1.3 (May 25, 2026)" — the maintenance-release header on the agent pages.
+            let m = s.match(/^(\d{4}\.\d+(?:\.\d+)?)\s*\([^)]{3,40}\)$/);
+            if (m) { version = m[1]; inResolved = false; continue; }
+            // A bare version line is only a HEADER when the release metadata follows it
+            // ("2026.1.0" · "Build 11865" · "May 20, 2026"). The same pages carry a sidebar list
+            // of every past version as bare lines too — those must not re-tag anything.
+            m = s.match(/^(\d{4}\.\d+(?:\.\d+)?)$/);
+            if (m) {
+                const look = lines.slice(i + 1, i + 8).map(l => l.trim()).filter(Boolean).join(' ');
+                if (/^[·•\-]?\s*(Build\s+\d+|[A-Z][a-z]+\s+\d{1,2},\s*\d{4})/.test(look)) { version = m[1]; inResolved = false; }
+                continue;
+            }
+            if (/^Resolved Issues?\b/i.test(s)) { inResolved = true; continue; }
+            if (/^(Known Issues?|Release Highlights?|Highlights|New Features?|What'?s New|Important Notes?|Deprecations?|APIs?)\b/i.test(s)) { inResolved = false; continue; }
+            if (!inResolved || !version) continue;
+
+            const codes = [...s.matchAll(this.CODE_RE)].map(x => `MCMR-${x[1]}`);
+            if (!codes.length) continue;
+            // The description is the next non-empty line — unless that line is itself another
+            // code line, in which case this entry had no description and is skipped.
+            let desc = '';
+            for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+                const d = lines[j].trim();
+                if (!d) continue;
+                if (codeOnly.test(d)) break;
+                desc = d; i = j; break;
+            }
+            if (desc.length < 15) continue;
+            out.push({ codes, version, product, line: `- ${codes.join(', ')}: ${desc}` });
+            if (!coverage.has(product)) coverage.set(product, new Set());
+            coverage.get(product).add(version);
+        }
+    },
+
+    async ensureIndex() {
+        if (this.entries) return this.entries;
+        if (this.parsing) return this.parsing;
+        this.parsing = (async () => {
+            const entries = [];
+            const coverage = new Map();
+            try {
+                const chunks = await PulseKB.ensureIndex();
+                const seenArticles = new Set();
+                for (const c of (chunks || [])) {
+                    const product = this._productFor(c.sourceUrl);
+                    if (!product) continue;
+                    // The scrape stores the same Product Notes page several times under different
+                    // URL spellings; parsing every copy would duplicate every MCMR entry.
+                    if (seenArticles.has(c.dedupeKey)) continue;
+                    seenArticles.add(c.dedupeKey);
+                    this._parseArticle(c.text, product, entries, coverage);
+                }
+            } catch (e) { console.warn('OfflineReleaseNotes: index failed', e); }
+
+            // Same code in the same product+version parsed twice → keep one.
+            const seen = new Set();
+            this.entries = entries.filter(e => {
+                const k = `${e.product}|${e.version}|${e.codes.join(',')}`;
+                if (seen.has(k)) return false;
+                seen.add(k); return true;
+            });
+            this.coverage = coverage;
+            console.log(`OfflineReleaseNotes: ${this.entries.length} resolved-issue entries from ${coverage.size} product page(s)`);
+            return this.entries;
+        })();
+        return this.parsing;
+    },
+
+    // "SOTI MobiControl 2026.1.0, Android Agent 2026.1.0-2026.1.3" — the honest statement of
+    // what the offline copy can and cannot rule out.
+    coverageSummary() {
+        if (!this.coverage || !this.coverage.size) return '';
+        const parts = [];
+        for (const [product, versions] of this.coverage) {
+            const v = [...versions].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+            parts.push(`${product} ${v.length > 1 ? v[0] + '–' + v[v.length - 1] : v[0]}`);
+        }
+        return parts.join('; ');
+    },
+
+    // Entries whose text passes the SAME symptom gate the live release-notes scan uses, newest
+    // version first. `minVersion` (the customer's build) drops fixes that already shipped in or
+    // before it — a fix the customer already has is not an upgrade recommendation.
+    async scan(symptomText, minVersion) {
+        const all = await this.ensureIndex();
+        if (!all || !all.length) return [];
+        const tokens = buildSymptomScanTokens(normalizeScanText(symptomText));
+        const out = [];
+        for (const e of all) {
+            if (minVersion && e.version.localeCompare(minVersion, undefined, { numeric: true }) <= 0) continue;
+            const s = releaseNoteLineMatchesSymptom(e.line, tokens);
+            if (!s.matched) continue;
+            out.push({ ...e, phrase: s.phrase, hits: s.hits });
+        }
+        out.sort((a, b) => (b.phrase ? 1 : 0) - (a.phrase ? 1 : 0) ||
+                           b.hits - a.hits ||
+                           b.version.localeCompare(a.version, undefined, { numeric: true }));
+        // A verbatim phrase match is a different class of evidence from a few shared words. Once
+        // ANY entry matches a phrase from the case, the loose word-overlap entries are noise —
+        // and every extra near-miss sitting in the prompt is another code the model might reach
+        // for. Show the strong evidence alone when it exists.
+        const strong = out.filter(e => e.phrase);
+        return strong.length ? strong.slice(0, 6) : out.slice(0, 4);
+    },
+
+    // The [RELEASE NOTES] section to inject when the live Pulse fetch produced nothing.
+    // Returns '' when the offline corpus itself is empty (nothing honest to say).
+    async buildSection(symptomText, customerVersion, opts = {}) {
+        const budget = Math.max(1200, opts.budget || 6000);
+        let matches = [];
+        try { matches = await this.scan(symptomText, customerVersion); } catch (e) { return ''; }
+        const cov = this.coverageSummary();
+        if (!cov) return '';
+
+        const head = `[SOTI OFFLINE RELEASE NOTES — parsed from the bundled SOTI Pulse knowledge file, NOT fetched live. Pulse could not be reached for this turn.]\nOffline coverage (the ONLY versions whose Resolved Issues are present locally): ${cov}.`;
+        if (!matches.length) {
+            return `${head}\n\n[NO MATCHING FIX IN THE OFFLINE COPY: none of the Resolved Issues available offline describes this case's symptom. This is NOT proof that no fix exists — the offline copy holds only the versions listed above, so the releases between the customer's build and current were not searched. Do NOT cite any MCMR code and do NOT claim a fix exists. You MAY state that the release notes could not be checked live and that a Pulse release-notes check is still outstanding.]`;
+        }
+        const lines = [head, '', `[RESOLVED-ISSUE ENTRIES MATCHING THIS CASE'S SYMPTOM${customerVersion ? `, limited to versions NEWER than the customer's ${customerVersion}` : ''}. Cite the version exactly as written in the header above each entry, IN FULL (e.g. "2026.1.0"), together with the MCMR code verbatim.]`];
+        let used = lines.join('\n').length;
+        let lastKey = '';
+        for (const m of matches) {
+            const key = `${m.product}|${m.version}`;
+            const seg = (key === lastKey ? '' : `\n### FIXED IN ${m.product.toUpperCase()} VERSION ${m.version} (from the ${m.version} Resolved Issues in the offline SOTI Pulse copy):\n`) + m.line;
+            if (used + seg.length > budget) break;
+            lines.push(seg);
+            used += seg.length;
+            lastKey = key;
+            recordVerifiedMcmrLine(m.line, m.version, m.product);
+        }
+        return lines.join('\n');
+    }
+};
+
 // Words that carry no retrieval signal on their own — used to decide whether a chat query
 // is DEICTIC ("fix it for me", "check the release notes"): all intent, no symptom. Such a
 // query must be enriched with the case's own issue text or research returns junk.
@@ -6861,6 +8750,11 @@ async function searchPulseAndDocs(query, msgs, ci) {
         const asksReleaseNotes = isListingAll ||
                                  /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|what\s+is\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since)\b/i.test(rawQLower) ||
                                  /\b(mcmr[\s-]*\d+)\b/i.test(rawQLower);
+
+        // A direct request to SEE the notes makes the listing itself the answer, so every code
+        // in it is legitimately quotable. Every other turn is a case turn, where only codes that
+        // survive the symptom match may be cited (see buildMcmrCitationRule / enforceMcmrCitations).
+        resetMcmrCitationState(asksReleaseNotes ? 'open' : 'strict');
 
         const isTroubleshoot = /\b(how\s+do|how\s+to|error|fail|broken|issue|troubleshoot|cannot|unable|configure|setup|install|database|sql|ports?|certificate|ca|disconnect|offline|enroll|license|sync|crash|freeze|slow|bug|version|latest|fix(?:es|ed|ing)?|resolve|solving|solve|solution|repair|remediat|diagnos|root\s+cause|next\s+steps?|what\s+should)\b/i.test(qLower) ||
                                (qLower.split(/\s+/).length > 6 && !asksReleaseNotes);
@@ -6933,7 +8827,17 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0] || null;
                     const upgradeScanMode = !!primaryVersion && isTroubleshoot && !isListingAll &&
                         newestOnPage && newestOnPage.localeCompare(primaryVersion, undefined, { numeric: true }) > 0;
-                    
+
+                    // SYMPTOM-SCAN MODE: the SAME troubleshooting turn, but the case carries no
+                    // SOTI Version (the field is blank, or the customer never stated one). That
+                    // used to fall through to the generic path, which pastes the newest three
+                    // versions' Resolved Issues WHOLESALE into the prompt — dozens of unrelated
+                    // MCMR codes sitting next to the case, from which the model duly picked one
+                    // ("MCMR-35305 — device agents frequently disconnecting and connecting" cited
+                    // on an internal-server-error case). With no version to scope by, the symptom
+                    // is the only thing that can scope it, so match on the symptom instead.
+                    const symptomScanMode = !primaryVersion && isTroubleshoot && !isListingAll && !asksReleaseNotes;
+
                     // Release Notes generic query fallback — use live Pulse version lists (no static version table)
                     if (queryVersions.length === 0 && asksReleaseNotes) {
                         const pageVersions = [...new Set(blocks.map(b => b.version))].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
@@ -7022,31 +8926,12 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         // customer's version. The instruction line is embedded in the data so it
                         // survives even if the rules block is trimmed on small models.
                         clean += `\n[CUSTOMER RUNS VERSION ${primaryVersion}. The fixes below shipped in NEWER versions. If one matches the customer's issue, state that the issue is fixed in that exact version, cite its MCMR code verbatim, and recommend upgrading to it. Always write the fix version IN FULL exactly as it appears in the header (e.g. "2026.1.0" — never shortened to "26.1.0"). NEVER attribute these fixes to ${primaryVersion}.]\n`;
-                        // Symptom matching uses its own token set (not queryWords): 3-letter
-                        // acronyms (APN/VPN/SQL/ADE…) are load-bearing in MDM symptom reports
-                        // but the shared >3-char filter drops them, and light stemming lets
-                        // inflections match ("widths"→"width", "restarting"→"restarted").
-                        const scanStop3 = new Set(['not', 'has', 'can', 'out', 'off', 'get', 'got', 'did', 'was', 'the', 'and', 'for', 'are', 'its', 'any', 'all', 'you', 'our', 'how', 'why', 'who', 'his', 'her', 'had', 'but', 'use', 'via', 'per', 'now', 'one', 'two', 'see', 'too', 'yet', 'own', 'due']);
-                        const scanWordVariants = [...new Set(qLower.split(/\W+/)
-                            .filter(w => (w.length > 3 && !stopWords.has(w)) || (w.length === 3 && /^[a-z]+$/.test(w) && !scanStop3.has(w))))]
-                            .map(w => {
-                                const variants = [w];
-                                const stem = w.replace(/(ings?|ed|es|s)$/, '');
-                                if (stem.length >= 4 && stem !== w) variants.push(stem);
-                                return variants;
-                            });
-                        // Ultra-generic failure vocabulary appears in nearly EVERY resolved-issue
-                        // line ("failed", "error", "device") — two such hits alone say nothing.
-                        // A line must also hit at least one DISTINCTIVE symptom word (firmware,
-                        // zebra, ota, sync, certificate, …) or noise fixes get cited to the
-                        // customer as their fix (observed: a keyboard-input MCMR matched a
-                        // firmware-sync case purely on "send"+"message").
-                        const GENERIC_SCAN_WORDS = new Set(['error', 'errors', 'fail', 'failed', 'failing', 'fails', 'failure', 'issue', 'issues',
-                            'device', 'devices', 'update', 'updates', 'updated', 'updating', 'upgrade', 'upgrading', 'version', 'versions',
-                            'support', 'console', 'android', 'working', 'works', 'work', 'message', 'messages', 'command', 'commands',
-                            'send', 'sending', 'sent', 'push', 'pushed', 'latest', 'using', 'server', 'displayed', 'display', 'caused',
-                            'causing', 'stopped', 'mobicontrol', 'action', 'actions', 'kicked', 'went', 'thru', 'through', 'shows',
-                            'showing', 'saying', 'says', 'getting', 'gets']);
+                        // Symptom matching runs on its own token set (not queryWords): 3-letter
+                        // acronyms (APN/VPN/SQL/ADE…) are load-bearing in MDM symptom reports but
+                        // the shared >3-char filter drops them, light stemming lets inflections
+                        // match ("widths"→"width"), and contiguous phrases decide the cases where
+                        // the vocabulary alone is too generic to separate anything.
+                        const scanTokens = buildSymptomScanTokens(qLower);
                         const newerRI = blocks
                             .filter(b => b.type === 'Resolved Issues' && b.version.localeCompare(primaryVersion, undefined, { numeric: true }) > 0)
                             .sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
@@ -7054,24 +8939,16 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         for (const b of newerRI) {
                             const lines = b.text.split('\n').filter(l => l.trim().startsWith('-'));
                             const matched = lines
-                                .map(l => {
-                                    const ll = l.toLowerCase();
-                                    let hits = 0, distinct = 0;
-                                    for (const vs of scanWordVariants) {
-                                        if (vs.some(v => ll.includes(v))) {
-                                            hits++;
-                                            if (!vs.some(v => GENERIC_SCAN_WORDS.has(v))) distinct++;
-                                        }
-                                    }
-                                    return { l, hits, distinct };
-                                })
-                                .filter(x => x.hits >= 2 && x.distinct >= 1)
-                                .sort((a, b) => b.hits - a.hits)
+                                .map(l => ({ l, ...releaseNoteLineMatchesSymptom(l, scanTokens) }))
+                                .filter(x => x.matched)
+                                // A verbatim phrase match outranks any number of loose word hits.
+                                .sort((a, b) => (b.phrase ? 1 : 0) - (a.phrase ? 1 : 0) || b.hits - a.hits)
                                 .slice(0, 10);
                             if (!matched.length) continue;
                             const seg = `\n### FIXED IN VERSION ${b.version} (from the ${b.version} Resolved Issues on SOTI Pulse):\n${matched.map(x => x.l).join('\n')}\n`;
                             if (clean.length + seg.length > localBudget) break;
                             clean += seg;
+                            matched.forEach(x => recordVerifiedMcmrLine(x.l, b.version, type === 'Agent' ? 'Android Agent' : (type === 'Identity' ? 'SOTI Identity' : 'SOTI MobiControl')));
                             anyMatch = true;
                             includedCount++;
                         }
@@ -7080,6 +8957,41 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         }
                         notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n${clean}`);
                         toast(`✓ ${type} upgrade-fix scan loaded`, 's');
+                    } else if (symptomScanMode) {
+                        // Same symptom gate as the upgrade scan, applied across every version on
+                        // the page because there is no customer version to anchor to. Only lines
+                        // that actually match reach the prompt — a case turn never sees a raw
+                        // resolved-issues dump, so there is no unrelated MCMR to pick up.
+                        const scanTokens = buildSymptomScanTokens(qLower);
+                        const riBlocks = blocks
+                            .filter(b => b.type === 'Resolved Issues')
+                            .sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
+                        let anyMatch = false;
+                        for (const b of riBlocks) {
+                            const matched = b.text.split('\n')
+                                .filter(l => l.trim().startsWith('-'))
+                                .map(l => ({ l, ...releaseNoteLineMatchesSymptom(l, scanTokens) }))
+                                .filter(x => x.matched)
+                                .sort((a, b2) => (b2.phrase ? 1 : 0) - (a.phrase ? 1 : 0) || b2.hits - a.hits)
+                                .slice(0, 8);
+                            if (!matched.length) continue;
+                            const seg = `\n### FIXED IN VERSION ${b.version} (from the ${b.version} Resolved Issues on SOTI Pulse):\n${matched.map(x => x.l).join('\n')}\n`;
+                            if (clean.length + seg.length > localBudget) break;
+                            clean += seg;
+                            matched.forEach(x => recordVerifiedMcmrLine(x.l, b.version, type === 'Agent' ? 'Android Agent' : (type === 'Identity' ? 'SOTI Identity' : 'SOTI MobiControl')));
+                            anyMatch = true;
+                            includedCount++;
+                        }
+                        if (anyMatch) {
+                            clean = `\n[RESOLVED-ISSUE ENTRIES MATCHING THIS CASE'S SYMPTOM. The customer's own ${type} version is not recorded on this case, so state the fix version exactly as written in the header above each entry and note that the customer must be on an older build for it to apply. Write the version IN FULL (e.g. "2026.1.0").]\n` + clean;
+                            notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n${clean}`);
+                            toast(`✓ ${type} symptom-fix scan loaded`, 's');
+                        } else {
+                            // Deliberately still pushed: an explicit "nothing matched" is what stops
+                            // the model reaching for a plausible-looking code, and it is far more
+                            // useful than an absent section (which reads as "notes unavailable").
+                            notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n\n[NO MATCHING FIX FOUND: none of the ${type} Resolved Issues on SOTI Pulse describes this case's symptom. Do NOT claim a ${type} fix exists, do NOT cite any ${type} MCMR code, and do NOT suggest an upgrade as the fix for this issue.]\n`);
+                        }
                     } else {
 
                     if (primaryVersion) {
@@ -7138,6 +9050,26 @@ async function searchPulseAndDocs(query, msgs, ci) {
                         }
                     }
 
+                    // This path hands the model WHOLE version blocks, so it carries MCMR codes
+                    // for every issue in the release — not just this case's. When the turn is a
+                    // case turn (strict citation mode), run the same symptom gate over those
+                    // lines so a genuinely matching fix is still citable while the rest of the
+                    // dump stays off the allow-list.
+                    if (MCMR_CITATION_MODE === 'strict' && clean) {
+                        try {
+                            const scanTokens = buildSymptomScanTokens(qLower);
+                            let curVersion = '';
+                            for (const l of clean.split('\n')) {
+                                const vm = l.match(/^###\s*(?:FIXED IN )?VERSION\s+([\w.]+)/i);
+                                if (vm) { curVersion = vm[1]; continue; }
+                                if (!l.trim().startsWith('-')) continue;
+                                if (releaseNoteLineMatchesSymptom(l, scanTokens).matched) {
+                                    recordVerifiedMcmrLine(l, curVersion, type === 'Agent' ? 'Android Agent' : (type === 'Identity' ? 'SOTI Identity' : 'SOTI MobiControl'));
+                                }
+                            }
+                        } catch (e) { console.warn('MCMR verification scan failed', e); }
+                    }
+
                     if (clean.length > 200) {
                         notes.push(`[SOTI PULSE ${type.toUpperCase()} DATA]\nOfficial source: ${resolvedUrl}\n${clean}`);
                         toast(`✓ ${type} RAG Context Loaded`, 's');
@@ -7147,11 +9079,29 @@ async function searchPulseAndDocs(query, msgs, ci) {
                 }
             }
             
+            // OFFLINE FALLBACK. Pulse gave us nothing this turn (unreachable, proxied, timed
+            // out, or the page layout changed). Before this, that silently produced an EMPTY
+            // [RELEASE NOTES] section, and an empty section reads to the model exactly like a
+            // verified "no fix exists" — the worst possible failure mode, because the whole
+            // point of the release-notes step is telling the customer their bug is already
+            // fixed in a newer build. knowledge/PulseKnowledge.md carries the scraped Product
+            // Notes, so parse the Resolved Issues out of it and run the SAME symptom gate.
+            if (notes.length === 0) {
+                try {
+                    const offlineVersion = parseRequestedVersions(effQuery, history, ci)[0] || null;
+                    const offline = await OfflineReleaseNotes.buildSection(qLower, offlineVersion, { budget: charBudget });
+                    if (offline) {
+                        notes.push(offline);
+                        toast('✓ Offline release notes used (Pulse unreachable)', 'i');
+                    }
+                } catch (e) { console.warn('Offline release-notes fallback failed', e); }
+            }
+
             if (notes.length > 0) {
                 RELEASE_NOTES_CONTENT = notes.join('\n\n---\n\n');
             } else if (asksReleaseNotes) {
                 toast('Autonomous Research failed', 'w');
-                RELEASE_NOTES_CONTENT = "ERROR: Failed to fetch release notes from SOTI Pulse (network error or page not found).";
+                RELEASE_NOTES_CONTENT = "ERROR: Failed to fetch release notes from SOTI Pulse (network error or page not found), and the bundled offline knowledge file contains no Product Notes to fall back on.";
             }
         }
             
@@ -8244,6 +10194,10 @@ ${body}
 //     text (quick actions on open cases: their message is an instruction block that would
 //     poison the research keyword scoring). Ignored when skipResearch is set.
 //   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
+//   forceChainDigest — serve this turn from buildFullChainSummary (the whole-chain map-reduce
+//     digest) instead of a single model call, without depending on isEmailChainSummaryRequest
+//     matching the wording. Used by the Email Chain In-depth Analysis (QA) button.
+//   chainQA — with forceChainDigest, append the measured QA review checkpoints section.
 async function send(overrideText = null, silent = false, opts = {}) {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
@@ -8320,14 +10274,19 @@ async function send(overrideText = null, silent = false, opts = {}) {
     }
 
     const ci = {
-        case_number: $('caseNum').value, 
-        soti_version: $('sotiVer').value, 
+        case_number: $('caseNum').value,
+        soti_version: $('sotiVer').value,
         platform: $('platform').value,
         agent_version: $('agentVer').value,
         case_age_days: $('caseAge').value,
         account_scrub: $('scrubAccount').value,
         meeting_notes: $('meetingNotes').value,
         product: $('product').value,
+        // Cloud vs On-Prem decides who collects the server-side evidence, so it travels with
+        // the case context on EVERY turn, not only the quick actions (see buildLogAccessDirective).
+        mc_hosted: $('dsCfg').value,
+        environment: $('enviro').value,
+        affected_devices: $('affDev').value,
         issue_summary: $('issueSummary').value,
         email_chain: $('emailChain').value
     };
@@ -8371,7 +10330,10 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // [CONVERSATION SO FAR] digest — never a log report, never a knowledge-base research run.
     const metaConversationTurn = !opts.freshContext && !silent && isConversationMetaQuestion(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    const analysisRun = !opts.forceConversational && !metaConversationTurn && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
+    // opts.forceChainDigest (the Email Chain In-depth Analysis (QA) button) is exempt: its
+    // instruction text says "analysis", which with logs attached would otherwise route the
+    // turn into log forensics instead of the chain digest the button exists to run.
+    const analysisRun = !opts.forceConversational && !opts.forceChainDigest && !metaConversationTurn && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
     // to the forensic path even when triggered by the plain "Analyse Now" button. Use the STRICT
@@ -8393,15 +10355,36 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // and that must not switch the prompt away from the conversational route.
     const needsDeepPulse = !opts.forceConversational && !countQuestionTurn && !metaConversationTurn && /\b(release\s*notes?|product\s*notes?|mobicontrol|version|latest|mcmr|what'?s\s+new|changelog)\b/i.test(txt);
 
+    // "Summarise the email chain / give me the timeline" on a real chain. A single model call
+    // cannot do this: on a long case the chain arrives pre-truncated and a small model answers
+    // by echoing the fragments back. This turn is served by buildFullChainSummary instead —
+    // deterministic dates/order/authors, the model used only to compress and to write prose.
+    // Decided BEFORE the research block so it never pays for a Pulse/Docs lookup it won't use.
+    // opts.forceChainDigest — the (QA) button asks for this path by name rather than relying on
+    // the phrasing detector, and accepts a chain of ANY length: the 3-entry floor exists only so
+    // a passing remark in normal chat doesn't hijack a short chain into a full report.
+    const chainDigestTurn = !opts.forceConversational && !analysisRun && !metaConversationTurn
+        && !isGreeting && (opts.forceChainDigest || isEmailChainSummaryRequest(txt))
+        && (() => {
+            try { return getCleanChainEntries((ci.email_chain || '').trim()).length >= (opts.forceChainDigest ? 1 : 3); }
+            catch (e) { return false; }
+        })();
+
     let supportingRefSection = "";
     let knownFixesSection = "";
-    if (!isGreeting && !forensicRun) {
+    // Start every turn with an empty MCMR allow-list — whatever research runs below re-fills
+    // it. Without this, a code verified for the PREVIOUS question stays citable for this one.
+    resetMcmrCitationState('strict');
+    if (!isGreeting && !forensicRun && !chainDigestTurn) {
         if (opts.skipResearch || metaConversationTurn) {
             // Quick-action AND chat-meta turns must be grounded in the CASE / conversation only —
             // clear research left over from an earlier question so a stray "MCMR"/"version" token
             // in the text can't fire a Pulse run whose empty result makes the model answer "no SOTI
             // documentation exists to verify this" instead of using the actual conversation.
             PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
+            // No research ran, so no MCMR is verified for this turn: the allow-list must be
+            // empty rather than left over from the previous question's scan.
+            resetMcmrCitationState('strict');
         } else if (!hasLogs || needsDeepPulse || opts.researchQuery) {
             // Q&A mode (or explicit release-notes request): full online + offline research.
             // Quick actions on OPEN cases pass opts.researchQuery — a clean case-derived
@@ -8484,10 +10467,43 @@ async function send(overrideText = null, silent = false, opts = {}) {
     }
 
     try {
+        // ---- FULL EMAIL-CHAIN DIGEST (map-reduce over the whole chain) ----
+        // Runs many small model calls instead of one oversized one, so a chain of any length
+        // is covered end to end. Everything that must be exact — order, dates, authors, counts —
+        // is computed here in JS, never generated.
+        if (chainDigestTurn) {
+            const digestController = new AbortController();
+            streamControllers.set(c.id, digestController);
+            // Same history bookkeeping as the normal path: overwrite a trailing user turn left
+            // by an aborted send rather than stacking a second one.
+            if (c.msgs.length > 0 && c.msgs[c.msgs.length - 1].role === 'user') {
+                c.msgs[c.msgs.length - 1] = { role: 'user', content: txt, hidden: silent };
+            } else {
+                c.msgs.push({ role: 'user', content: txt, hidden: silent });
+            }
+            const summary = await buildFullChainSummary(ci, {
+                qa: !!opts.chainQA,
+                signal: digestController.signal,
+                onProgress: (partial) => {
+                    aib.innerHTML = md(partial);
+                    chatScrollToBottomIfSticky();
+                }
+            });
+            aib.innerHTML = md(summary);
+            chatScrollToBottomIfSticky();
+            const digestMsg = { role: 'assistant', content: summary, fbQuestion: txt, copyKind: 'summary' };
+            c.msgs.push(digestMsg);
+            c.lastSentAt = Date.now();
+            saveState();
+            attachCopyUI(aib, digestMsg);
+            attachFeedbackUI(aib, c, digestMsg);
+            return; // the finally block below still runs and clears the busy flags
+        }
+
         let sysPrompt = "";
         let modelMessages = [];
         let userMsgForModel = txt;
-        
+
         if (isGreeting) {
             sysPrompt = "You are the SOTI Tier-3 AI Analyser, a senior escalation engineer for the SOTI ONE Suite (MobiControl, SOTI Connect, SOTI XSight). The person greeting you is a SOTI Technical Support Agent — your SOTI Support colleague — NOT a customer, so greet them as a colleague (never thank them for contacting SOTI Support). Respond politely to the greeting, ask how you can help with their case, and keep your response to exactly one short sentence. Do NOT ask for logs, Salesforce sync, or cases. Stop generating immediately.";
             userMsgForModel = txt;
@@ -8647,6 +10663,17 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             // (DD/MM vs MM/DD) and the model has misread it as August 7.
             liveDataLines.push(`[CURRENT DATE & TIME — right now, NOT the date of any email]: ${new Date().toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`);
             liveDataLines.push(`[CASE]: ${JSON.stringify(buildCaseContextForPrompt(ci, isSmallModel), null, 2)}`);
+            // WHO COLLECTS THE EVIDENCE. Cloud → the agent pulls it from the backend; On-Prem →
+            // it must be requested from the customer (with a screen-share to capture it properly).
+            // Injected on every turn, not just the quick actions, because "what should I ask the
+            // customer for?" is asked in plain chat just as often as through a button. Quick
+            // actions carry their own copy inside the (better-protected) user message, so they
+            // are skipped here rather than paying for the block twice.
+            if (!opts.forceConversational) {
+                liveDataLines.push(buildLogAccessDirective('summary', isSmallModel));
+            }
+            // Which MCMR codes (if any) this turn is allowed to cite — see buildMcmrCitationRule.
+            liveDataLines.push(buildMcmrCitationRule(`${ci.issue_summary || ''}\n${ci.meeting_notes || ''}\n${ci.email_chain || ''}`));
 
             if (VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST MOBICONTROL VERSION]: ${VERSIONS[0]}`);
@@ -9024,6 +11051,35 @@ ${imgContext}`;
             } catch (e) { console.warn('Forensic post-validation failed', e); }
         }
 
+        // DETERMINISTIC CITATION + SPECIFICITY GUARD. Prompt rules are not a guarantee on a
+        // small local model, so the answer is checked rather than trusted: an MCMR code the
+        // data does not support is deleted (with a visible note, because removing a factual
+        // claim must be visible), and a "next step" that names no artefact and decides nothing
+        // is dropped. Allowed codes = the symptom-verified release-notes entries, plus codes
+        // already present in this case's own data / research, which are legitimate to repeat.
+        if (!isGreeting && finalAnswer.trim()) {
+            try {
+                const allowedMcmr = new Set(VERIFIED_MCMR_ENTRIES.map(e => e.code));
+                for (const code of collectMcmrCodes(
+                    `${ci.issue_summary || ''}\n${ci.meeting_notes || ''}\n${ci.email_chain || ''}\n` +
+                    `${knownFixesSection}\n${supportingRefSection}\n` +
+                    c.msgs.filter(m => m.role === 'assistant').map(m => m.content || '').join('\n')
+                )) allowedMcmr.add(code);
+                // 'open' — the agent asked to SEE the notes, so the listing is the answer.
+                // analysisRun — a log-forensics turn cites the fix for the error IT found in the
+                // logs (the documented behaviour of the analysis prompts), and that match is made
+                // against log evidence rather than the case symptom, so the symptom gate does not
+                // apply to it. Case-writing turns stay strictly on the verified allow-list.
+                if (MCMR_CITATION_MODE === 'open' || analysisRun) {
+                    for (const code of collectMcmrCodes(RELEASE_NOTES_CONTENT + '\n' + RESEARCHED_ARTICLE_CONTENT + '\n' + PULSE_SEARCH_RESULTS + '\n' + DOCS_SEARCH_RESULTS)) allowedMcmr.add(code);
+                }
+                if (hasLogs) {
+                    for (const code of collectMcmrCodes(c.logs.map(l => l.content || '').join('\n'))) allowedMcmr.add(code);
+                }
+                finalAnswer = postValidateCaseAnswer(finalAnswer, allowedMcmr);
+            } catch (e) { console.warn('Case answer post-validation failed', e); }
+        }
+
         // Force the final paint (renderUpdate is a no-op when pendingRender is false, which
         // would otherwise leave the recovered/fallback text unrendered).
         pendingRender = true;
@@ -9183,7 +11239,7 @@ $('btnSyncSF').onclick = async () => {
             await new Promise(r => setTimeout(r, 500));
             data = await chrome.tabs.sendMessage(tab.id, { action: "GET_SALESFORCE_DATA" });
         }
-        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.caseAge)) {
+        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge)) {
             if (data.caseNumber) $('caseNum').value = data.caseNumber;
             if (data.accountName) $('scrubAccount').value = data.accountName;
             if (data.contactName) $('scrubCustomer').value = data.contactName;
@@ -9206,10 +11262,18 @@ $('btnSyncSF').onclick = async () => {
             // only refreshes when the panel is reopened.
             updateVersionDropdowns();
             if (data.currentVersion) applyVersionSelection('sotiVer', data.currentVersion);
-            if (data.licenseType) {
+            // MC Hosted decides who collects the server logs, so the case's OWN field wins.
+            // License Type stays only as a fallback for layouts that don't expose MC Hosted —
+            // it is an inference ("subscription" ≈ on-prem), not the answer.
+            if (data.mcHosted) {
+                const h = data.mcHosted.toLowerCase();
+                if (/\bcloud\b|\bsaas\b|hosted by soti|soti[- ]hosted/.test(h)) $('dsCfg').value = 'Cloud';
+                else if (/on[-\s]?prem|onprem|customer[- ]hosted|self[- ]hosted|local/.test(h)) $('dsCfg').value = 'On-Prem';
+            }
+            if (!$('dsCfg').value && data.licenseType) {
                 const lt = data.licenseType.toLowerCase();
                 if (lt.includes('cloud')) $('dsCfg').value = 'Cloud';
-                 if (lt.includes('subscription')) $('dsCfg').value = 'On-Prem';
+                else if (lt.includes('subscription')) $('dsCfg').value = 'On-Prem';
             }
             if (data.caseAge) $('caseAge').value = data.caseAge;
             if (data.emailChain) $('emailChain').value = data.emailChain;
@@ -9852,11 +11916,29 @@ async function generateCaseSummary() {
     // can cite real fixes; closure cases skip research entirely (irrelevant + slow).
     const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
     const stateDirective = buildCaseStateDirective(lc, 'summary');
+    // Decisive signals (recurrence / urgency / business impact / already-committed next steps)
+    // are extracted deterministically and made mandatory — a summary that drops the customer's
+    // "same error again" is wrong no matter how well it reads. Applies to closure cases too: a
+    // recurrence is exactly the thing that must stop a case being summarised as done.
+    const signalsBlock = (() => {
+        try { return buildCaseSignalsBlock(detectChainSignals(getCleanChainEntries($('emailChain').value || ''), lc), 'summary'); }
+        catch (e) { return ''; }
+    })();
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
     const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+    // Who collects the evidence (Cloud → the agent, from the backend; On-Prem → the customer,
+    // via a screen-share) and which real SOTI artefacts the checks may name. Both are
+    // deterministic, and both only matter while the case is still open.
+    const isOpen = lc.state !== 'closure';
+    const small = isSmallLocalModel();
+    const logAccess = isOpen ? buildLogAccessDirective('summary', small) : '';
+    // One family / four checks on a CPU-bound model: the whole quick-action prompt lives inside
+    // ~10K characters there, and the email chain must not lose room to a checklist.
+    const playbook = isOpen ? buildSymptomPlaybook(buildCaseSymptomText(), small ? { maxFamilies: 1, maxChecks: 4 } : {}) : '';
     const peopleLine = (lc.customerSender || lc.agentSender)
         ? `\n- PEOPLE (exact, from the chain): ${[lc.customerSender && `${lc.customerSender} is the CUSTOMER`, lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER handling the case`].filter(Boolean).join('; ')}. Never swap these roles.`
         : '';
+    const hosted = getMcHosted();
 
     const prompt = `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
 
@@ -9867,13 +11949,13 @@ RULES:
 - CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as "Technical Support, SOTI" (e.g. Ayodeji Augustine, Savio Basil Saju) is a SOTI SUPPORT ENGINEER, NOT the customer — never write that a SOTI engineer "is experiencing the issue". If no customer name is given, say "the customer" rather than naming a support engineer as the customer.
 - Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
 
-Summary: 2-4 sentences — the customer/account, product and versions, platform/environment, what the customer reported, and where the case stands RIGHT NOW (from the newest message; name who said it and when if that is decisive, e.g. an internal note or a referenced earlier case).
+Summary: 2-5 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer reported, and where the case stands RIGHT NOW (from the newest message; name who said it and when if that is decisive, e.g. an internal note or a referenced earlier case). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, and any business impact the customer stated MUST be carried into this section even when a later message says the problem is currently gone.
 
 Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established — what support tested or tried, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), questions the customer already answered, and any findings from log analysis in this conversation. Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
 
-Next steps: a numbered list of the concrete actions still to do for the support engineer. This list MUST follow the CASE STATE directive below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
+Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
 
-${chronology ? chronology + '\n\n' : ''}${stateDirective}`;
+${chronology ? chronology + '\n\n' : ''}${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
 
     await runQuickAIAction('Building case summary...', 'Case summary ready', prompt, {
         forceConversational: true,
@@ -9906,7 +11988,16 @@ async function draftCustomerEmail() {
 
     const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
     const stateDirective = buildCaseStateDirective(lc, 'email');
+    // A reply that ignores the customer's "same error again" / stated business impact reads as
+    // if support had not read their email — the most damaging kind of reply to send.
+    const signalsBlock = (() => {
+        try { return buildCaseSignalsBlock(detectChainSignals(getCleanChainEntries($('emailChain').value || ''), lc), 'email'); }
+        catch (e) { return ''; }
+    })();
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
+    // What the email may ask the customer for depends entirely on who can reach the server:
+    // asking a Cloud customer to export logs SOTI already holds is the mistake this prevents.
+    const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('email', isSmallLocalModel());
     const customerFirst = (lc.customerSender || '').split(/\s+/)[0] || '';
     const caseNum = ($('caseNum').value || '').trim();
     const peopleLine = (lc.customerSender || lc.agentSender)
@@ -9931,7 +12022,7 @@ Warm regards,
 ${lc.agentSender || '<my name — the SOTI support engineer from the chain>'}
 Technical Support, SOTI
 
-${stateDirective}`;
+${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${logAccess ? '\n\n' + logAccess : ''}`;
 
     await runQuickAIAction('Drafting email to customer...', 'Email draft ready', prompt, {
         forceConversational: true,
@@ -9965,13 +12056,18 @@ async function fixCustomerIssue() {
 
     const researchQuery = buildCaseResearchQuery();
     const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+    const small = isSmallLocalModel();
+    const logAccess = buildLogAccessDirective('fix', small);
+    const playbook = buildSymptomPlaybook(buildCaseSymptomText(), small ? { maxFamilies: 1, maxChecks: 4 } : {});
 
     const prompt = `You are the senior SOTI support engineer on this case. Solve the customer's reported issue END TO END and give me the complete fix I can act on right now. Be decisive and specific — this must be an actual resolution, not a list of generic suggestions.
 
 RULES:
 - Ground EVERY step in the real case: use the issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs/images and their earlier analysis in this conversation, and any release-notes / Pulse documentation research provided. NEVER invent product behaviour, menu paths, version numbers, or KB links — if a detail is genuinely unknown, state exactly what to check to obtain it rather than guessing.
 - The email chain is ordered NEWEST FIRST — solve the problem as it stands in the MOST RECENT messages, and do NOT re-suggest anything the chain shows was already tried and ruled out.
-- If the evidence points to a known defect, name it and the version it is fixed in (e.g. MCMR-xxxxx, fixed in <version>) and make upgrading a concrete step. If it is a configuration issue, give the exact SOTI console location and the precise setting to change.
+- If the evidence points to a known defect, name it and the version it is fixed in and make upgrading a concrete step — but ONLY using a fix listed in the [MCMR RULE] block. If that block lists none, do not mention MCMR codes, release notes, or an upgrade at all. If it is a configuration issue, give the exact SOTI console location and the precise setting to change.
+- Every step must name the exact artefact it acts on (the log file and the server role it sits on, the Windows service, the console path, the port, the SQL object, the error string to search for) and what result confirms it worked. "Verify the configuration", "check the logs", "review the setup" and similar contentless steps are FORBIDDEN.
+- Route every evidence-collection step exactly as the [LOG ACCESS] block below dictates — it states whether the agent pulls the logs from the backend or must request them from the customer.
 - Output EXACTLY these sections, in this order, and NOTHING else:
 
 **Root cause:** 1-3 sentences naming the most likely cause, with the specific evidence from the case/logs that points to it. If more than one cause is plausible, name the most likely and note the alternative in one short clause.
@@ -9982,7 +12078,9 @@ RULES:
 
 **If it does not resolve:** the single best fallback, or the exact data to collect next (e.g. which log at which log level) to progress or escalate the case.
 
-${chronology ? chronology + '\n\n' : ''}Deliver the fix with full confidence, grounded 100% in the case facts and the research provided.`;
+${chronology ? chronology + '\n\n' : ''}${logAccess}${playbook ? '\n\n' + playbook : ''}
+
+Deliver the fix with full confidence, grounded 100% in the case facts and the research provided.`;
 
     await runQuickAIAction('Working out the fix...', 'Fix ready', prompt, {
         forceConversational: true,
@@ -10029,6 +12127,7 @@ async function generate306090Analysis() {
     const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
     const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+    const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('summary', isSmallLocalModel());
 
     const prompt = `Produce a 30/60/90 case analysis for management review of this aging support case. Use EXACTLY the template layout below — same headers, same order — and output nothing before or after it.
 
@@ -10045,11 +12144,11 @@ TEMPLATE (fill in after each header):
 30/60/90:
 Date of Update:
 Case Summary: 2-4 sentences — the customer/account, product and versions, platform/environment, what was reported, and where the case stands right now.
-Next steps: "-" bullets — the concrete actions still to do to move the case forward.
+Next steps: "-" bullets — the concrete actions still to do to move the case forward. Each one must name the exact artefact it acts on (log file + server role, service, console path, port, error string) and follow the [LOG ACCESS] directive below on who collects the evidence. Contentless steps ("verify the configuration", "check the logs", "monitor for stability") are FORBIDDEN.
 Research Links: [real URLs from the research/case, or "None"]
-30/60/90 JIRA Justification: 1-3 sentences on whether this aged case warrants a JIRA / development escalation at this milestone, referencing the case age, business impact, and whether a product defect is suspected (quote any MCMR-xxxxx already raised).
+30/60/90 JIRA Justification: 1-3 sentences on whether this aged case warrants a JIRA / development escalation at this milestone, referencing the case age, business impact, and whether a product defect is suspected. Quote an MCMR only if it was already raised on this case or is listed in the [MCMR RULE] block — never any other code.
 
-${chronology ? chronology + '\n\n' : ''}Base everything strictly on the case facts and the research provided.`;
+${chronology ? chronology + '\n\n' : ''}${logAccess ? logAccess + '\n\n' : ''}Base everything strictly on the case facts and the research provided.`;
 
     await runQuickAIAction('Building 30/60/90 analysis...', '30/60/90 analysis ready', prompt, {
         forceConversational: true,
@@ -10105,13 +12204,60 @@ ${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case fac
     });
 }
 
+// "Email Chain In-depth Analysis (QA)" — the same whole-chain report that a typed
+// "summarise the email chain" produces, on a button, plus the measured QA review checkpoints.
+// It does NOT go through the normal single-call model route: buildFullChainSummary reads EVERY
+// message (map-reduce, many small model calls) and computes the order, dates, authors, roles
+// and counts in JavaScript, so a QA reviewer can trust the timeline as an extract rather than
+// a generation. That is exactly what makes it usable as a case-quality audit.
+async function generateEmailChainQAAnalysis() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+
+    const chain = ($('emailChain').value || '').trim();
+    if (!chain) {
+        toast('No email chain yet — sync from Salesforce (Feed tab) or paste the chain into Case Info', 'e');
+        // Open Case Info and put the cursor in the chain box so they can paste straight away.
+        if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
+        $('emailChain').focus();
+        return;
+    }
+    let entryCount = 0;
+    try { entryCount = getCleanChainEntries(chain).length; } catch (e) { entryCount = 0; }
+    if (!entryCount) {
+        toast('The email chain is empty once signatures and disclaimers are stripped — nothing to analyse', 'e');
+        return;
+    }
+
+    // Collapse the Case Info panel so the user lands in the chat and watches the report build
+    // (mirrors Clean Up Meeting Notes / Analyse Now).
+    if ($('bodyL') && $('bodyL').style.display !== 'none') {
+        $('bodyL').style.display = 'none';
+        $('iconL').textContent = '▶';
+        $('panelL').classList.add('collapsed');
+    }
+
+    // The text is what lands in the chat history for this turn, so it reads as the question a
+    // QA reviewer would have asked. The routing itself comes from forceChainDigest, not this.
+    const ask = `Give me a full in-depth QA analysis of this case's email chain — every message in chronological order with its exact date and author, the overview, where the case stands now, and the QA review checkpoints (${entryCount} message${entryCount === 1 ? '' : 's'} in the chain).`;
+
+    await runQuickAIAction('Reading the email chain...', 'Email chain analysis ready', ask, {
+        forceChainDigest: true,
+        chainQA: true,
+        skipResearch: true,
+        copyKind: 'summary'
+    });
+}
+
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 
 // --- WELCOME CARD SHORTCUTS ---
 // The cards on the welcome screen are real one-click AI actions, not decoration:
 // 📋 Case Summary + Next Steps, 📧 Draft an email to the customer, 🔧 Fix the customer's
-// issue for me, 📅 30/60/90 Case Analysis, 🧩 Problem & Resolution Summary (Internal),
-// 📦 Export the full session report. They mirror the top Quick Actions panel.
+// issue for me, 📅 30/60/90 Case Analysis, 🔍 Email Chain In-depth Analysis (QA),
+// 🧩 Problem & Resolution Summary (Internal), 📦 Export the full session report.
+// They mirror the top Quick Actions panel.
 {
     const wireCard = (id, fn) => {
         const el = $(id);
@@ -10123,6 +12269,7 @@ $('btnCleanNotes').onclick = cleanUpMeetingNotes;
     wireCard('wCardLogs', draftCustomerEmail);
     wireCard('wCardMissing', fixCustomerIssue);
     wireCard('wCard306090', generate306090Analysis);
+    wireCard('wCardChainQA', generateEmailChainQAAnalysis);
     wireCard('wCardProbRes', generateProblemResolutionSummary);
     wireCard('wCardExport', () => exportSession());
 }
@@ -10163,6 +12310,7 @@ if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
 if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
 if ($('qaFixIssue')) $('qaFixIssue').onclick = fixCustomerIssue;
 if ($('qa306090')) $('qa306090').onclick = generate306090Analysis;
+if ($('qaChainQA')) $('qaChainQA').onclick = generateEmailChainQAAnalysis;
 if ($('qaProbRes')) $('qaProbRes').onclick = generateProblemResolutionSummary;
 if ($('qaExport')) $('qaExport').onclick = () => exportSession();
 

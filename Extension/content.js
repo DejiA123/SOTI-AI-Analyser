@@ -416,6 +416,10 @@ async function scrapeSalesforce(options = {}) {
         currentVersion: '',
         product: '',
         licenseType: '',
+        // "MC Hosted" (Cloud vs On-Prem) decides whether SOTI Support can pull the server logs
+        // itself or has to request them from the customer, so it is scraped from the case
+        // rather than inferred from License Type (which only ever guessed at it).
+        mcHosted: '',
         caseAge: '',
         emailChain: '',
         feedItemCount: 0,
@@ -457,6 +461,16 @@ async function scrapeSalesforce(options = {}) {
         }
         if (text.includes('license type') && !data.licenseType) {
             data.licenseType = getFieldValue(label);
+        }
+        // "MC Hosted" is the field name on the SOTI case layout; the others are the variants
+        // seen on older/renamed layouts. Matched narrowly so unrelated labels that merely
+        // contain "host" (e.g. "Hostname") never win.
+        if (!data.mcHosted && (
+            text.includes('mc hosted') || text.includes('mobicontrol hosted') ||
+            text === 'hosted' || text === 'hosting' ||
+            text === 'hosted by' || text === 'hosting type' || text === 'deployment type'
+        )) {
+            data.mcHosted = getFieldValue(label);
         }
         if (text.includes('case age') && !data.caseAge) {
             data.caseAge = getFieldValue(label);
