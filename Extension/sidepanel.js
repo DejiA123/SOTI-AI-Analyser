@@ -13154,17 +13154,124 @@ function enforceJiraLogName(jira, name) {
     return jira.replace(/(Name of the log file:)[^\n]*/, () => `Name of the log file: ${name}`);
 }
 
+// Comparison key for a keyword line — case, bullets, JIRA escaping ("SQL\_DB"),
+// monospace/bold markup and separators are all ignored so an echoed copy of a
+// keyword is recognised however the model re-typed it.
+const jiraKeywordKey = (line) => String(line || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// The keyword tokens we own, as comparison keys. Very short tokens are dropped so a
+// stray one-word line elsewhere can never be mistaken for an echo of the list.
+function jiraKeywordKeySet(keywordContent) {
+    const keys = new Set();
+    for (const line of String(keywordContent || '').split('\n')) {
+        const k = jiraKeywordKey(line);
+        if (k.length >= 4) keys.add(k);
+    }
+    return keys;
+}
+
+const JIRA_KEYWORD_HEADING = 'Keyword for better formatting and visibility';
+const isJiraCodeFenceOpen = (t) => /^\{code(?::[a-zA-Z0-9]+)?\}$/.test(t);
+const isJiraCodeFenceClose = (t) => /^\{code\}$/.test(t);
+
+// Models routinely repeat the keyword list as bare text straight after the code
+// block (sometimes re-fenced, sometimes with the heading again). `tail` is the text
+// following the block; return it with that echo run removed. Only lines that are
+// exactly one of OUR keywords are ever dropped, so real content is never touched.
+function stripJiraKeywordEchoAfter(tail, keys) {
+    if (!keys.size || !tail) return tail;
+    const lines = tail.split('\n');
+    let i = 0, last = -1; // index of the last line belonging to the echo run
+    while (i < lines.length) {
+        const t = lines[i].trim();
+        const key = jiraKeywordKey(t);
+        if (!key) { i++; continue; }                       // blank / separator / markup-only
+        if (keys.has(key)) { last = i; i++; continue; }    // a bare echoed keyword
+        if (t.toLowerCase() === JIRA_KEYWORD_HEADING.toLowerCase()) { i++; continue; } // heading repeated
+        if (isJiraCodeFenceOpen(t)) {
+            // A re-fenced copy of the list: consume it only when every line inside is
+            // one of our keywords and the fence actually closes.
+            let j = i + 1, sawKeyword = false, closed = -1;
+            for (; j < lines.length; j++) {
+                const inner = lines[j].trim();
+                if (isJiraCodeFenceClose(inner)) { closed = j; break; }
+                const k = jiraKeywordKey(inner);
+                if (!k) continue;
+                if (!keys.has(k)) break;
+                sawKeyword = true;
+            }
+            if (closed !== -1 && sawKeyword) { last = closed; i = closed + 1; continue; }
+        }
+        break; // real content — stop
+    }
+    if (last < 0) return tail;
+    const rest = lines.slice(last + 1).join('\n').replace(/^\r?\n+/, '');
+    return rest.trim() ? '\n\n' + rest : '\n';
+}
+
+// Same failure mode, mirrored: the list echoed just BEFORE the heading. `head` is the
+// text preceding the block; walk backwards over bare keyword lines only.
+function stripJiraKeywordEchoBefore(head, keys) {
+    if (!keys.size || !head) return head;
+    const lines = head.split('\n');
+    let i = lines.length - 1, first = -1;
+    while (i >= 0) {
+        const t = lines[i].trim();
+        if (isJiraCodeFenceOpen(t) || isJiraCodeFenceClose(t)) break; // never cross a code fence
+        const key = jiraKeywordKey(t);
+        if (!key) { i--; continue; }
+        if (!keys.has(key)) break;
+        first = i; i--;
+    }
+    if (first < 0) return head;
+    const kept = lines.slice(0, first).join('\n').replace(/\s+$/, '');
+    return kept ? kept + '\n\n' : '';
+}
+
+// Drop any FURTHER copies of the whole keyword block that the model emitted elsewhere
+// in the ticket (searching from `fromIndex`, i.e. after the canonical one).
+function dropRepeatJiraKeywordBlocks(jira, fromIndex) {
+    const rx = /(?:\r?\n)*Keyword for better formatting and visibility\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/g;
+    let out = jira, guard = 0;
+    while (guard++ < 5) {
+        rx.lastIndex = Math.min(fromIndex, out.length);
+        const m = rx.exec(out);
+        if (!m) break;
+        const before = out.slice(0, m.index);
+        const after = out.slice(m.index + m[0].length).replace(/^\r?\n+/, '');
+        out = after.trim() ? `${before}\n\n${after}` : before.replace(/\s+$/, '') + '\n';
+    }
+    return out;
+}
+
 // Post-generation guards for the two fields the model must never freelance:
-//  - the "Keyword for better formatting and visibility" block (forced to the extracted keywords)
+//  - the "Keyword for better formatting and visibility" block (forced to the extracted keywords,
+//    with any duplicate of the list the model echoed around it removed)
 //  - the L3/SME "Analysis:" field (forced to TBC — an engineer fills it, not the AI)
 function enforceJiraKeywordBlock(jira, keywordContent) {
     if (!jira) return jira;
-    const block = `Keyword for better formatting and visibility\n{code:java}\n${keywordContent || ''}\n{code}`;
+    const block = `${JIRA_KEYWORD_HEADING}\n{code:java}\n${keywordContent || ''}\n{code}`;
+    const keys = jiraKeywordKeySet(keywordContent);
     const rx = /Keyword for better formatting and visibility\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
-    if (rx.test(jira)) return jira.replace(rx, () => block);
-    // Block missing — insert it right after the Log Analysis code block.
-    const laRx = /(Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\})/;
-    if (laRx.test(jira)) return jira.replace(laRx, (m, g1) => `${g1}\n\n${block}`);
+    const m = jira.match(rx);
+    if (m) {
+        // Replacer-free splice: keyword text can contain "$&"/"$1" sequences.
+        const head = stripJiraKeywordEchoBefore(jira.slice(0, m.index), keys);
+        const tail = stripJiraKeywordEchoAfter(jira.slice(m.index + m[0].length), keys);
+        const out = head + block + tail;
+        return dropRepeatJiraKeywordBlocks(out, head.length + block.length);
+    }
+    // Block missing — insert it right after the Log Analysis code block, and clear any
+    // bare keyword list the model left floating there instead of the block.
+    const laRx = /Log Analysis:\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
+    const la = jira.match(laRx);
+    if (la) {
+        const laEnd = la.index + la[0].length;
+        const head = jira.slice(0, laEnd);
+        const tail = stripJiraKeywordEchoAfter(jira.slice(laEnd), keys);
+        const out = `${head}\n\n${block}${tail}`;
+        return dropRepeatJiraKeywordBlocks(out, head.length + 2 + block.length);
+    }
     return jira;
 }
 
@@ -13842,7 +13949,7 @@ ${getJiraL3SmeSection()}`;
 ### CRITICAL INSTRUCTIONS:
 1. Replace all placeholders (like "[AI: ...]") with intelligent, detailed technical text generated from the notes, case summary, conversation history, and repro steps.
 2. DO NOT modify or remove the pre-filled values in the template (such as SQL Version, Server OS Version, Agent Version, Name of the log file, or the raw log snippets inside the code block) unless you have more specific information to update them with.
-2a. The "Log Analysis:" {code:java} block AND the "Keyword for better formatting and visibility" {code:java} block are VERBATIM pre-filled evidence. Reproduce BOTH exactly as given. NEVER replace the Log Analysis block with a case summary, a chat answer, or prose, and NEVER edit the keyword list.
+2a. The "Log Analysis:" {code:java} block AND the "Keyword for better formatting and visibility" {code:java} block are VERBATIM pre-filled evidence. Reproduce BOTH exactly as given. NEVER replace the Log Analysis block with a case summary, a chat answer, or prose, and NEVER edit the keyword list. The keyword list appears ONCE, inside its {code:java} fence — do NOT repeat those keywords after the closing {code}, and do NOT restate them anywhere else in the ticket. After the keyword block's closing {code}, the very next line is the "*----*" separator of the L3/SME Engineer section.
 2b. ALWAYS reproduce the entire "L3/SME Engineer" section (heading, Name, Analysis, and the "Otherwise, why was L3/SME not consulted" line). Leave its "Analysis:" field EXACTLY as "Analysis: TBC" — do NOT write an analysis there and do NOT drop the section; an L3 engineer fills it, not you.
 3. For Description of Issue: The ISSUE SUMMARY in the Source Data is the SOURCE OF TRUTH for this section. Rewrite it into a comprehensive, well-written, in-depth technical description of the failure behavior, action, and components — keep every fact the summary states, enrich it with specifics from the case details and conversation, and never contradict it or invent facts. Do NOT copy the summary word-for-word. Only if no Issue Summary is provided, generate the description from the case details, conversation, and notes.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
