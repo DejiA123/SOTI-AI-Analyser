@@ -5772,9 +5772,11 @@ function buildChainFacts(entries, raw, ci, lc) {
 
 // Build the whole answer. Deterministic everywhere it matters; the model only fills in prose
 // and compresses the long messages. onProgress(markdown) streams partial output to the UI.
-// opts.qa — the "Email Chain In-depth Analysis (QA)" button: same report, plus the measured
-// QA review checkpoints section. A typed "summarise the email chain" leaves it off and gets
-// exactly the output it always did.
+// opts.qa — appends the measured QA review checkpoints section to the same report. NOTE: the
+// "Email Chain In-depth Analysis (QA)" button that set this was removed from the UI, so nothing
+// currently passes it and buildChainQAChecks is unreachable; the branch is kept so the option can
+// be re-exposed without rebuilding it. A typed "summarise the email chain" leaves it off and gets
+// exactly the output it always did — that path is unaffected.
 async function buildFullChainSummary(ci, opts = {}) {
     const raw = ((ci && ci.email_chain) || '').trim();
     if (!raw) return 'There is no email chain synced for this case yet — sync it from Salesforce (or paste it into Case Info) and ask again.';
@@ -10294,8 +10296,11 @@ ${body}
 //   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
 //   forceChainDigest — serve this turn from buildFullChainSummary (the whole-chain map-reduce
 //     digest) instead of a single model call, without depending on isEmailChainSummaryRequest
-//     matching the wording. Used by the Email Chain In-depth Analysis (QA) button.
+//     matching the wording.
 //   chainQA — with forceChainDigest, append the measured QA review checkpoints section.
+//     Both options are currently UNUSED: the Email Chain In-depth Analysis (QA) button that set
+//     them was removed from the UI. A typed "summarise the email chain" still reaches the digest
+//     through isEmailChainSummaryRequest, which is why that path keeps working.
 async function send(overrideText = null, silent = false, opts = {}) {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
@@ -10428,9 +10433,9 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // [CONVERSATION SO FAR] digest — never a log report, never a knowledge-base research run.
     const metaConversationTurn = !opts.freshContext && !silent && isConversationMetaQuestion(txt);
     // Logs attached, but does THIS message want an analysis, or a normal/case answer?
-    // opts.forceChainDigest (the Email Chain In-depth Analysis (QA) button) is exempt: its
-    // instruction text says "analysis", which with logs attached would otherwise route the
-    // turn into log forensics instead of the chain digest the button exists to run.
+    // opts.forceChainDigest is exempt: an instruction text saying "analysis" would otherwise,
+    // with logs attached, route the turn into log forensics instead of the chain digest. (No
+    // caller sets it since the QA button was removed; the guard costs nothing and stays correct.)
     const analysisRun = !opts.forceConversational && !opts.forceChainDigest && !metaConversationTurn && hasLogs && !isAnalysisFollowUpTurn && !countQuestionTurn && (isLogForensicsRequest(txt) || wantsLogAnalysis(txt, silent));
     // MSI/setup installer logs MUST use the strict forensic methodology (find the CustomAction
     // that returned 1603 / triggered "Return value 3", ignore SQL/enumeration noise). Route them
@@ -12375,59 +12380,13 @@ ${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case fac
     });
 }
 
-// "Email Chain In-depth Analysis (QA)" — the same whole-chain report that a typed
-// "summarise the email chain" produces, on a button, plus the measured QA review checkpoints.
-// It does NOT go through the normal single-call model route: buildFullChainSummary reads EVERY
-// message (map-reduce, many small model calls) and computes the order, dates, authors, roles
-// and counts in JavaScript, so a QA reviewer can trust the timeline as an extract rather than
-// a generation. That is exactly what makes it usable as a case-quality audit.
-async function generateEmailChainQAAnalysis() {
-    const c = cases.find(x => x.id === activeCaseId);
-    if (!c) { toast('No active case selected', 'e'); return; }
-    if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
-
-    const chain = ($('emailChain').value || '').trim();
-    if (!chain) {
-        toast('No email chain yet — sync from Salesforce (Feed tab) or paste the chain into Case Info', 'e');
-        // Open Case Info and put the cursor in the chain box so they can paste straight away.
-        if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
-        $('emailChain').focus();
-        return;
-    }
-    let entryCount = 0;
-    try { entryCount = getCleanChainEntries(chain).length; } catch (e) { entryCount = 0; }
-    if (!entryCount) {
-        toast('The email chain is empty once signatures and disclaimers are stripped — nothing to analyse', 'e');
-        return;
-    }
-
-    // Collapse the Case Info panel so the user lands in the chat and watches the report build
-    // (mirrors Clean Up Meeting Notes / Analyse Now).
-    if ($('bodyL') && $('bodyL').style.display !== 'none') {
-        $('bodyL').style.display = 'none';
-        $('iconL').textContent = '▶';
-        $('panelL').classList.add('collapsed');
-    }
-
-    // The text is what lands in the chat history for this turn, so it reads as the question a
-    // QA reviewer would have asked. The routing itself comes from forceChainDigest, not this.
-    const ask = `Give me a full in-depth QA analysis of this case's email chain — every message in chronological order with its exact date and author, the overview, where the case stands now, and the QA review checkpoints (${entryCount} message${entryCount === 1 ? '' : 's'} in the chain).`;
-
-    await runQuickAIAction('Reading the email chain...', 'Email chain analysis ready', ask, {
-        forceChainDigest: true,
-        chainQA: true,
-        skipResearch: true,
-        copyKind: 'summary'
-    });
-}
-
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 
 // --- WELCOME CARD SHORTCUTS ---
 // The cards on the welcome screen are real one-click AI actions, not decoration:
 // 📋 Case Summary + Next Steps, 📧 Draft an email to the customer, 🔧 Fix the customer's
-// issue for me, 📅 30/60/90 Case Analysis, 🔍 Email Chain In-depth Analysis (QA),
-// 🧩 Problem & Resolution Summary (Internal), 📦 Export the full session report.
+// issue for me, 📅 30/60/90 Case Analysis, 🧩 Problem & Resolution Summary (Internal),
+// 📦 Export the full session report.
 // They mirror the top Quick Actions panel.
 {
     const wireCard = (id, fn) => {
@@ -12440,7 +12399,6 @@ $('btnCleanNotes').onclick = cleanUpMeetingNotes;
     wireCard('wCardLogs', draftCustomerEmail);
     wireCard('wCardMissing', fixCustomerIssue);
     wireCard('wCard306090', generate306090Analysis);
-    wireCard('wCardChainQA', generateEmailChainQAAnalysis);
     wireCard('wCardProbRes', generateProblemResolutionSummary);
     wireCard('wCardExport', () => exportSession());
 }
@@ -12481,7 +12439,6 @@ if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
 if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
 if ($('qaFixIssue')) $('qaFixIssue').onclick = fixCustomerIssue;
 if ($('qa306090')) $('qa306090').onclick = generate306090Analysis;
-if ($('qaChainQA')) $('qaChainQA').onclick = generateEmailChainQAAnalysis;
 if ($('qaProbRes')) $('qaProbRes').onclick = generateProblemResolutionSummary;
 if ($('qaExport')) $('qaExport').onclick = () => exportSession();
 
