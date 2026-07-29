@@ -6119,7 +6119,8 @@ OUTPUT — a Markdown table plus a verdict:
 | --- | --- |
 | (rows: the failing CustomAction + its 1603, the "Return value 3" line with its action and timestamp, and the key lines above showing WHY it failed) |
 
-Then: **ROOT CAUSE:** the exact CustomAction name, its file:line and timestamp, and the precise reason from the lines above it. **FIX:** the specific remediation for that action. Quote exact names, line numbers and timestamps from the INSTALLER EVIDENCE — never invent them, and never write placeholders. Begin directly with the table — NEVER open with "Based on" or any preamble.`;
+Then: **ROOT CAUSE:** the exact CustomAction name, its file:line and timestamp, and the precise reason from the lines above it. **FIX:** the specific remediation for that action. Quote exact names, line numbers and timestamps from the INSTALLER EVIDENCE — never invent them, and never write placeholders. Begin directly with the table — NEVER open with "Based on" or any preamble.
+Cite by BARE file name (\`SetupSOTIXSight.log:Line 103679\`), never the full "bundle.zip/folder/file.log" path — give the full path once and stay short after that, so the budget goes on findings instead of repeated paths. Both **ROOT CAUSE:** and **FIX:** are mandatory: an answer that stops before **FIX:** is a FAILED answer.`;
 }
 
 // Installer-forensic prompt for small/CPU-bound models. The evidence already contains the
@@ -6155,6 +6156,13 @@ HOW TO REASON (critical):
   SYMPTOMS the installer logged but continued past — NEVER report a symptom as the root cause.
 - If the environment says AZURE SQL DATABASE and the failure is "ALTER DATABASE / SET RECOVERY", the cause
   is that Azure SQL does not support that statement; recommend a supported SQL Server or a patched script.
+
+CITE COMPACTLY — write every citation as "<bare file name>:Line <n>" (e.g. \`SetupSOTIXSight.log:Line 103679\`).
+NEVER repeat the full "bundle.zip/folder/file.log" path in a row or a chain step: give the full path ONCE, in
+**Log Source:**, and use the short name everywhere after that.
+FINISH THE REPORT — sections 1, 2, 3 AND the closing **Root Cause:** / **Recommendation:** lines are all
+mandatory. Keep each section tight (the triage table is 4–6 rows, the chain is 3–5 short steps) so you reach
+the Recommendation. A report that stops before **Recommendation:** is a FAILED answer.
 
 OUTPUT FORMAT — use these exact headings. Cite ONLY real file:Line and timestamps copied from the evidence
 (never invent, never write placeholders like "Line N"/"{n}"). Use the final-session window for **Install:**,
@@ -6233,6 +6241,67 @@ function dedupeReportTableRows(text) {
         seen.add(trimmed);
         return true;
     }).join('\n');
+}
+
+// Join a continuation chunk onto an answer that was cut off at the output cap. A resumed model
+// almost always re-emits a little of what it already wrote (the last few words, or the heading it
+// was under), so strip the longest verbatim overlap, then fix the seam: a continuation that opens
+// a new block needs the blank line the cut swallowed, one that resumes a broken word needs nothing.
+function stitchContinuation(before, addition) {
+    const prev = before || '';
+    const raw = addition || '';
+    // Did the continuation open with its own separator (whitespace / a leading ellipsis)? If so,
+    // stripping that separator must not weld two words together at the seam.
+    const hadLeadingBreak = /^(?:\s|\.{3}|…)/.test(raw);
+    let add = raw
+        .replace(/^\s*(?:\.{3}|…)\s*/, '')
+        // Models often narrate the resume ("Continuing the report:") despite being told not to.
+        .replace(/^\s*\(?continu(?:ing|ed|ation)\b[^\n]{0,60}\)?[:.]?\s*\n+/i, '');
+    if (!add.trim()) return '';
+
+    // Longest suffix of `prev` that `add` repeats verbatim at its start. The 12-char floor keeps
+    // a legitimately repeated short word (" the ") from being mistaken for an overlap. Matching
+    // against the LEADING-WHITESPACE-STRIPPED addition is what makes the common " returned error
+    // code 1603 …" style repeat (same words, re-indented by the resumed turn) line up.
+    let overlapped = false;
+    const addTrimmed = add.replace(/^[ \t]+/, '');
+    const maxOverlap = Math.min(400, prev.length, addTrimmed.length);
+    for (let n = maxOverlap; n >= 12; n--) {
+        if (addTrimmed.startsWith(prev.slice(prev.length - n))) {
+            add = addTrimmed.slice(n);
+            overlapped = true;
+            break;
+        }
+    }
+    const startsBlock = /^\s*(?:#{1,6}\s|\||[-*+]\s|\d+\.\s|>\s|\*\*)/.test(add);
+
+    // The cap almost always lands MID-TOKEN — the reported report died inside a file name
+    // ("…Return value 3 at 20260727_162419-SetupSOTIXSight-2026.1.0.20920"). The resumed model
+    // then restarts that whole token, and the repeat is far shorter than the 12-char floor above,
+    // so it would weld into "…SetupSetup.log". Catch it: if the trailing partial token of `prev`
+    // is a strict prefix of the first token of `add`, that prefix is a re-write, not new text.
+    if (!overlapped && !startsBlock && !hadLeadingBreak) {
+        const prevTok = (prev.match(/\S+$/) || [''])[0];
+        const addTok = (add.match(/^\S+/) || [''])[0];
+        if (prevTok.length >= 2 && addTok.length > prevTok.length && addTok.startsWith(prevTok)) {
+            add = add.slice(prevTok.length);
+        }
+    }
+    if (!add.trim()) return '';
+
+    if (startsBlock) {
+        const body = add.replace(/^\s+/, '');
+        const prevEndsLine = /\n[ \t]*$/.test(prev);
+        // A blank line CLOSES a markdown table, so a resumed table row gets exactly one newline;
+        // a heading or a bold verdict line gets the blank line the cut swallowed.
+        if (/^\|/.test(body)) return prevEndsLine ? body : '\n' + body;
+        if (/\n[ \t]*\n[ \t]*$/.test(prev)) return body;
+        return (prevEndsLine ? '\n' : '\n\n') + body;
+    }
+    // Separator the continuation supplied and we stripped — restore it rather than gluing
+    // "…the login failed" onto "for user sa." as "failedfor".
+    if (hadLeadingBreak && !overlapped && /[\w.,;:)\]]$/.test(prev) && /^[\w(\[]/.test(add)) return ' ' + add;
+    return add;
 }
 
 // Deterministic post-verification of an AI log-analysis answer. Never rewrites the analysis —
@@ -7614,6 +7683,7 @@ If CURATED HIGH-VALUE EVIDENCE or SQL/DATABASE EVENTS sections exist, you MUST r
 For large MSI logs the keyword sweep may be omitted intentionally. When PRECISION LOG BRIEF exists, ignore generic sweep tables and use Phase blocks + SQL facts only.
 HALLUCINATION BLOCKLIST: Never claim missing dependencies, corrupted registry entries, implicit deadlocks, network disconnects, timeout code 4214, log-path-change causality, reboot actions, or HRESULT/Win32 root causes unless the attached raw log lines explicitly show those exact facts.
 TIMESTAMP PRECISION: Preserve milliseconds whenever present. MSI timestamps like \`19:13:57:009\` must be normalized and shown as \`19:13:57.009\` in every timeline, propagation path, root-cause verdict, and evidence citation.
+CITATION LENGTH: cite by BARE file name (\`MS.log:Line 8924\`), never the full "bundle.zip/folder/MS.log" path — list full paths once under Log Source and stay short after that. Repeating long paths in every row spends the answer budget on text instead of findings and gets the report cut off before its verdict. Every section through the final recommendation is mandatory: an answer that stops early is a FAILED answer.
 STRICT FAILURE-SIGNAL LADDER: prioritize FATAL/CRITICAL/PANIC/SEVERE, then exception chains with innermost causes, then SQL/certificate/authentication/permission failures, then ERROR/non-zero return codes, then WARN. INFO lines are context only unless they directly identify the failing operation. Lines saying "0 errors", "no errors", or "completed successfully" are not failures.
 EVERY exception class listed in the sweep or PARSED EXCEPTION / SQL BLOCKS must be mentioned exactly once in the Exception Deep Dive or explicitly dismissed as downstream/noise with evidence.
 YOU MUST USE THE WHOLE-LOG COVERAGE MAP to confirm whether the failure is concentrated in head, middle, tail, or a specific segment. Do not say the middle of the log is clean unless the segment map supports it.
@@ -7762,6 +7832,8 @@ HOW TO REASON:
 - If evidence is genuinely insufficient, say so and name the log you need. NEVER fabricate.
 
 CITATIONS: use exactly "filename:Line <number> — <exact text>", copied from the evidence sections. NEVER write a placeholder ("Line N", "@ Timestamp", "ExceptionClass") or invent a line/timestamp/message. A full date-time (e.g. "2026-06-05 11:52:05.101") in parentheses at the END is optional; never put a time where the line number goes.
+"filename" is the BARE file name (\`MS.log:Line 8924\`) — never the full "bundle.zip/folder/MS.log" path. Name full paths once under **Logs reviewed:** and stay short everywhere else; long paths repeated in every row burn the answer budget and the report gets cut off before the Root Cause.
+FINISH THE REPORT: sections 1, 2, 3 AND the closing **Root Cause:** / **Recommendation:** lines are all mandatory. Keep each section tight so you reach the end — an answer that stops before **Recommendation:** is a FAILED answer.
 
 OUTPUT — use these exact headings; begin directly with "## 🔍" (no "Based on" preamble):
 
@@ -9702,10 +9774,24 @@ const OllamaAI = {
             // keeps the model loaded and warm instead of reloading it every turn (huge on CPU).
             const ctxCeiling = await getSessionCtx(model);
             // Keep generation bounded so a 6 tok/s CPU finishes in minutes, not tens of minutes.
-            const numPredict = isListingAll
+            // basePredict is the FLOOR (and what the prompt budget below reserves); the real cap is
+            // grown to fill whatever room is left in num_ctx once the prompt is sized (see
+            // predictCeiling below) — a cap is not a target, so a model that finishes early still
+            // finishes early.
+            const basePredict = isListingAll
                 ? (isSmall ? 1792 : 8192)
                 : (hasLogs ? (isSmall ? 1280 : (isThinkingModelReq ? 4096 : 2048))
                            : (isSmall ? (mentionsReleaseNotes ? 1280 : 1024) : (isThinkingModelReq ? 1536 : 800)));
+            // How far the cap may be raised into free context. A forensic report (triage table →
+            // propagation path → symptom-vs-source table → root cause → recommendation) routinely
+            // needs 1.5–2.5K tokens because every citation repeats a long "bundle.zip/setup.log:Line
+            // 103679" path — at the old flat 1280 the answer died mid-sentence inside the
+            // Propagation Path and the Root Cause section was never written at all.
+            const predictCeiling = isListingAll
+                ? (isSmall ? 3072 : 8192)
+                : (hasLogs ? (isSmall ? 3072 : (isThinkingModelReq ? 6144 : 4096))
+                           : (isSmall ? 1792 : (isThinkingModelReq ? 2048 : 1600)));
+            let numPredict = basePredict;
 
             const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token (conservative → num_ctx stays generous, prompt never overflows)
             let totalChars = messages.reduce((acc, m) => acc + (m.content ? m.content.length : 0), 0);
@@ -9726,7 +9812,7 @@ const OllamaAI = {
             const budgetCtx = (isSmall && (!LOCAL_AI_CTX_MAX || LOCAL_AI_CTX_MAX === 'auto'))
                 ? Math.min(SMALL_PROMPT_BUDGET_CTX, ctxCeiling)
                 : ctxCeiling;
-            const maxAllowedChars = Math.floor((budgetCtx - numPredict - 600) * CHARS_PER_TOKEN);
+            const maxAllowedChars = Math.floor((budgetCtx - basePredict - 600) * CHARS_PER_TOKEN);
             if (totalChars > maxAllowedChars) {
                 // 1. Drop OLDER history first, but PROTECT the most recent turns so the model always
                 //    keeps short-term memory / context flow (it can answer "what did I just say?" and
@@ -9812,7 +9898,19 @@ const OllamaAI = {
             // between turns. The prompt has already been trimmed to fit maxAllowedChars above.
             let numCtx = ctxCeiling;
 
-            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx} (fixed), num_predict: ${numPredict}, modelMax: ${modelMax}, hardMax: ${hardMax}`);
+            // GROW THE ANSWER BUDGET INTO THE FREE WINDOW.
+            // The prompt is deliberately budgeted against a SMALLER window than num_ctx on small
+            // models (SMALL_PROMPT_BUDGET_CTX = 6144 vs a 8192 num_ctx) to keep prefill fast — so
+            // sizing the answer as if the prompt filled the whole window charged that reserve
+            // twice and left thousands of tokens of context unused while the report got cut off.
+            // Example (gemma e4b, installer forensics): prompt ≈ 4.3K tokens of an 8K window →
+            // ~3.6K tokens free, yet num_predict stayed at 1280 and the answer stopped mid-word.
+            // Grow the cap to whatever the window actually has spare, bounded by predictCeiling.
+            const OUTPUT_SAFETY_MARGIN = 256; // never plan to fill the window to the last token
+            const headroom = numCtx - estimatedTokens - OUTPUT_SAFETY_MARGIN;
+            if (headroom > numPredict) numPredict = Math.min(predictCeiling, headroom);
+
+            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx} (fixed), num_predict: ${numPredict} (floor ${basePredict}, ceiling ${predictCeiling}), modelMax: ${modelMax}, hardMax: ${hardMax}`);
 
             const doOllamaFetch = (ctx) => fetch(`${baseUrl}/api/chat`, {
                 method: 'POST',
@@ -10943,10 +11041,10 @@ ${imgContext}`;
         let resp = '';
         let thinkingResp = ''; // Accumulate thinking/reasoning content separately
         let isThinking = false; // Track whether we're in the thinking phase
+        let doneReason = '';    // Ollama's stop reason: "stop" = finished, "length" = hit num_predict
         const decoder = new TextDecoder();
         let lastRender = 0;
         let pendingRender = false;
-        let sseBuffer = ''; // Buffer for incomplete SSE chunks across reads
 
         // Detect if this is a thinking/reasoning model (Gemma 4, QwQ, etc.) (substring match to support GGUF/custom names)
         const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
@@ -10967,61 +11065,127 @@ ${imgContext}`;
             pendingRender = false;
         };
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value);
-            // Buffer NDJSON data across chunk boundaries to handle split lines
-            sseBuffer += chunk;
-            const lines = sseBuffer.split('\n');
-            // Keep the last (possibly incomplete) line in the buffer
-            sseBuffer = lines.pop() || '';
-            
-            for (const line of lines) {
-                const data = line.trim();
-                if (!data) continue;
-                try {
-                    const json = JSON.parse(data);
-                    
-                    const message = json.message || {};
-                    
-                    // Extract content token — native field
-                    const contentTok = message.content || '';
-                    
-                    // Extract reasoning/thinking token — native field for Ollama reasoning models
-                    const reasoningTok = message.reasoning || message.reasoning_content || message.thinking || '';
-                    
-                    if (reasoningTok) {
-                        // Model is in thinking phase — accumulate but don't display
-                        isThinking = true;
-                        thinkingResp += reasoningTok;
-                        pendingRender = true;
-                        const now = performance.now();
-                        if (now - lastRender > 300) { // Slower render during thinking
-                            renderUpdate();
-                            lastRender = now;
+        // Consume ONE /api/chat NDJSON stream into resp / thinkingResp, painting as tokens land.
+        // Returns the stream's done_reason: "stop" (the model finished on its own) or "length"
+        // (it was cut off at the num_predict cap — the answer is INCOMPLETE and the auto-continue
+        // below picks it up from there).
+        const pumpStream = async (rdr) => {
+            let sseBuffer = ''; // Buffer for incomplete NDJSON chunks across reads
+            let reason = '';
+            while (true) {
+                const { done, value } = await rdr.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                // Buffer NDJSON data across chunk boundaries to handle split lines
+                sseBuffer += chunk;
+                const lines = sseBuffer.split('\n');
+                // Keep the last (possibly incomplete) line in the buffer
+                sseBuffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    const data = line.trim();
+                    if (!data) continue;
+                    try {
+                        const json = JSON.parse(data);
+
+                        // Final NDJSON object of the stream carries why generation stopped.
+                        if (json.done && json.done_reason) reason = json.done_reason;
+
+                        const message = json.message || {};
+
+                        // Extract content token — native field
+                        const contentTok = message.content || '';
+
+                        // Extract reasoning/thinking token — native field for Ollama reasoning models
+                        const reasoningTok = message.reasoning || message.reasoning_content || message.thinking || '';
+
+                        if (reasoningTok) {
+                            // Model is in thinking phase — accumulate but don't display
+                            isThinking = true;
+                            thinkingResp += reasoningTok;
+                            pendingRender = true;
+                            const now = performance.now();
+                            if (now - lastRender > 300) { // Slower render during thinking
+                                renderUpdate();
+                                lastRender = now;
+                            }
                         }
-                    }
-                    
-                    if (contentTok) {
-                        // Real content arrived — model has finished thinking
-                        if (isThinking) {
-                            isThinking = false;
-                            console.log(`[Ollama] Thinking phase complete (${thinkingResp.length} chars). Streaming answer...`);
+
+                        if (contentTok) {
+                            // Real content arrived — model has finished thinking
+                            if (isThinking) {
+                                isThinking = false;
+                                console.log(`[Ollama] Thinking phase complete (${thinkingResp.length} chars). Streaming answer...`);
+                            }
+                            resp += contentTok;
+                            pendingRender = true;
+
+                            const now = performance.now();
+                            if (now - lastRender > 100) { // Render at most once every 100ms
+                                renderUpdate();
+                                lastRender = now;
+                            }
                         }
-                        resp += contentTok;
-                        pendingRender = true;
-                        
-                        const now = performance.now();
-                        if (now - lastRender > 100) { // Render at most once every 100ms
-                            renderUpdate();
-                            lastRender = now;
-                        }
-                    }
-                } catch (e) { }
+                    } catch (e) { }
+                }
+            }
+            return reason;
+        };
+
+        doneReason = await pumpStream(reader);
+
+        // AUTO-CONTINUE A CUT-OFF ANSWER.
+        // done_reason "length" means the model was stopped by the output cap, NOT because it was
+        // finished — the report ends mid-sentence and its closing sections (Root Cause —
+        // Symptom vs. Source, **Root Cause:**, **Recommendation:**) were never written. Reported
+        // on an installer forensic run whose Propagation Path stopped mid-file-name. Instead of
+        // presenting that partial as the final answer, resume the SAME answer where it stopped.
+        const MAX_CONTINUATIONS = 2;
+        let continuations = 0;
+        while (doneReason === 'length' && resp.trim() && continuations < MAX_CONTINUATIONS && !controller.signal.aborted) {
+            continuations++;
+            console.warn(`[Ollama] Answer hit the output cap — continuation round ${continuations}/${MAX_CONTINUATIONS} (${resp.length} chars so far)`);
+            const before = resp;
+            // Headings already written, so the model knows what NOT to repeat.
+            const written = [...before.matchAll(/^\s{0,3}#{1,4}\s*(.+)$/gm)].map(m => m[1].trim()).slice(-8);
+            // Send back a COMPACT view of the partial (head for the format it chose + tail for the
+            // exact cut point). The full partial would push real log evidence out of a small
+            // model's budget, and the evidence is what the remaining sections must be grounded in.
+            const partialForModel = before.length > 3000
+                ? `${before.slice(0, 900)}\n[…already written…]\n${before.slice(-2000)}`
+                : before;
+            const contMsgs = [
+                ...modelMessages,
+                { role: 'assistant', content: partialForModel },
+                { role: 'user', content: `Your previous reply was CUT OFF by the output limit. It stopped here, mid-sentence:\n"""${before.slice(-300)}"""\n\nCONTINUE that same reply from EXACTLY that point: finish the interrupted sentence first, then write everything that is still missing${analysisRun ? ` — every remaining section of the report format, ending with the "Root Cause — Symptom vs. Source" table, **Root Cause:** and **Recommendation:**` : ''}.\nRules: do NOT restart${analysisRun ? ' the report' : ''}, do NOT repeat anything already written${written.length ? ` (already done: ${written.join('; ')})` : ''}, no preamble, no apology — output ONLY the missing continuation text.${analysisRun ? ' Keep it tight so it fits: cite each line as "<bare file name>:Line <n>", never the full folder/zip path.' : ''}` }
+            ];
+
+            let contReader;
+            try {
+                contReader = await OllamaAI.completions.create({
+                    model: selectedModel,
+                    messages: contMsgs,
+                    stream: true,
+                    signal: controller.signal
+                });
+            } catch (e) {
+                if (e && e.name === 'AbortError') throw e;
+                console.warn('[Ollama] Continuation request failed — keeping the partial answer.', e);
+                break;
+            }
+
+            const mark = resp.length;
+            doneReason = await pumpStream(contReader);
+            const addition = resp.slice(mark);
+            resp = before + stitchContinuation(before, addition);
+            pendingRender = true;
+            renderUpdate();
+            if (!addition.trim()) {
+                console.warn('[Ollama] Continuation produced no new text — stopping.');
+                break;
             }
         }
-        
+
         // If a thinking model never produced content tokens (all output was in reasoning field),
         // fall back to using the thinking output as the response
         if (!resp.trim() && thinkingResp.trim()) {
@@ -11078,6 +11242,13 @@ ${imgContext}`;
                 }
                 finalAnswer = postValidateCaseAnswer(finalAnswer, allowedMcmr);
             } catch (e) { console.warn('Case answer post-validation failed', e); }
+        }
+
+        // STILL cut off after the continuation rounds — say so. Silently presenting a report that
+        // stops mid-sentence as if it were the finished analysis is the worst outcome: the agent
+        // reads a verdict that was never written. Make the gap explicit and actionable instead.
+        if (doneReason === 'length' && finalAnswer.trim()) {
+            finalAnswer += `\n\n> ⚠️ **This report is incomplete** — the model hit its output limit${continuations ? ` even after ${continuations} continuation attempt${continuations > 1 ? 's' : ''}` : ''}, so the sections after the text above were never written.\n>\n> **To get the full report:** raise **Context Size** in Settings (⚙) so there is more room for the answer, attach fewer/smaller logs, or ask a follow-up such as *"continue the report from where it stopped"* or *"what is the root cause and the recommended fix?"*.`;
         }
 
         // Force the final paint (renderUpdate is a no-op when pendingRender is false, which
