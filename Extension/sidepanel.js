@@ -12411,6 +12411,136 @@ function extractForensicTriageForJira(c) {
     return null;
 }
 
+// ---------------------------------------------------------------------------
+// Forensic ROOT CAUSE → raw-log anchors
+// ---------------------------------------------------------------------------
+// The Chronological Triage table alone is NOT enough to drive the evidence block: it
+// lists the DOWNSTREAM events (the CustomAction 1603, the "Return value 3" abort)
+// while the report's "Propagation Path" and "Root Cause — Symptom vs. Source"
+// sections name the actual source error. Anchoring on error density alone lands the
+// block on whichever failure happens to be densest — typically an early, unrelated
+// one — and the ticket then contradicts the forensic verdict it is meant to document.
+// These helpers read the root-cause sections of the last forensic report and turn
+// them into (a) the exact line numbers it cites and (b) verbatim needles to locate in
+// the raw log, so the quoted evidence is the report's own evidence.
+
+// Markdown → plain text. The model escapes underscores/asterisks ("SOTI\_XSight\_ls")
+// and wraps identifiers in backticks/bold — none of which appear in the raw log, so a
+// needle taken straight from the report would never match.
+function jiraUnmarkdown(s) {
+    return String(s || '')
+        .replace(/\\([\\`*_{}\[\]()#+\-.!|~>])/g, '$1')
+        .replace(/[`*]+/g, '')
+        .trim();
+}
+
+// Words that describe the report's own structure rather than the failure.
+const JIRA_NEEDLE_STOPWORDS = new Set([
+    'line', 'lines', 'error', 'errors', 'failed', 'failure', 'symptom', 'root', 'cause',
+    'observed', 'trigger', 'rollback', 'installer', 'installation', 'timestamp', 'event',
+    'location', 'classification', 'finding', 'action', 'failing'
+]);
+
+// Turn one root-cause statement into weighted, grep-able needles — the fragments that
+// identify the SAME line in the raw log. Ordered by how identifying each kind is.
+function jiraNeedlesFromText(text, weight) {
+    const out = [];
+    const seen = new Set();
+    const add = (s, w) => {
+        const t = String(s || '').trim().replace(/\s+/g, ' ');
+        if (t.length < 5 || t.length > 160) return;
+        const k = t.toLowerCase();
+        if (seen.has(k) || JIRA_NEEDLE_STOPWORDS.has(k)) return;
+        seen.add(k);
+        out.push({ s: t, low: k, w });
+    };
+    const clean = jiraUnmarkdown(text);
+
+    // Fully-qualified type names — the single most identifying token in a .NET/Java error.
+    for (const m of clean.matchAll(/\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){2,}\b/g)) add(m[0], weight + 2);
+    // Quoted identifiers: database names, logins, config files.
+    for (const m of clean.matchAll(/"([^"\n]{3,60})"/g)) add(m[1], weight + 1);
+    for (const m of clean.matchAll(/(?<!\w)'([^'\n]{3,60})'(?!\w)/g)) add(m[1], weight + 1);
+    // HRESULTs / hex error codes.
+    for (const m of clean.matchAll(/\b0x[0-9A-Fa-f]{4,16}\b/g)) add(m[0], weight + 1);
+    // SCREAMING_SNAKE constants and CamelCase identifiers (CustomAction and table names).
+    for (const m of clean.matchAll(/\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+\b/g)) add(m[0], weight);
+    for (const m of clean.matchAll(/\b[A-Za-z][a-z0-9]+[A-Z][A-Za-z0-9]{2,}\b/g)) add(m[0], weight);
+    // The plain-English body of the message ("Cannot open database ... requested by the
+    // login"). Split on the punctuation the raw log breaks on too, so each fragment is a
+    // literal substring of the original line.
+    for (const seg of clean.split(/(?:[.;:|()]|\s[-–—]\s|→|\.\.\.|…)+/)) {
+        const s = seg.trim().replace(/\s+/g, ' ');
+        if (s.length >= 18 && s.split(' ').length >= 3 && /^[\w"'][\w "'\-,/\\]*$/.test(s)) add(s, weight + 1);
+    }
+    return out;
+}
+
+// Read the root-cause sections of the most recent forensic report. Ranked highest to
+// lowest: the ROOT CAUSE rows of the "Symptom vs. Source" table, the "**Root Cause:**"
+// verdict sentence, then the Propagation Path chain (step 1 = earliest causal error).
+// Returns { needles, lineRefs } or null when this case has no forensic report.
+function extractForensicRootCauseForJira(c) {
+    if (!c || !Array.isArray(c.msgs)) return null;
+
+    for (let i = c.msgs.length - 1; i >= 0; i--) {
+        const m = c.msgs[i];
+        if (!m || m.role !== 'assistant' || typeof m.content !== 'string') continue;
+        const text = m.content;
+        if (!/root\s*cause|propagation path|chronological\s+triage/i.test(text)) continue;
+
+        const statements = [];
+
+        // "| <finding> | ROOT CAUSE |" rows of the Symptom-vs-Source table.
+        for (const row of text.split('\n')) {
+            const mm = row.match(/^\s*\|(.+)\|([^|]*)\|\s*$/);
+            if (mm && /root\s*cause/i.test(mm[2]) && !/^[\s:\-]+$/.test(mm[1])) {
+                statements.push({ text: mm[1], w: 6 });
+            }
+        }
+        // The "**Root Cause:** <one sentence>" verdict.
+        const verdict = text.match(/\*\*\s*Root Cause\s*:?\s*\*\*\s*([^\n]+)/i);
+        if (verdict) statements.push({ text: verdict[1], w: 5 });
+        // The Propagation Path chain — step 1 is the earliest causal error.
+        const prop = text.match(/#+\s*(?:\d+\.\s*)?(?:THE\s+)?Propagation Path[^\n]*\n([\s\S]*?)(?=\n#+\s|\n\*\*\s*Root Cause|$)/i);
+        if (prop) {
+            const steps = prop[1].split('\n').filter(l => /^\s*\d+[.)]\s+\S/.test(l));
+            steps.forEach((s, idx) => statements.push({ text: s.replace(/^\s*\d+[.)]\s*/, ''), w: idx === 0 ? 5 : 3 }));
+        }
+        if (!statements.length) continue;
+
+        // Merge the needles, keeping the highest weight each fragment earned.
+        const byNeedle = new Map();
+        for (const st of statements) {
+            for (const nd of jiraNeedlesFromText(st.text, st.w)) {
+                const prev = byNeedle.get(nd.low);
+                if (!prev || prev.w < nd.w) byNeedle.set(nd.low, nd);
+            }
+        }
+        // Line numbers cited inside those statements, in either citation form the
+        // forensic prompt produces: "file.log:Line 7672" and "(Line 7672)".
+        const refs = new Map();
+        for (const st of statements) {
+            const clean = jiraUnmarkdown(st.text);
+            const grab = (rx) => {
+                for (const mm of clean.matchAll(rx)) {
+                    const n = parseInt(mm[1], 10);
+                    if (!(n > 0) || n > 50000000) continue;
+                    if (!refs.has(n) || refs.get(n) < st.w) refs.set(n, st.w);
+                }
+            };
+            grab(/\bline\s*#?\s*(\d{1,8})\b/gi);
+            grab(/\.(?:log|txt|json|xml|har|out|err|trace|csv)\s*:\s*(\d{1,8})\b/gi);
+        }
+
+        const needles = [...byNeedle.values()].sort((a, b) => (b.w - a.w) || (b.s.length - a.s.length));
+        const lineRefs = [...refs.entries()].map(([n, w]) => ({ n, w }));
+        if (!needles.length && !lineRefs.length) continue;
+        return { needles: needles.slice(0, 24), lineRefs };
+    }
+    return null;
+}
+
 // Overwrite whatever the model produced inside the JIRA "Log Analysis:" code block
 // with our verified evidence. This is the guarantee — the model is never trusted to
 // preserve this block. `logAnalysisContent` is the deterministic triage/evidence text.
@@ -12433,6 +12563,15 @@ function enforceJiraLogAnalysis(jira, logAnalysisContent) {
     return jira;
 }
 
+// Log/OS plumbing that matches the SCREAMING_SNAKE pattern on almost every line of an
+// MSI or Windows log and identifies nothing about the failure.
+const JIRA_KEYWORD_STOPWORDS = new Set([
+    'HD_SESSION_LOG', 'HKEY_LOCAL_MACHINE', 'HKEY_CURRENT_USER', 'HKEY_CLASSES_ROOT',
+    'HKEY_USERS', 'HKEY_CURRENT_CONFIG', 'PROPERTY_CHANGE', 'INSTALLED_PRODUCTS',
+    'ALLUSERS', 'TARGETDIR', 'SOURCEDIR', 'COMMON_APPDATA', 'LOCAL_APPDATA',
+    'PROGRAM_FILES', 'SYSTEM_FOLDER', 'WINDOWS_FOLDER', 'TEMP_FOLDER', 'USER_PROFILE'
+]);
+
 // Pull the single most salient error keyword out of each Log Analysis row — the token an
 // engineer would grep for (an exception class, an error constant, a quoted error value).
 // Feeds the JIRA "Keyword for better formatting and visibility" block. Deterministic: one
@@ -12450,27 +12589,44 @@ function extractLogAnalysisKeywords(logAnalysisContent) {
 
     // First pattern that matches an Event wins (highest signal first).
     const patterns = [
-        /\b([a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+\.[A-Z][A-Za-z0-9]+)\b/, // java.lang.IllegalStateException
-        /"Error"\s*:\s*"([^"]+)"/i,                                     // "Error":"UnspecificError"
-        /r#([A-Za-z_][A-Za-z0-9_]{2,})/,                               // Error::Rc(r#OUT_OF_KEYS_PERMANENT_ERROR)
-        /\b([A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+)\b/,                      // OUT_OF_KEYS_PERMANENT_ERROR (ALL_CAPS)
-        /\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout|Denied|Refused))\b/, // IllegalStateException
+        /\b([a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+\.[A-Z][A-Za-z0-9]+)\b/g, // java.lang.IllegalStateException
+        /\b([A-Z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+\.[A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout))\b/g, // System.Data.SqlClient.SqlException
+        /"Error"\s*:\s*"([^"]+)"/ig,                                     // "Error":"UnspecificError"
+        /r#([A-Za-z_][A-Za-z0-9_]{2,})/g,                               // Error::Rc(r#OUT_OF_KEYS_PERMANENT_ERROR)
+        /\b([A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+)\b/g,                      // OUT_OF_KEYS_PERMANENT_ERROR (ALL_CAPS)
+        /\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout|Denied|Refused))\b/g, // IllegalStateException
     ];
 
     const seen = new Set();
     const keywords = [];
+    const take = (kw) => {
+        const k = kw.trim();
+        if (!k || seen.has(k) || JIRA_KEYWORD_STOPWORDS.has(k)) return false;
+        seen.add(k);
+        keywords.push(k);
+        return true;
+    };
     for (const raw of logAnalysisContent.split('\n')) {
         const line = raw.trim();
         if (!line) continue;
         const event = eventOf(line);
+        let done = false;
         for (const rx of patterns) {
-            const m = event.match(rx);
-            if (m && m[1]) {
-                const kw = m[1].trim();
-                if (!seen.has(kw)) { seen.add(kw); keywords.push(kw); }
-                break; // one keyword per row
+            rx.lastIndex = 0;
+            // Walk the matches so a plumbing token (HD_SESSION_LOG on every MSI
+            // PROPERTY CHANGE line) doesn't consume the row's one keyword slot.
+            for (const m of event.matchAll(rx)) {
+                if (m && m[1] && take(m[1])) { done = true; break; }
             }
+            if (done) break; // one keyword per row
         }
+    }
+    // A fully-qualified type is the most precise keyword, but engineers grep the bare
+    // class name too — surface both.
+    for (const kw of [...keywords]) {
+        if (keywords.length >= 12) break;
+        const dot = kw.lastIndexOf('.');
+        if (dot > 0 && /(?:Exception|Error|Failure|Fault|Timeout)$/.test(kw)) take(kw.slice(dot + 1));
     }
     return keywords.join('\n');
 }
@@ -12555,12 +12711,15 @@ function deriveJiraIssueTerms(issueText) {
     return out;
 }
 
-// File:line citations inside the forensic Chronological Triage rows
-// ("DeploymentServer.log:161 — ..."), counted per bare file name.
+// File:line citations inside the forensic Chronological Triage rows, counted per bare
+// file name. Both citation forms the forensic prompt produces are accepted:
+// "DeploymentServer.log:161 — ..." and "Setup.log:Line 103679" (the prompt literally
+// mandates 'filename:Line <number>', so dropping the "Line " word here silently
+// discarded every citation and left the evidence block with nothing to anchor on).
 function parseTriageCitations(triageContent) {
     const map = new Map();
     if (!triageContent) return map;
-    const rx = /([A-Za-z0-9_][\w.\- ]{0,80}?\.(?:log|txt|json|xml|har|out|err|trace|csv))\s*:\s*(\d{1,8})\b/gi;
+    const rx = /([A-Za-z0-9_][\w.\- ]{0,80}?\.(?:log|txt|json|xml|har|out|err|trace|csv))\s*(?::\s*(?:line\s*#?\s*)?|\s+line\s*#?\s*)(\d{1,8})\b/gi;
     let m;
     while ((m = rx.exec(triageContent)) !== null) {
         const display = m[1].split(/[\\/ ]/).pop();
@@ -12578,17 +12737,21 @@ function parseTriageCitations(triageContent) {
 const JIRA_ERROR_LINE_RX = /(\bERR\b|\bFATAL\b|\bCRITICAL\b|\bSEVERE\b|Exception\b|\bfail(?:ed|ure)?\b|\bdenied\b|\bunauthori[sz]ed\b|\btime(?:d\s*)?out\b)/i;
 
 // Single pass over one log: how relevant is it to the reported issue, and which
-// exact lines carry that relevance (anchors for the evidence windows).
-function scoreJiraLogRelevance(log, issueTerms, cited) {
+// exact lines carry that relevance (anchors for the evidence windows). `forensic` is
+// the root cause the forensic report already established — its text matches outrank
+// every heuristic anchor, so the ticket quotes the report's own evidence.
+function scoreJiraLogRelevance(log, issueTerms, cited, forensic) {
     const lines = jiraLogLines(log);
     const total = lines.length;
     const MAX_SCAN = 1200000; // huge bundles: scan the newest slice, incidents live near the tail
     const start = total > MAX_SCAN ? total - MAX_SCAN : 0;
 
     const needles = issueTerms.map(t => ({ ...t, hits: 0 }));
+    const rootNeedles = (forensic && forensic.needles) ? forensic.needles : [];
     const hitLines = []; // { idx, mask: [needle indices], isErr } — scored after damping
     const MAX_HIT_LINES = 200000;
     const errorAnchors = [];
+    const rootAnchors = [];
     let errCount = 0;
     let tsLines = 0, sampled = 0;
 
@@ -12603,6 +12766,15 @@ function scoreJiraLogRelevance(log, issueTerms, cited) {
             const t = needles[n];
             const hit = t.rx ? t.rx.test(scan) : (low || (low = scan.toLowerCase())).includes(t.needle);
             if (hit) { t.hits++; (mask || (mask = [])).push(n); }
+        }
+        // Does THIS line carry the fragments the forensic report quoted as the root
+        // cause? Two independent fragments (or one very strong one) is a real match —
+        // a single generic word is not.
+        if (rootNeedles.length && raw.length >= 12 && rootAnchors.length < 4000) {
+            let rs = 0, rh = 0;
+            const cmp = low || (low = scan.toLowerCase());
+            for (const nd of rootNeedles) if (cmp.includes(nd.low)) { rs += nd.w; rh++; }
+            if (rh >= 2 || rs >= 8) rootAnchors.push({ idx: i, score: Math.min(rs, 60) });
         }
         const isErr = JIRA_ERROR_LINE_RX.test(scan);
         if (isErr) {
@@ -12627,9 +12799,23 @@ function scoreJiraLogRelevance(log, issueTerms, cited) {
         if (s >= 1 && sc >= 3 && termAnchors.length < 5000) termAnchors.push({ idx: h.idx, score: sc });
     }
 
+    // Line numbers the forensic report cites. Real anchors, but weaker than a text
+    // match: a model can transpose a line number far more easily than it can invent
+    // the exact message text, so a verified quote always wins.
+    const citedAnchors = [];
+    const pushCited = (n, w) => {
+        const idx = n - 1;
+        if (idx >= 0 && idx < total) citedAnchors.push({ idx, score: w });
+    };
+    if (forensic && forensic.lineRefs) for (const r of forensic.lineRefs) pushCited(r.n, r.w);
+    if (cited) for (const n of cited.lines) pushCited(n, 4);
+
     let score = 0;
     for (let n = 0; n < needles.length; n++) score += Math.min(needles[n].hits, 200) * eff[n];
     if (cited) score += cited.count * 40;
+    // A file that actually contains the forensic root-cause text IS the file the
+    // ticket should quote, whatever the issue-term arithmetic says.
+    score += Math.min(rootAnchors.length, 200) * 3;
     score += Math.min(errCount, 500) * 0.05;
     // Files with (almost) no timestamped entries — file listings, XML preference dumps —
     // are poor JIRA evidence; strongly prefer real timestamped logs.
@@ -12639,8 +12825,14 @@ function scoreJiraLogRelevance(log, issueTerms, cited) {
     if (anchors.length > 600) {
         anchors = [...anchors].sort((a, b) => b.score - a.score).slice(0, 600).sort((a, b) => a.idx - b.idx);
     }
+    let roots = rootAnchors;
+    if (roots.length > 400) {
+        roots = [...roots].sort((a, b) => b.score - a.score).slice(0, 400).sort((a, b) => a.idx - b.idx);
+    }
     return {
         score,
+        rootAnchors: roots,
+        citedAnchors,
         termAnchors: anchors,
         errorAnchors: errorAnchors.slice(-600), // newest errors are the incident, oldest are noise
         citedLines: cited ? cited.lines.slice(0, 50) : [],
@@ -12651,26 +12843,31 @@ function scoreJiraLogRelevance(log, issueTerms, cited) {
 }
 
 // Pick THE single most relevant uploaded log for the JIRA ticket. Relevance =
-// issue-term hits (weighted) + forensic-triage citations + a small error-density
-// tiebreak. Returns null when no logs with content are attached.
-function selectPrimaryJiraLog(c, triageContent, issueText) {
+// forensic root-cause text matches + issue-term hits (weighted) + forensic-triage
+// citations + a small error-density tiebreak. Returns null when no logs with content
+// are attached.
+function selectPrimaryJiraLog(c, triageContent, issueText, forensic) {
     const logs = (c && Array.isArray(c.logs)) ? c.logs.filter(l => l && (l.content || (l.lines && l.lines.length))) : [];
     if (!logs.length) return null;
     const issueTerms = deriveJiraIssueTerms(issueText);
     const cited = parseTriageCitations(triageContent);
     let best = null;
     for (const log of logs) {
-        const rel = scoreJiraLogRelevance(log, issueTerms, cited.get(jiraLogBaseName(log.name).toLowerCase()));
+        const rel = scoreJiraLogRelevance(log, issueTerms, cited.get(jiraLogBaseName(log.name).toLowerCase()), forensic);
         if (!best || rel.score > best.score) best = { log, ...rel };
     }
     return best;
 }
 
 // New-entry detection: SOTI server logs "[2026-07-14 13:06:49.553] ...", agent logs
-// "2026-07-09T13:30:08.779Z|...", logcat "07-14 13:16:50.462 ...". Anything else is a
-// continuation line (script bodies, XML payloads, stack traces) belonging to the entry above.
+// "2026-07-09T13:30:08.779Z|...", logcat "07-14 13:16:50.462 ...", and MSI installer
+// logs, whose entries carry a time only ("MSI (s) (40!E4) [17:04:09:545]: ...",
+// "Action ended 17:04:29: ...", "SFXCA: ...", "Calling custom action ..."). Anything
+// else is a continuation line (script bodies, XML payloads, .NET stack frames)
+// belonging to the entry above. MSI logs used to match nothing here, so every
+// installer log was scored as an untimestamped file listing and penalised 85%.
 function jiraIsNewLogEntry(s) {
-    return /^(\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\d{2}-\d{2} \d{2}:\d{2}:\d{2})/.test(s || '');
+    return /^(\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\d{2}-\d{2} \d{2}:\d{2}:\d{2}|\[\d{1,2}:\d{2}:\d{2}[.:,]\d{1,3}\]|\d{1,2}:\d{2}:\d{2}[.:,]\d{1,3}[\s|]|MSI \([^)\n]{1,12}\) \([^)\n]{1,12}\) \[\d{1,2}:\d{2}:\d{2}|Action (?:start |ended )?\d{1,2}:\d{2}:\d{2}[:.]|CustomAction \S|Calling custom action |SFXCA: |=== )/.test(s || '');
 }
 
 // Build the verbatim Log Analysis evidence from ONE log: cluster the anchor lines,
@@ -12681,31 +12878,55 @@ function buildJiraLogEvidence(log, sel) {
     const lines = jiraLogLines(log);
     if (!lines.length || !sel) return '';
 
-    let anchors = (sel.termAnchors && sel.termAnchors.length) ? sel.termAnchors : [];
-    if (!anchors.length && sel.citedLines && sel.citedLines.length) {
-        anchors = sel.citedLines.map(n => ({ idx: n - 1, score: 4 })).filter(a => a.idx >= 0 && a.idx < lines.length);
-    }
-    if (!anchors.length) anchors = sel.errorAnchors || [];
-    if (!anchors.length) return '';
+    // Anchor priority. What the forensic report actually named — its root-cause text
+    // located in the raw log, then the line numbers it cites — outranks generic
+    // issue-term and error-density hits. Without this the block quotes whichever
+    // failure is densest and contradicts the very report the ticket documents.
+    const rootAnchors  = (sel.rootAnchors  || []).filter(a => a.idx >= 0 && a.idx < lines.length);
+    const citedAnchors = (sel.citedAnchors || []).filter(a => a.idx >= 0 && a.idx < lines.length);
 
-    const sorted = [...anchors].sort((a, b) => a.idx - b.idx);
+    const byIdx = new Map();
+    const bump = (a, isRoot) => {
+        const e = byIdx.get(a.idx) || { idx: a.idx, score: 0, root: 0 };
+        if (a.score > e.score) e.score = a.score;
+        if (isRoot && a.score > e.root) e.root = a.score;
+        byIdx.set(a.idx, e);
+    };
+    for (const a of rootAnchors) bump(a, true);
+    for (const a of citedAnchors) bump(a, true);
+    for (const a of (sel.termAnchors || [])) bump(a, false);
+    if (!byIdx.size && sel.citedLines && sel.citedLines.length) {
+        for (const n of sel.citedLines) {
+            if (n - 1 >= 0 && n - 1 < lines.length) bump({ idx: n - 1, score: 4 }, true);
+        }
+    }
+    // Error density is the last resort only — never a rival to forensic evidence.
+    if (!byIdx.size) for (const a of (sel.errorAnchors || [])) bump(a, false);
+    if (!byIdx.size) return '';
+
+    const sorted = [...byIdx.values()].sort((a, b) => a.idx - b.idx);
     const clusters = [];
     let cur = null;
     for (const a of sorted) {
         if (cur && a.idx - cur.end <= 8) {
             cur.end = a.idx;
             cur.score += a.score;
+            cur.rootScore += a.root;
         } else {
-            cur = { start: a.idx, end: a.idx, score: a.score };
+            cur = { start: a.idx, end: a.idx, score: a.score, rootScore: a.root };
             clusters.push(cur);
         }
     }
 
+    // Expand each window with real context first, then snap outward to entry
+    // boundaries so multi-line payloads (stack traces, script bodies) stay intact.
+    // A bare snap alone gives a one-entry excerpt no engineer can read in isolation.
+    const CTX_BEFORE = 15, CTX_AFTER = 18;
     for (const cl of clusters) {
-        let s = cl.start, guard = 0;
+        let s = Math.max(0, cl.start - CTX_BEFORE), guard = 0;
         while (s > 0 && !jiraIsNewLogEntry(lines[s]) && guard++ < 15) s--;
         cl.start = s;
-        let e = cl.end;
+        let e = Math.min(lines.length - 1, cl.end + CTX_AFTER);
         guard = 0;
         while (e + 1 < lines.length && !jiraIsNewLogEntry(lines[e + 1]) && guard++ < 40) e++;
         cl.end = e;
@@ -12724,7 +12945,9 @@ function buildJiraLogEvidence(log, sel) {
     };
 
     const MAX_CHARS = 3800, MAX_LINES = 90, MAX_WINDOWS = 3;
-    const byScore = [...clusters].sort((a, b) => b.score - a.score);
+    // Root-cause windows first — the window carrying the forensic verdict is picked
+    // before anything else and is the one allowed to consume the budget.
+    const byScore = [...clusters].sort((a, b) => (b.rootScore - a.rootScore) || (b.score - a.score));
     const chosen = [];
     let usedChars = 0, usedLines = 0, first = true;
     for (const cl of byScore) {
@@ -12763,12 +12986,18 @@ function filterTriageToPrimaryFile(triageContent) {
 }
 
 // First→last timestamp of the quoted evidence, for the "Detailed Time Stamps" field.
+// Falls back to time-only stamps ("[17:04:09:545]") for MSI installer logs, which
+// carry the date once in the header banner and never on the entries themselves.
 function extractJiraEvidenceTimeWindow(text) {
     if (!text) return '';
-    const ts = text.match(/\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?/g);
+    let ts = text.match(/\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?/g);
+    if (!ts || !ts.length) {
+        const timeOnly = text.match(/\[(\d{2}:\d{2}:\d{2}[.:]\d{1,3})\]/g);
+        ts = timeOnly ? timeOnly.map(s => s.slice(1, -1)) : null;
+    }
     if (!ts || !ts.length) return '';
     let min = ts[0], max = ts[0];
-    for (const t of ts) { // ISO-style stamps compare correctly as strings
+    for (const t of ts) { // fixed-width stamps compare correctly as strings
         if (t < min) min = t;
         if (t > max) max = t;
     }
@@ -13270,12 +13499,16 @@ $('btnGenerateJira').onclick = async () => {
     // issue-summary terms, forensic-triage citations, and error density, then quote raw
     // verbatim lines from it only.
     const triageContent = extractForensicTriageForJira(c);
+    // The root cause the forensic report already established. It anchors the evidence
+    // block on the report's own lines, so the ticket can never quote a different
+    // failure from the one the analysis named.
+    const forensicRoot = extractForensicRootCauseForJira(c);
     const issueTermsText = [issue, notes, repro !== 'N/A' ? repro : ''].join('\n');
 
     JiraProgress.set(9, 'Selecting the most relevant log file…');
     await jiraUiYield();
 
-    const primary = selectPrimaryJiraLog(c, triageContent, issueTermsText);
+    const primary = selectPrimaryJiraLog(c, triageContent, issueTermsText, forensicRoot);
 
     JiraProgress.set(13, 'Extracting log evidence…');
     await jiraUiYield();
