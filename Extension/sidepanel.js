@@ -3978,10 +3978,96 @@ function buildCaseContextForPrompt(ci, small) {
 // regexes without drift. Case-insensitive; callers add the 'i' flag.
 const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\t]';
 
+// The same header as written by Outlook-on-the-web / Apple Mail / Gmail, which label the
+// timestamp "Date:" instead of "Sent:". Used ONLY to cut a quoted tail off a message body —
+// never to split entries — because a body that quotes an earlier email keeps that email's
+// signature, and role detection then reads the QUOTED support signature as if the sender were
+// support. Observed on this exact shape (a customer reply whose quoted tail is a SOTI email):
+//     From: EU - Support <support.eu@soti.net>
+//     Date: Wednesday, 10 June 2026 at 10:38
+// With only the "Sent:" form recognised, that tail survived and the CUSTOMER was labelled
+// SOTI Support.
+const REPLY_HEADER_ANY_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?(?:Sent|Date):[ \\t]';
+
 // Support-authored template phrases — customers never write these. Used to tell a SOTI
 // engineer's message from the customer's (lifecycle detection AND the chain digest's role
-// labels), so it lives at module level rather than inside one function.
-const SUPPORT_SIGNATURE_RE = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email/i;
+// labels), so it lives at module level rather than inside one function. Only UNAMBIGUOUS
+// markers belong here: a SOTI sign-off, the SOTI entity name, or the wording of a SOTI case
+// template (closure notice, "second attempt to follow up").
+const SUPPORT_SIGNATURE_RE = /technical support,?\s*soti|soti technical support|thank you for (?:contacting|choosing) soti|log a case|customer portal|survey email|soti\s+(?:limited|ltd\.?|inc\.?)\b|soft closure|we'?ve made (?:two|three|several) attempts to (?:connect|reach)|this is (?:my|our) (?:second|third) attempt to (?:follow up|reach|connect)/i;
+
+// A support job title. On its own this is NOT proof of anything: an IT person at the CUSTOMER
+// can sign "Technical Support Specialist" too, and calling them SOTI-side is the same role swap
+// in reverse. It counts only alongside a mention of SOTI in the same message.
+const SUPPORT_TITLE_RE = /(?:senior\s+)?technical support specialist|support specialist\s*[,|]|technical account manager|senior technical support/i;
+
+// Was this message written by SOTI Support? On a chain whose engineers never wrote an internal
+// note, the signature is the only evidence there is — and the real chain that motivated this
+// signs every engineer email "Thank you, Imran Ali, Senior Technical Support Specialist" with no
+// "SOTI" in the sign-off at all. A strong-marker-only test therefore matched NONE of them, took
+// the oldest one for the customer's own email, and named the engineer as the person experiencing
+// the issue for the whole summary. Titles fix that, but only with SOTI named in the same body.
+function looksSupportAuthored(body) {
+    const t = String(body || '');
+    if (!t) return false;
+    if (SUPPORT_SIGNATURE_RE.test(t)) return true;
+    return SUPPORT_TITLE_RE.test(t) && /\bsoti\b/i.test(t);
+}
+
+// The sender's PERSON name, with the decoration the Salesforce feed and mail clients bolt on:
+// a company parenthetical ("Niels Harland (CM.com International B.V.)"), a pipe/dash company
+// suffix ("Niels Harland | CM.com"), an address ("Niels Harland <niels@cm.com>"), or a
+// trailing role. The same human appears in one chain under SEVERAL of these forms, so every
+// comparison of "is this the customer?" must normalise first — a bare string equality missed
+// three of one customer's emails, which then had no role at all in the digest and were scanned
+// for SOTI promises as if support had written them.
+function bareSenderName(s) {
+    return String(s || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s*[([][^)\]]*[)\]]\s*$/, ' ')
+        .replace(/\s*[|/]\s*.*$/, ' ')
+        .replace(/\s+-\s+.*$/, ' ')
+        .replace(/[\s,;:]+$/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Do two sender strings name the same person? True on an exact bare match, and when one bare
+// name is the other's leading whole-word prefix ("Niels" vs "Niels Harland") — the feed uses
+// both for the same participant.
+function sameSenderName(a, b) {
+    const x = bareSenderName(a).toLowerCase(), y = bareSenderName(b).toLowerCase();
+    if (!x || !y) return false;
+    if (x === y) return true;
+    const [shortName, longName] = x.length <= y.length ? [x, y] : [y, x];
+    return shortName.length >= 4 && longName.startsWith(shortName + ' ');
+}
+
+// Everyone in this chain who is provably SOTI-side. Two signals, both deterministic:
+//   • they authored an [INTERNAL] note or a [CALL LOG] — only SOTI staff can (customers never
+//     see those feed entries), which identifies the engineers and the TAM even when their email
+//     signature carries no SOTI marker at all;
+//   • their own message text (signature kept, quoted tail cut) reads as support-authored
+//     (looksSupportAuthored: a SOTI template phrase, or a SOTI support job title with SOTI named).
+// Used to keep a support engineer from ever being labelled the customer.
+function collectSotiStaffSenders(entries) {
+    const staff = new Set();
+    for (const e of entries || []) {
+        const name = bareSenderName(e && e.sender);
+        if (!name) continue;
+        if (/\bINTERNAL\b|\bCALL\b/i.test((e && e.type) || '')) { staff.add(name.toLowerCase()); continue; }
+        if (looksSupportAuthored((e && e.sigBody) || (e && e.body) || '')) staff.add(name.toLowerCase());
+    }
+    return staff;
+}
+
+function isSotiStaffSender(sender, staff) {
+    const name = bareSenderName(sender).toLowerCase();
+    if (!name) return false;
+    if (staff.has(name)) return true;
+    for (const s of staff) if (sameSenderName(name, s)) return true;
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // Chain timestamps — putting a scraped feed into TRUE chronological order
@@ -4135,10 +4221,15 @@ function formatChainDate(e, opts = {}) {
 function senderNameVariants(sender) {
     const s = (sender || '').trim();
     if (!s) return [];
+    // The feed decorates the sender with the company ("Niels Harland | CM.com"), but the
+    // signature inside the body is signed with the plain person name — so the decorated form
+    // is searched for AND the bare one, or the signature block survives into every gist.
+    const bare = bareSenderName(s);
     const v = [s];
-    const m = s.match(/^([^,]+),\s*(.+)$/);
+    if (bare && bare !== s) v.push(bare);
+    const m = bare.match(/^([^,]+),\s*(.+)$/);
     if (m) v.push(`${m[2].trim()} ${m[1].trim()}`);
-    return v.filter(x => x.length >= 8);
+    return [...new Set(v)].filter(x => x.length >= 8);
 }
 
 // Strip boilerplate from ONE message body. cutReplyTail is true only when each message is
@@ -4158,7 +4249,10 @@ function cleanEmailBody(body, sender, cutReplyTail) {
         t = t.slice(leadHdr[0].length);
     }
     if (cutReplyTail) {
-        const tail = t.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_SRC + ')', 'i'));
+        // "Date:" as well as "Sent:" — Outlook web / Apple Mail / Gmail label the quoted
+        // timestamp that way, and an unrecognised tail drags a whole duplicate email (with its
+        // signature) into this message's gist.
+        const tail = t.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_ANY_SRC + ')', 'i'));
         if (tail > 10) t = t.slice(0, tail); // only cut when a real body precedes the tail
     }
     // Proofpoint / mail-scanner banners and external-sender warnings
@@ -4360,11 +4454,42 @@ function buildEmailChainSection(ci, small, capOverride) {
 //              'active'  (chain exists, no closure evidence → case is open)
 //              'unknown' (no email chain to judge from)
 //   evidence — [{ sender, time, quote }] the closure/reopen messages, newest first.
-// Out-of-office auto-replies (EN + NL) carry no case signal yet are often the newest
-// chain entry. NL needs the full OOO phrasing ("ben ik afwezig") — the bare word
-// "afwezig" also appears in signature notes like "Afwezig op dinsdag en vrijdag" on
-// REAL emails (that false-positive suppressed a genuine closure confirmation in testing).
-const OOO_AUTO_REPLY_RE = /\bautomatic reply\b|\bauto-?reply\b|\bout of (?:the )?office\b|\bben ik\s+(?:momenteel\s+)?afwezig\b|\bmomenteel afwezig\b|\bbeperkt beschikbaar\b|\bbedankt voor (?:je|uw) e-?mail\b|\bon (?:annual |sick )?leave\b|\bmomenteel niet aanwezig\b/i;
+//
+// Out-of-office auto-replies (EN + NL) carry no case signal yet are often the newest chain
+// entry, so they are detected and skipped. The phrase must be about the SENDER: an absence
+// phrase alone is not enough, in either direction —
+//   • "I will be assisting you with this case as my colleague, Imran Ali, is out of office.
+//     Could you provide us with a device we can use?" is a REAL support email, and discarding
+//     it as an auto-reply took a live request to the customer out of the lifecycle scan;
+//   • an engineer's internal note reading "I will be out of office from Monday, as per customer
+//     recent comment he will invite you to call. Please share any information to help move this
+//     case forward" is a handover note full of case state, and the prompt was telling the model
+//     to ignore it.
+// NL needs the full OOO phrasing ("ben ik afwezig") — the bare word "afwezig" also appears in
+// signature notes like "Afwezig op dinsdag en vrijdag" on REAL emails (that false-positive
+// suppressed a genuine closure confirmation in testing).
+const SELF_OOO_RE = /\bI\s*(?:'?m|am|will be|'?ll be|shall be|was)?\s*(?:currently\s+|presently\s+)?(?:out of (?:the )?office|on (?:annual |sick )?leave|away from (?:the )?office|unavailable)\b|\bben ik\s+(?:momenteel\s+)?afwezig\b|\bmomenteel afwezig\b|\bmomenteel niet aanwezig\b|\bbeperkt beschikbaar\b/i;
+
+// Is this entry an actual out-of-office AUTO-REPLY (no case signal, safe to ignore)?
+//   • an [INTERNAL] note or a [CALL LOG] never is — the mail system cannot write one into the
+//     Salesforce feed;
+//   • an explicit "Automatic reply" header always is;
+//   • otherwise the absence must be the SENDER's, near the TOP of a SHORT message that asks for
+//     nothing: a real email mentioning leave still carries a question, a request or an instruction.
+function isOooAutoReply(e) {
+    if (!e) return false;
+    if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) return false;
+    const body = String(e.body || '');
+    if (!body) return false;
+    if (/\bautomatic reply\b|\bauto-?reply\b/i.test(body.slice(0, 400))) return true;
+    const m = body.match(SELF_OOO_RE);
+    if (!m) return false;
+    if (m.index > 300) return false;             // mentioned in passing, deep inside a real message
+    // An auto-reply is short and asks for nothing; a real email that happens to mention leave
+    // still carries case content (a question, a request, an instruction).
+    if (body.length > 700) return false;
+    return !/\?|\bcould you\b|\bcan you\b|\bplease (?:send|provide|share|confirm|try|run|collect|check)\b/i.test(body);
+}
 
 // Parse + clean the raw chain into usable entries (NEWEST first), dropping System rows.
 // Shared by detectCaseLifecycleState and buildChainChronology.
@@ -4378,7 +4503,7 @@ function getCleanChainEntries(raw) {
     // so the marker means "this sender is support", not "this sender quoted support".
     const cutTail = (body) => {
         const s = String(body || '');
-        const idx = s.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_SRC + ')', 'i'));
+        const idx = s.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_ANY_SRC + ')', 'i'));
         return idx > 10 ? s.slice(0, idx) : s;
     };
     return parseEmailChainEntries(raw)
@@ -4408,16 +4533,51 @@ function getCleanChainEntries(raw) {
 // description of the fault, not a report that the fault came back. Recurrence needs either an
 // explicit "same … again", or a verb whose subject IS the fault ("the issue is back").
 const SIG_RECURRENCE_RE = /\b(?:the |this |that )?(?:same|identical) (?:error|issue|problem|behaviou?r|thing)\b[^.\n]{0,40}\bagain\b|\bsee(?:ing)?\b[^.\n]{0,30}\b(?:error|issue|problem)\b[^.\n]{0,30}\bagain\b|\b(?:error|issue|problem|fault|outage)\b[^.\n]{0,20}\b(?:is|has|had|'s)\s+(?:come\s+)?back\b|\b(?:error|issue|problem|fault)\b[^.\n]{0,20}\bhas returned\b|\bre-?appear(?:ed|ing)\b|\bre-?occurr?(?:ed|ing|ence)\b|\brecurr(?:ed|ing|ence)\b|\bhappening again\b|\bstarted again\b|\bback again\b|\bagain (?:facing|seeing|getting|having|experiencing)\b/i;
-const SIG_URGENCY_RE = /\burgent(?:ly)?\b|\basap\b|\bas soon as possible\b|\bimmediate(?:ly)?\b|\bcritical\b|\bhigh(?:est)? priority\b|\bescalat(?:e|ing|ion)\b|\btop priority\b|\bat the earliest\b/i;
-const SIG_IMPACT_RE = /\b(?:customers?|users?|clients?|staff|technicians?|agents?)\b[^.\n]{0,60}\b(?:calling|complain\w*|affected|impacted|blocked|waiting|cannot|can'?t|unable)\b|\bunable to (?:assist|support|work|operate|serve|help)\b|\b(?:production|business|operations?|service)\b[^.\n]{0,30}\b(?:down|halted|stopped|impacted|affected|at a standstill)\b|\bbusiness impact\b|\bwe are (?:down|blocked|stuck)\b|\bcannot (?:assist|support|serve) (?:our |the )?customers?\b/i;
+// "urgency" is the word customers actually use ("would appreciate this getting picked up with
+// some urgency") and \burgent(?:ly)?\b does not match it — the whole escalation was invisible
+// to the summary. Priority/expedite/blocker phrasing is included for the same reason.
+const SIG_URGENCY_RE = /\burgent(?:ly)?\b|\burgenc(?:y|ies)\b|\basap\b|\bas soon as possible\b|\bimmediate(?:ly)?\b|\bcritical\b|\bhigh(?:est)? priority\b|\bpriorit(?:y|ise|ize|ised|ized)\b|\bexpedite\b|\bescalat(?:e|ing|ion)\b|\btop priority\b|\bat the earliest\b|\bwith some urgency\b|\bpicked up (?:with|as) (?:some )?(?:urgency|priority)\b/i;
+// Same failure on the impact side: the customer wrote "this has become a production-impacting
+// issue" and "this is now hitting production too", and the old pattern only knew
+// "impacted"/"affected" — so a case that had just escalated from a test environment to
+// PRODUCTION was summarised with no mention of production at all.
+const SIG_IMPACT_RE = /\b(?:customers?|users?|clients?|staff|technicians?|agents?)\b[^.\n]{0,60}\b(?:calling|complain\w*|affected|impacted|blocked|waiting|cannot|can'?t|unable)\b|\bunable to (?:assist|support|work|operate|serve|help)\b|\b(?:production|business|operations?|service)\b[^.\n]{0,40}\b(?:down|halted|stopped|impact\w*|affect\w*|failing|failure|at a standstill)\b|\b(?:hitting|affects?|affecting|impact\w*|reproduc\w*)\b[^.\n]{0,20}\bproduction\b|\bproduction[- ]impacting\b|\bin production (?:as well|too|environment)\b|\bbusiness[- ](?:impact|critical)\b|\bwe are (?:down|blocked|stuck)\b|\bcannot (?:assist|support|serve) (?:our |the )?customers?\b/i;
+// The customer says the thing SOTI is waiting on could NOT be established — the upgrade was
+// installed but its effect is unconfirmed, or a second fault keeps derailing the test. This is
+// the signal whose absence produced the worst observed summary error: the chain said "we
+// haven't actually been able to confirm whether that fixes the high CPU issue yet" and the
+// summary reported "the customer tested v2026.1 and confirmed no change" — a fabricated test
+// result, in the one section an engineer reads to decide what to do next.
+const SIG_UNVERIFIED_RE = /\b(?:not|n'?t|never|unable to|cannot|can'?t|could ?n'?t|have ?n'?t|has ?n'?t|had ?n'?t|did ?n'?t|do ?n'?t|does ?n'?t|yet to)\b[^.\n]{0,45}\b(?:confirm\w*|verif\w*|validat\w*|test\w*|reproduc\w*|establish\w*|say (?:if|whether)|tell (?:if|whether))\b|\bstill (?:un)?(?:confirmed|verified|unclear|unknown)\b|\bno (?:way|means) to (?:confirm|verify|test)\b|\bcan'?t say (?:if|whether|yet)\b/i;
+// A DIFFERENT fault is blocking the work this case is waiting on ("testing kept running into
+// the C01687288 problem again instead", "this is blocking our v2026.1 testing"). It changes the
+// next step completely: the blocker has to be cleared before the original symptom can even be
+// measured.
+const SIG_BLOCKER_RE = /\b(?:blocked|blocking|blocker|held up|hold(?:ing)? up|stuck (?:on|behind)|derail\w*|prevent(?:s|ed|ing)? (?:us|me|testing)?)\b|\bkept running into\b|\brunning into\b[^.\n]{0,60}\binstead\b|\bran into\b[^.\n]{0,40}\b(?:issue|problem|error|failure)\b|\bcould ?n'?t (?:get|proceed|continue)\b/i;
+
+// Is the character at `p` a real sentence end, or a dot inside a version / decimal
+// ("v2026.1.1.1453")? Quoting the customer verbatim is the whole point of these blocks, and a
+// quote that opens "1453, but we haven't been able to confirm…" reads like a fragment of
+// something else — the engineer cannot tell what was actually said.
+function isSentenceBoundary(s, p) {
+    if (s[p] !== '.') return true;                       // ! ? and newline are always boundaries
+    if (/\d/.test(s[p - 1] || '') && /\d/.test(s[p + 1] || '')) return false;
+    return true;
+}
 
 // Quote the sentence a match sits in, so the prompt carries the customer's own words.
 function quoteAround(text, idx, len, max = 240) {
     const s = String(text || '');
-    const start = Math.max(s.lastIndexOf('.', idx), s.lastIndexOf('!', idx), s.lastIndexOf('?', idx), s.lastIndexOf('\n', idx)) + 1;
+    let start = 0;
+    for (const ch of ['.', '!', '?', '\n']) {
+        let p = s.lastIndexOf(ch, idx);
+        while (p > 0 && !isSentenceBoundary(s, p)) p = s.lastIndexOf(ch, p - 1);
+        if (p + 1 > start) start = p + 1;
+    }
     let end = s.length;
     for (const ch of ['.', '!', '?', '\n']) {
-        const p = s.indexOf(ch, idx + len);
+        let p = s.indexOf(ch, idx + len);
+        while (p !== -1 && !isSentenceBoundary(s, p)) p = s.indexOf(ch, p + 1);
         if (p !== -1 && p < end) end = p;
     }
     return s.slice(start, Math.min(end + 1, start + max)).replace(/\s+/g, ' ').trim();
@@ -4425,16 +4585,35 @@ function quoteAround(text, idx, len, max = 240) {
 
 // Scan the cleaned chain for those signals. `entries` is newest-first (getCleanChainEntries),
 // `lc` supplies the customer/agent role split so a customer's urgency is not confused with a
-// support template. Returns { recurrence, urgency, impact, commitments } — each either null or
-// { sender, time, quote }, except commitments which is a string[].
+// support template. Returns { recurrence, urgency, impact, unverified, blocker, commitments } —
+// each either null or { sender, time, quote }, except commitments/promises which are string[].
 function detectChainSignals(entries, lc) {
-    const out = { recurrence: null, urgency: null, impact: null, commitments: [], commitmentSource: null, promises: [], promiseSource: null };
+    const out = {
+        recurrence: null, urgency: null, impact: null, unverified: null, blocker: null,
+        commitments: [], commitmentSource: null, recordedActions: [], recordedActionSource: null,
+        promises: [], promiseSource: null
+    };
     if (!entries || !entries.length) return out;
-    const custName = ((lc && lc.customerSender) || '').trim().toLowerCase();
+    const custName = ((lc && lc.customerSender) || '').trim();
+    // Provably SOTI-side senders (internal notes, call logs, support-signed emails). Needed
+    // BOTH ways round: a support template must never be read as the customer escalating, and a
+    // customer email must never be read as SOTI promising something (a real chain had the
+    // customer's own "we'll share it with you here" reported as a SOTI commitment).
+    const staff = collectSotiStaffSenders(entries);
+    // Customer SIDE, not just the one named customer: a chain often carries a colleague of
+    // theirs, and requiring an exact name match meant an escalation written by anyone but the
+    // primary contact was invisible to the summary. Anyone who is neither provably SOTI staff nor
+    // writing a SOTI-signed email is on the customer's side of the conversation.
     const isCustomer = (e) => {
         if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) return false;
-        if (custName && e.sender) return String(e.sender).replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase() === custName;
-        return !SUPPORT_SIGNATURE_RE.test(e.sigBody || e.body || '');
+        if (isSotiStaffSender(e.sender, staff)) return false;
+        if (custName && e.sender && sameSenderName(e.sender, custName)) return true;
+        return !looksSupportAuthored(e.sigBody || e.body || '');
+    };
+    const isSupport = (e) => {
+        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) return false;
+        if (custName && e.sender && sameSenderName(e.sender, custName)) return false;
+        return isSotiStaffSender(e.sender, staff) || looksSupportAuthored(e.sigBody || e.body || '');
     };
     const mk = (e, m) => ({ sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), quote: quoteAround(e.body, m.index, m[0].length) });
 
@@ -4445,7 +4624,9 @@ function detectChainSignals(entries, lc) {
         if (!out.recurrence) { const m = body.match(SIG_RECURRENCE_RE); if (m) out.recurrence = mk(e, m); }
         if (!out.urgency) { const m = body.match(SIG_URGENCY_RE); if (m) out.urgency = mk(e, m); }
         if (!out.impact) { const m = body.match(SIG_IMPACT_RE); if (m) out.impact = mk(e, m); }
-        if (out.recurrence && out.urgency && out.impact) break;
+        if (!out.unverified) { const m = body.match(SIG_UNVERIFIED_RE); if (m) out.unverified = mk(e, m); }
+        if (!out.blocker) { const m = body.match(SIG_BLOCKER_RE); if (m) out.blocker = mk(e, m); }
+        if (out.recurrence && out.urgency && out.impact && out.unverified && out.blocker) break;
     }
 
     // What SOTI has already told itself it will do next. Call logs and internal notes are
@@ -4455,13 +4636,34 @@ function detectChainSignals(entries, lc) {
     // the customer's region", which no generated next-steps list ever mentioned).
     for (const e of entries) {
         if (!/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
-        const m = (e.body || '').match(/\bnext steps?\s*:\s*([\s\S]{3,600})$/i);
+        // Engineers write the template header either way — "Next steps:" and "Next steps - " are
+        // both common, and requiring the colon silently dropped every commitment on a case whose
+        // internal notes used the dash form.
+        const m = (e.body || '').match(/\bnext steps?\s*[:\-–—]\s*([\s\S]{3,600})$/i);
         if (!m) continue;
         const items = m[1].split(/\n+|(?<=\.)\s+(?=[A-Z])/).map(s => s.replace(/^[-*\d.)\s]+/, '').trim())
             .filter(s => s.length > 6 && s.length < 200);
         if (!items.length) continue;
-        out.commitments = items.slice(0, 5);
-        out.commitmentSource = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), type: /\bCALL\b/i.test(e.type || '') ? 'phone call log' : 'internal note' };
+        // Engineers dump three different kinds of line under that one header, and they must not
+        // all become "next steps": an action still TO DO, an action ALREADY DONE ("I have
+        // requested the latest XSight agent but same issue"), and a plain finding ("At the moment
+        // they do not have a test device"). Injecting the last two as mandatory next steps
+        // produced steps an engineer cannot perform; they are records, and they belong under
+        // "Troubleshoots done" instead. Split them here so each lands in the right section.
+        const PAST_ACTION_RE = /^(?:i|we|support|soti)?\s*(?:have|has|had)\s+\S+(?:ed|en|ne|un|t)\b|^(?:i|we)\s+(?:requested|tested|checked|installed|created|raised|escalated|advised|asked|shared|sent|tried|performed|reviewed|analysed|analyzed|collected|gathered|confirmed|reproduced|notified|upgraded|enrolled|enroled)\b|^(?:already|previously)\b/i;
+        const STATEMENT_RE = /^(?:there (?:is|are|was|were)|at the moment|currently|customer (?:said|says|mentioned|refused|prefers|prefer|prefered|preferred|has|is|does|did|will)|the customer\b|this (?:is|was|has|sounds)|it (?:is|was|seems|appears)|no |not )/i;
+        const FORWARD_RE = /^(?:i|we|support|soti)?\s*(?:will|shall|'?ll|would (?:advise|suggest|recommend|like)|need(?:s)? to|plan(?:ning)? to|going to|am going to|are going to|should|must|to )\b|^(?:reach out|transfer|transferring|monitor|follow[- ]up|following up|check|collect|gather|request|arrange|schedule|escalate|create|raise|test|verify|confirm|install|upgrade|downgrade|send|provide|review|continue|await|pick(?: it| this)? up|advise|suggest|recommend|ask|share|call|invite|enable|disable|apply|run|capture|reproduce)\b/i;
+        const forward = [], recorded = [];
+        for (const it of items) {
+            if (PAST_ACTION_RE.test(it) || STATEMENT_RE.test(it)) recorded.push(it);
+            else if (FORWARD_RE.test(it)) forward.push(it);
+            else recorded.push(it); // unclassifiable → a record, never a fabricated instruction
+        }
+        const src = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), type: /\bCALL\b/i.test(e.type || '') ? 'phone call log' : 'internal note' };
+        out.commitments = forward.slice(0, 5);
+        if (out.commitments.length) out.commitmentSource = src;
+        out.recordedActions = recorded.slice(0, 6);
+        if (out.recordedActions.length) out.recordedActionSource = src;
         break;
     }
 
@@ -4479,7 +4681,11 @@ function detectChainSignals(entries, lc) {
     const PROMISE_RE = new RegExp(`${PROMISE_LEAD}\\s+((?:(?!${PROMISE_LEAD})[^.\\n]){8,170})`, 'gi');
     for (const e of entries) {
         if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
-        if (isCustomer(e)) continue;
+        // POSITIVE support identification, not merely "not the customer": on a chain where the
+        // customer's name never matched (the feed decorated it with the company), every
+        // customer email fell through "not the customer" and their own "we'll share it with you
+        // here" was injected into the prompt as a promise SOTI had made and must not walk back.
+        if (!isSupport(e)) continue;
         const found = [];
         for (const m of String(e.body || '').matchAll(PROMISE_RE)) {
             const capped = m[1].length >= 170;
@@ -4487,9 +4693,12 @@ function detectChainSignals(entries, lc) {
             // Drop the dangling connective a tempered capture leaves behind ("… investigation,").
             t = t.replace(/[\s,;:–-]+(?:and|but|so|then|also|as part of the investigation)?[\s,;:–-]*$/i, '').trim();
             if (capped) t = t.replace(/\s+\S*$/, '') + '…';
-            // "we will be happy to help" / "we will get back to you" are pleasantries, not
-            // commitments to a specific action.
-            if (/^(?:be (?:happy|glad|pleased)|get back|revert|await|wait|need|require|appreciate)\b/i.test(t)) continue;
+            // "we will be happy to help" / "we will get back to you" / "we will keep you
+            // informed" are pleasantries, not commitments to a specific action.
+            if (/^(?:be (?:happy|glad|pleased|assisting|helping|available|unavailable|out of|away|off|on leave)|get back|revert|await|wait|need|require|appreciate|keep you (?:informed|updated|posted|in the loop)|let you know|be in touch|reach out to you)\b/i.test(t)) continue;
+            // "I will be assisting you as my colleague is out of office" is a staffing note, not
+            // a commitment to do anything about the fault.
+            if (/\bout of (?:the )?office\b|\bon (?:annual |sick )?leave\b/i.test(t)) continue;
             if (t.length < 8) continue;
             found.push(t);
         }
@@ -4502,9 +4711,16 @@ function detectChainSignals(entries, lc) {
 }
 
 // Render the signals as a mandatory block. kind = 'summary' | 'email'.
-function buildCaseSignalsBlock(sig, kind) {
+// small — collapse the per-signal MANDATORY paragraphs into one terse instruction. Every
+// extracted FACT (each quote, author and date) is kept verbatim; only the explanation of why it
+// matters is shortened, because on a CPU-bound model that prose competes with the case data for
+// a prompt budget the whole quick action already strains.
+function buildCaseSignalsBlock(sig, kind, small) {
+    if (small === undefined) { try { small = isSmallLocalModel(); } catch (e) { small = false; } }
     if (!sig) return '';
-    const has = sig.recurrence || sig.urgency || sig.impact || (sig.commitments && sig.commitments.length) || (sig.promises && sig.promises.length);
+    const has = sig.recurrence || sig.urgency || sig.impact || sig.unverified || sig.blocker
+        || (sig.commitments && sig.commitments.length) || (sig.promises && sig.promises.length)
+        || (sig.recordedActions && sig.recordedActions.length);
     if (!has) return '';
     const q = (s) => `${s.sender}${s.time ? ` (${s.time})` : ''}: "${s.quote}"`;
     const lines = ['[DECISIVE CASE SIGNALS — extracted verbatim from the chain by exact text match. THESE ARE FACTS. Every one listed here MUST appear in your answer; omitting one is an error, and no other content may displace them.]'];
@@ -4521,9 +4737,22 @@ function buildCaseSignalsBlock(sig, kind) {
         if (sig.urgency) lines.push(`- URGENCY — the customer explicitly demanded priority. ${q(sig.urgency)}`);
         if (sig.impact) lines.push(`- BUSINESS IMPACT — the customer stated the operational consequence. ${q(sig.impact)}`);
     }
+    // The customer says the outcome SOTI is waiting on is NOT established. Left out, the model
+    // fills the gap with the outcome it expects ("the customer tested v2026.1 and confirmed no
+    // change") — an invented test result that sends the engineer down the wrong path.
+    if (sig.unverified) {
+        lines.push(`- NOT YET VERIFIED — the customer stated that this could NOT be confirmed/tested. ${q(sig.unverified)}`);
+    }
+    if (sig.blocker) {
+        lines.push(`- BLOCKED — a SEPARATE fault is preventing the work this case is waiting on. ${q(sig.blocker)}`);
+    }
     if (sig.commitments && sig.commitments.length) {
         const src = sig.commitmentSource;
         lines.push(`- ALREADY-COMMITTED NEXT STEPS — recorded by ${src ? `${src.sender} in a ${src.type}${src.time ? ` (${src.time})` : ''}` : 'SOTI Support'}: ${sig.commitments.map(c => `"${c}"`).join('; ')}.`);
+    }
+    if (sig.recordedActions && sig.recordedActions.length) {
+        const src = sig.recordedActionSource;
+        lines.push(`- ACTIONS/FINDINGS ALREADY RECORDED${src ? ` by ${src.sender} in a ${src.type}${src.time ? ` (${src.time})` : ''}` : ''} — these are things ALREADY done or ALREADY established, NOT things to do: ${sig.recordedActions.map(c => `"${c}"`).join('; ')}.`);
     }
     if (sig.promises && sig.promises.length) {
         const src = sig.promiseSource;
@@ -4533,14 +4762,33 @@ function buildCaseSignalsBlock(sig, kind) {
         const asks = [];
         if (sig.recurrence) asks.push('acknowledge explicitly that the issue RECURRED (do not write as though the first fix held)');
         if (sig.impact || sig.urgency) asks.push('acknowledge the operational impact the customer described, in their terms');
+        if (sig.unverified) asks.push('never write as though a test/upgrade the customer said they could NOT confirm has been confirmed — treat that outcome as still open');
+        if (sig.blocker) asks.push('address the separate fault that is BLOCKING the work, not only the originally reported symptom');
         if (sig.commitments && sig.commitments.length) asks.push('state the already-committed next step(s) as things SOTI is doing, never as something newly proposed');
         lines.push(`Because of this, the email MUST ${asks.join('; ')}. Never send a reply that reads as if the case were quietly resolved.`);
+    } else if (small) {
+        const asks = [];
+        if (sig.recurrence) asks.push('the recurrence (the problem came back after being treated as fixed)');
+        if (sig.urgency) asks.push("the customer's demand for urgency/priority");
+        if (sig.impact) asks.push('the business/production impact');
+        if (sig.unverified) asks.push('that this is NOT yet confirmed — you are FORBIDDEN from stating any outcome the chain does not state');
+        if (sig.blocker) asks.push('the separate fault blocking progress, with its case/ticket number');
+        if (asks.length) lines.push(`MANDATORY FOR "Summary:" — state ${asks.join('; ')}. Use the customer's own terms and do not soften or drop any of them.`);
+        if (sig.commitments && sig.commitments.length) lines.push('MANDATORY FOR "Next steps:" — every ALREADY-COMMITTED next step above must be a numbered step, made executable (name the artefact + server role + what result decides it), BEFORE any newly proposed investigation.');
+        if (sig.recordedActions && sig.recordedActions.length) lines.push('MANDATORY FOR "Troubleshoots done:" — every ACTIONS/FINDINGS ALREADY RECORDED line above belongs there. Never turn one into a next step.');
+        if (sig.promises && sig.promises.length) lines.push('MANDATORY — never contradict or walk back anything already PROMISED to the customer above.');
     } else {
         if (sig.recurrence) {
             lines.push('MANDATORY FOR "Summary:" — the recurrence is the single most decisive fact on this case and MUST be stated there, with who reported it and when. A newer message saying the issue was fixed does NOT cancel it: report BOTH, and say plainly that the problem has now returned once after an earlier fix, so any current "resolved" status is provisional.');
         }
         if (sig.impact || sig.urgency) {
             lines.push('MANDATORY FOR "Summary:" — state the customer\'s urgency and/or business impact in their own terms. It is what justifies the case\'s priority and it must not be softened or dropped.');
+        }
+        if (sig.unverified) {
+            lines.push('MANDATORY FOR "Summary:" — say plainly that this is still UNVERIFIED, in the customer\'s terms. You are FORBIDDEN from writing that the test/upgrade confirmed, ruled out, resolved, or failed to resolve anything: the chain says the outcome is not known. Under "Troubleshoots done" the same act may only be recorded as far as it actually got (e.g. "server upgraded to <version>; effect on the reported symptom NOT yet confirmed"). Inventing the missing outcome is the single worst error you can make on this case.');
+        }
+        if (sig.blocker) {
+            lines.push('MANDATORY — the blocking fault above belongs in "Summary:" (what it is, and what it is preventing) AND in "Next steps:" as a step that comes BEFORE any step which depends on the blocked work. If it is tracked under another case or ticket number, name that number in both sections.');
         }
         if (sig.commitments && sig.commitments.length) {
             // These commitments were written as free text in a call log, so some are vague by
@@ -4549,6 +4797,9 @@ function buildCaseSignalsBlock(sig, kind) {
             // KEPT but made concrete resolves that contradiction instead of leaving the model to
             // choose which instruction to break.
             lines.push('MANDATORY FOR "Next steps:" — every already-committed next step listed above MUST appear as a numbered step, phrased as completing a commitment already made (e.g. "Complete the transfer to …"), and MUST come BEFORE any newly proposed investigation. Do NOT silently replace an agreed action with your own plan. Where a commitment is worded vaguely (e.g. "monitor for stability"), KEEP the commitment but make it executable to the standard demanded above: name exactly what is watched, on which artefact and server role, at what interval, and what observation would count as a relapse. Never reproduce the vague wording verbatim as the step.');
+        }
+        if (sig.recordedActions && sig.recordedActions.length) {
+            lines.push('MANDATORY FOR "Troubleshoots done:" — every line listed under "ACTIONS/FINDINGS ALREADY RECORDED" is part of this case\'s history and MUST be reflected there (merge it with an equivalent bullet rather than repeating it). It is FORBIDDEN to turn any of them into a "Next step": they have already happened.');
         }
         if (sig.promises && sig.promises.length) {
             lines.push('MANDATORY — SOTI has already promised the actions listed under "ALREADY PROMISED TO THE CUSTOMER IN WRITING". You are FORBIDDEN from writing a step, or any wording, that contradicts, walks back, or refuses one of them. If a cheaper or faster route exists, present it as the first thing to TRY, and keep the promised action as the step that follows if it does not resolve the issue — never as a replacement for it, and never phrased as telling the customer they were wrong to ask.');
@@ -4565,20 +4816,23 @@ function detectCaseLifecycleState(ci) {
     try { entries = getCleanChainEntries(raw); } catch (e) { return res; }
     if (!entries || !entries.length) return res;
 
-    const AUTO_REPLY = OOO_AUTO_REPLY_RE;
-    const SUPPORT_MARKER = SUPPORT_SIGNATURE_RE; // support-authored template phrases (module level)
+    const SUPPORT_MARKER = SUPPORT_SIGNATURE_RE; // unambiguous support-authored template phrases (module level)
     // Customer agreeing the case is done ("you can close the case", "issue is resolved", …).
     const CUSTOMER_CONSENT = /\byou can (?:go ahead and )?close\b|\bplease (?:go ahead and )?close\b|\b(?:case|it|ticket) can be closed\b|\bok(?:ay)? to close\b|\benough information\b|\bissue (?:is|was|has been)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\bproblem (?:is|was)\s*(?:now\s*)?(?:resolved|fixed|solved)\b|\b(?:it'?s|it is|everything is) working now\b|\bno (?:further|more) (?:questions|assistance|help|support|issues)\b/i;
     // Support announcing/confirming closure (closing email, survey notice, 30-day reopen window).
-    const SUPPORT_CLOSING = /\bproceed(?:ing)? (?:with|to) (?:the )?closure\b|\bmov(?:e|ing) forward to close\b|\bclos(?:e|ing) (?:of )?(?:the|this) case\b|\bcase (?:is now|has been|will (?:now )?be) closed\b|\breceive a survey\b|\bre-?open(?:ed)?\b[^.\n]{0,80}\b(?:30|thirty) days\b|\b(?:30|thirty) days\b[^.\n]{0,80}\bre-?open/i;
+    const SUPPORT_CLOSING = /\bproceed(?:ing)? (?:with|to) (?:the )?closure\b|\bmov(?:e|ing) forward to close\b|\bclos(?:e|ing) (?:of )?(?:the|this) case\b|\bcase (?:is now|has been|will (?:now )?be) closed\b|\breceive a survey\b|\bsoft closure\b|\bre-?open(?:ed)?\b[^.\n]{0,80}\b(?:30|thirty) days\b|\b(?:30|thirty) days\b[^.\n]{0,80}\bre-?open|\breactivate the case\b/i;
     // Customer saying it is NOT over — a signal like this NEWER than any closure talk reopens the case.
     // RECURRENCE is folded in (module-level, shared with detectChainSignals) so that a customer
     // writing "I'm seeing the same error again" reopens the case exactly like "issue persists".
+    // Scanned ONLY on customer messages, which is what lets the patterns be this broad: "still no
+    // change", "the CPU usage persists", "the agent UI never comes up" and "we haven't been able
+    // to confirm the fix" are all a customer telling us the case is not finished, and none of them
+    // matched before — on a live production escalation the state came back "closure".
     const REOPEN_SIGNAL = new RegExp(
-        '\\bstill (?:not working|failing|broken|see(?:ing)?|happening|occurr?ing|having|getting)\\b|\\bissue (?:persists|remains|is back|has returned|re-?occurr?ed)\\b|\\bnot (?:yet )?(?:resolved|fixed|working)\\b|\\bre-?open (?:the|this) case\\b|\\bdid(?:n\'?t| not) (?:work|help|fix)\\b|\\bdoes(?:n\'?t| not) work\\b|\\banother (?:issue|problem|error)\\b|\\bnew (?:issue|problem|error)\\b|'
-        + SIG_RECURRENCE_RE.source, 'i');
+        '\\bstill (?:not working|failing|broken|see(?:ing)?|happening|occurr?ing|having|getting)\\b|\\bstill no (?:change|luck|joy|progress|difference)\\b|\\bno change\\b|\\b(?:issue|error|problem|usage|failure|behaviou?r|symptom)s?\\b[^.\\n]{0,30}\\b(?:persists?|remains?|continues?)\\b|\\bissue (?:is back|has returned|re-?occurr?ed)\\b|\\bnot (?:yet )?(?:resolved|fixed|working)\\b|\\bre-?open (?:the|this) case\\b|\\bdid(?:n\'?t| not) (?:work|help|fix)\\b|\\bdoes(?:n\'?t| not) work\\b|\\banother (?:issue|problem|error)\\b|\\bnew (?:issue|problem|error)\\b|\\bnever (?:comes? up|appears?|shows? up|loads?|starts?)\\b|\\bstill (?:no|not) [a-z ]{0,20}(?:UI|agent|online|connection)\\b|'
+        + SIG_UNVERIFIED_RE.source + '|' + SIG_RECURRENCE_RE.source, 'i');
 
-    const usable = entries.filter(e => !AUTO_REPLY.test(e.body));
+    const usable = entries.filter(e => !isOooAutoReply(e));
     if (!usable.length) return res;
     const external = usable.filter(e => !/\bINTERNAL\b/i.test(e.type || ''));
     if (!external.length) return res;
@@ -4586,6 +4840,11 @@ function detectCaseLifecycleState(ci) {
     // own phone notes (no support signature), and mistaking one for a customer email named
     // the agent as the customer (observed role-swap bug).
     const correspondence = external.filter(e => !/\bCALL\b/i.test(e.type || ''));
+    // Everyone provably SOTI-side, from the WHOLE chain (internal notes and call logs included —
+    // only staff can author those). This is the strongest available role signal and it is what
+    // keeps an engineer whose signature carries no "SOTI" marker from being named the customer.
+    const staff = collectSotiStaffSenders(entries);
+    const isStaffEntry = (e) => isSotiStaffSender(e.sender, staff) || looksSupportAuthored(e.sigBody || e.body || '');
 
     // The chain starts with the customer's email, so the OLDEST correspondence entry that
     // does not read like a support template names the customer. The newest support-template
@@ -4597,7 +4856,7 @@ function detectCaseLifecycleState(ci) {
     const bodyFor = (e) => e.sigBody || e.body || '';
     for (let i = correspondence.length - 1; i >= 0; i--) {
         if (/^case (?:created|closed|reopened)\b/i.test(correspondence[i].body.trim())) continue;
-        if (!SUPPORT_MARKER.test(bodyFor(correspondence[i]))) { res.customerSender = (correspondence[i].sender || '').trim(); break; }
+        if (!isStaffEntry(correspondence[i])) { res.customerSender = (correspondence[i].sender || '').trim(); break; }
     }
     // FALLBACK when the customer never wrote a substantive email (the issue came in via the
     // portal / case-description field and every email in the chain is support-authored — a
@@ -4606,7 +4865,7 @@ function detectCaseLifecycleState(ci) {
     if (!res.customerSender) {
         // 1) The "Case created" row names the customer contact in the portal record.
         const created = external.find(e => /^case (?:created|reopened)\b/i.test((e.body || '').trim()));
-        if (created && created.sender && !SUPPORT_MARKER.test(bodyFor(created))) {
+        if (created && created.sender && !isStaffEntry(created)) {
             res.customerSender = created.sender.trim();
         }
     }
@@ -4616,45 +4875,99 @@ function detectCaseLifecycleState(ci) {
         const gm = raw.match(/(?:^|\n)\s*(?:Hi|Hello|Dear)\s+([A-Z][A-Za-z'’.-]{1,30})\s*,/);
         if (gm && gm[1] && !/^(there|team|all|support|sir|madam)$/i.test(gm[1])) res.customerSender = gm[1].trim();
     }
+    // The engineer currently handling the case = the newest support-side correspondence author.
     for (const e of correspondence) {
-        if (SUPPORT_MARKER.test(bodyFor(e))) { res.agentSender = (e.sender || '').trim(); break; }
+        if (res.customerSender && sameSenderName(e.sender, res.customerSender)) continue;
+        if (isStaffEntry(e)) { res.agentSender = (e.sender || '').trim(); break; }
     }
-    // A parenthetical company tag on the customer name ("Niels Harland (CM.com …)") is noise
-    // for role labelling — keep just the person's name.
-    res.customerSender = res.customerSender.replace(/\s*\([^)]*\)\s*$/, '').trim();
+    // The feed decorates names with the company ("Niels Harland (CM.com …)", "Niels Harland |
+    // CM.com") — noise for role labelling, and the same person appears under several forms.
+    res.customerSender = bareSenderName(res.customerSender);
+    res.agentSender = bareSenderName(res.agentSender);
+    // Every SOTI-side participant, so the prompt can state the roles as fact rather than let the
+    // model infer them from signatures it may not recognise.
+    res.sotiStaff = [...new Set(correspondence.concat(usable.filter(e => /\bINTERNAL\b|\bCALL\b/i.test(e.type || '')))
+        .filter(e => isStaffEntry(e) && !(res.customerSender && sameSenderName(e.sender, res.customerSender)))
+        .map(e => bareSenderName(e.sender)).filter(Boolean))];
 
-    // Extract the sentence containing a matched signal (for quoting in the prompt).
-    const sentenceAround = (text, idx, len) => {
-        const start = Math.max(text.lastIndexOf('.', idx), text.lastIndexOf('!', idx), text.lastIndexOf('?', idx), text.lastIndexOf('\n', idx)) + 1;
-        let end = text.length;
-        for (const ch of ['.', '!', '?', '\n']) {
-            const p = text.indexOf(ch, idx + len);
-            if (p !== -1 && p < end) end = p;
-        }
-        return text.slice(start, Math.min(end + 1, start + 220)).replace(/\s+/g, ' ').trim();
-    };
+    // Extract the sentence containing a matched signal (for quoting in the prompt). Shares
+    // quoteAround's version-number-aware boundary detection.
+    const sentenceAround = (text, idx, len) => quoteAround(text, idx, len, 220);
     const mk = (e, m) => ({ sender: (e.sender || '').trim() || 'unknown sender', time: (e.time || '').trim(), quote: sentenceAround(e.body, m.index, m[0].length) });
+
+    // Did the case visibly CARRY ON after a given point in the chain? Closure talk only means
+    // the case is closing while it is the LAST thing that happened. A soft-closure nudge sits
+    // mid-chain on most long cases ("we'll be marking this case with a soft closure … reply
+    // within 30 days to reactivate it"), and the old scan took the newest closure phrase
+    // anywhere in the chain as the verdict — so a case with two further months of
+    // troubleshooting, a production escalation and a request for urgency was handed to the
+    // model as "resolved / in closure", which is exactly how it got summarised.
+    // "Carried on" = real case work: a problem report, a question, a request for evidence, an
+    // action taken. Pleasantries, chase-ups with no content, and the closure templates
+    // themselves do not count, so a genuinely finished case is unaffected.
+    const CASE_WORK_RE = /\b(?:issue|error|problem|fail(?:s|ed|ing|ure)?|persist\w*|crash\w*|reboot\w*|restart\w*|enrol\w*|install\w*|upgrad\w*|downgrad\w*|version|build|patch|hotfix|log|logs|\.log\b|device|devices|agent|server|console|profile|policy|certificate|port|firewall|network|database|sql|cpu|memory|screenshot|jira|mcmr|test(?:ed|ing)?|reproduc\w*|workaround|production|ticket)\b/i;
+    const SUPPORT_ACTION_RE = /\b(?:can you|could you|please (?:send|provide|share|confirm|try|run|collect|check)|i have (?:requested|asked|created|raised|escalated|tested)|we (?:have|will|are) (?:requested|asked|created|raised|escalated|tested|investigating|testing|checking)|i will|we will|i am (?:testing|checking|investigating))\b/i;
+    const PURE_THANKS_RE = /^(?:many )?(?:thanks|thank you|cheers|appreciate|much appreciated|noted|understood|great|perfect|ok(?:ay)?)\b/i;
+    const isCaseWorkEntry = (e) => {
+        const b = String(e.body || '').trim();
+        if (!b) return false;
+        if (/^case (?:created|closed|reopened)\b/i.test(b)) return false;
+        if (isOooAutoReply(e)) return false;
+        // The closure templates themselves, and a bare chase-up, are not the case moving on.
+        if (SUPPORT_CLOSING.test(b) || CUSTOMER_CONSENT.test(b)) return false;
+        const words = b.split(/\s+/).filter(Boolean).length;
+        if (PURE_THANKS_RE.test(b) && words < 25) return false;
+        if (CASE_WORK_RE.test(b) || SUPPORT_ACTION_RE.test(b)) return true;
+        return /\?/.test(b) || words >= 30;
+    };
+    // entries is newest-first, so "after" means a LOWER index than the closure evidence.
+    const carriedOnAfter = (idxInEntries) => {
+        for (let i = 0; i < idxInEntries; i++) if (isCaseWorkEntry(entries[i])) return entries[i];
+        return null;
+    };
+    const entryIndex = (e) => entries.indexOf(e);
 
     // Walk NEWEST → OLDEST. The newest signal decides the state; replies quote older
     // emails below the new text, so only the top of each cleaned body is scanned.
-    let customerEv = null, supportEv = null;
+    let customerEv = null, supportEv = null, closureIdx = -1;
     for (const e of external) {
         const scan = e.body.slice(0, 800);
         const isCust = res.customerSender && e.sender
-            ? (e.sender || '').trim().toLowerCase() === res.customerSender.toLowerCase()
-            : !SUPPORT_MARKER.test(e.body);
+            ? sameSenderName(e.sender, res.customerSender)
+            : !isStaffEntry(e);
         const reopenM = isCust ? scan.match(REOPEN_SIGNAL) : null;
         const consentM = isCust ? scan.match(CUSTOMER_CONSENT) : null;
         const closingM = !isCust ? scan.match(SUPPORT_CLOSING) : null;
         if (res.state === 'unknown') {
             // A customer "still broken / new problem" beats a consent phrase in the same message.
-            if (reopenM && !consentM) { res.state = 'active'; res.evidence.push(mk(e, reopenM)); return res; }
-            if (consentM || closingM) res.state = 'closure';
+            if (reopenM && !consentM) { res.state = 'active'; res.evidence.push({ ...mk(e, reopenM), kind: 'reopen' }); return res; }
+            if (consentM || closingM) { res.state = 'closure'; closureIdx = entryIndex(e); }
         }
         if (res.state === 'closure') {
             if (consentM && !customerEv) { customerEv = mk(e, consentM); res.customerConfirmed = true; }
             if (closingM && !supportEv) { supportEv = mk(e, closingM); res.supportClosingSent = true; }
             if (customerEv && supportEv) break;
+        }
+    }
+    // STALE-CLOSURE GATE: closure evidence that the case then worked straight past is history,
+    // not the current state.
+    if (res.state === 'closure' && closureIdx > 0) {
+        const movedOn = carriedOnAfter(closureIdx);
+        if (movedOn) {
+            const supersededBy = {
+                sender: (movedOn.sender || '').trim() || 'unknown sender',
+                time: (movedOn.time || '').trim(),
+                quote: String(movedOn.body || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+                kind: 'carried-on'
+            };
+            return {
+                ...res,
+                state: 'active',
+                customerConfirmed: false,
+                supportClosingSent: false,
+                staleClosure: (supportEv || customerEv) || null,
+                evidence: [supersededBy]
+            };
         }
     }
     if (res.state === 'unknown') res.state = 'active'; // chain exists, no closure evidence → open case
@@ -4667,7 +4980,11 @@ function detectCaseLifecycleState(ci) {
 // The directive is deliberately prescriptive: on small local models an explicit
 // "Next Steps MUST be…" is the only reliable way to keep closure cases from getting
 // invented troubleshooting steps (and vice versa).
-function buildCaseStateDirective(lc, kind) {
+// small — as in buildCaseSignalsBlock: the verified STATE and its evidence are unchanged, only
+// the long step-quality lecture is compressed, since on a CPU-bound model those 2.6KB come
+// straight out of the room the case history needs.
+function buildCaseStateDirective(lc, kind, small) {
+    if (small === undefined) { try { small = isSmallLocalModel(); } catch (e) { small = false; } }
     const evLines = (lc.evidence || []).map(e => `- ${e.sender}${e.time ? ` wrote on ${e.time}` : ' wrote'}: "${e.quote}"`).join('\n');
     if (lc.state === 'closure') {
         const lines = ['[CASE STATE — VERIFIED DETERMINISTICALLY FROM THE EMAIL CHAIN. THIS IS FACT — DO NOT SECOND-GUESS IT.]'];
@@ -4701,7 +5018,22 @@ function buildCaseStateDirective(lc, kind) {
     lines.push(lc.state === 'unknown'
         ? 'There is no email correspondence recorded yet — treat the case as OPEN and in progress.'
         : 'The email chain shows NO confirmed resolution and NO closure agreement — this case is STILL OPEN.');
-    if (lc.evidence && lc.evidence.length) lines.push(evLines);
+    // The quote below is the evidence FOR "open" — but an unlabelled quote next to the words
+    // "closure" (a superseded soft-closure notice, a "reply within 30 days" line) has been read
+    // by the model as proof of the opposite, and the summary then announced the case was in
+    // closure while the state directive above said OPEN. Label what each quote proves.
+    if (lc.evidence && lc.evidence.length) {
+        const kind0 = lc.evidence[0] && lc.evidence[0].kind;
+        if (kind0 === 'carried-on') {
+            lines.push('The case CARRIED ON after that closure talk — this is the message that proves it, and it is what the case state is based on:');
+        } else if (kind0 === 'reopen') {
+            lines.push('The customer has stated the problem is NOT finished — this is the message that proves the case is open:');
+        }
+        lines.push(evLines);
+    }
+    if (lc.staleClosure) {
+        lines.push(`Note for context ONLY, never as the current state: earlier in the chain ${lc.staleClosure.sender}${lc.staleClosure.time ? ` (${lc.staleClosure.time})` : ''} sent closure/soft-closure wording — "${lc.staleClosure.quote}". That is SUPERSEDED by the later case work above. You are FORBIDDEN from writing that this case is closed, closing, resolved, or in closure, and FORBIDDEN from making "close the case" a next step.`);
+    }
     if (kind === 'email') {
         lines.push('The email MUST move the OPEN case forward: answer the customer\'s most recent unanswered question(s) precisely, or request exactly the missing information needed to proceed — grounded ONLY in the case data and the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH]/[OFFLINE PULSE KNOWLEDGE MATCHES] sections if present. Any information you ask the customer for must be named exactly (which artefact, from which server role, for which time window) and must obey the [LOG ACCESS] block — never ask a Cloud-hosted customer for server-side logs SOTI can collect itself. If the [MCMR RULE] block lists a verified matching fix, state the fix version (written in full, e.g. "2026.1.0") and that MCMR code verbatim and recommend the upgrade; if it lists none, do not mention release notes, MCMR codes, or an upgrade at all. If the chain references an earlier SOTI case that resolved a similar issue, acknowledge it and say support is reviewing that case\'s resolution. NEVER invent findings, links, or commitments.');
     } else {
@@ -4710,7 +5042,12 @@ function buildCaseStateDirective(lc, kind) {
         // "Verify the current server configuration against known stable states for versions
         // 2026.1.1 and related versions" — grammatical, on-topic, and completely unusable:
         // no artefact to open, no place to look, no result that would settle anything.
-        lines.push([
+        lines.push(small ? [
+            'EVERY numbered step MUST be executable exactly as written: ONE action + the EXACT target it acts on (the named log file AND which server role it sits on, e.g. MS.log on the Management Server; or the Windows service name, console path, port, SQL object, URL/FQDN, or the exact error string to search for — plus the time window when the evidence is time-bound) + what result CONFIRMS or RULES OUT the suspected cause.',
+            'A step naming no artefact is FORBIDDEN. Never write: "verify/check the configuration or settings", "compare against known stable states", "review the setup/environment", "monitor for stability", "check the logs" without naming which log on which server for what string, "review the documentation", "escalate to L3", "ensure everything is working".',
+            'Order: (1) the most likely cause(s), each tied to a case fact; (2) the checks that confirm or eliminate each, quoting artefact names and console paths from the [SOTI CHECKS…]/research blocks exactly; (3) the evidence still to collect, routed exactly as [LOG ACCESS] dictates; (4) an upgrade step ONLY if the [MCMR RULE] block lists a verified matching fix (then cite the version in full plus the MCMR verbatim); (5) reviewing any earlier SOTI case the emails credit with resolving this.',
+            'Anything already done belongs under "Troubleshoots done", not here. Five precise steps beat ten vague ones.'
+        ].join('\n') : [
             'EVERY numbered step MUST be executable exactly as written, and MUST contain all three of these:',
             '  (a) ONE specific action the engineer performs;',
             '  (b) the EXACT target it acts on — the named log file and which server role it sits on (e.g. MS.log on the Management Server, DS.log on the Deployment Server), the exact Windows service name, the console path, the port, the SQL object, the URL/FQDN, or the exact error string to search for — plus the exact time window when the evidence is time-bound;',
@@ -5334,6 +5671,101 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// CASE-SUMMARY COVERAGE CHECK — verify the finished summary, don't trust it
+// ---------------------------------------------------------------------------
+// Everything checked here was extracted from the chain by exact text match before the model ran,
+// so "did the answer carry it?" is a decidable question. A prompt rule is not a guarantee on a
+// local model; a check is. Anything missing is appended as a short, quotable note rather than
+// silently tolerated — and the two claims the chain can PROVE false (a closed/resolved state on
+// an open case, a confirmed outcome the customer said was unconfirmed) are called out as errors.
+// The word check is deliberately loose: a summary that says "production impact" satisfies the
+// production-impact signal however it phrases the rest of the sentence.
+// The check block is an internal QA aid, not part of the case record — it is rendered in the
+// chat but stripped from the one-click Copy (see mdToPlainText), so nothing here can ever be
+// pasted into Salesforce as if it were the summary itself.
+const SUMMARY_CHECK_MARKER = '---\n*Automatic check against the email chain (not part of the summary — this section is left out of the Copy):*';
+const COVERAGE_STOPWORDS = new Set(['the', 'this', 'that', 'they', 'them', 'their', 'there', 'have', 'has', 'had', 'been', 'was', 'were', 'and', 'but', 'not', 'with', 'from', 'into', 'for', 'our', 'your', 'his', 'her', 'its', 'are', 'is', 'be', 'to', 'of', 'in', 'on', 'at', 'it', 'we', 'us', 'you', 'yet', 'now', 'still', 'also', 'just', 'about', 'would', 'could', 'should', 'will', 'can', 'may', 'more', 'some', 'any', 'all', 'one', 'two', 'get', 'got', 'said', 'says', 'like', 'than', 'then', 'when', 'what', 'which', 'while', 'after', 'before', 'over', 'under', 'again', 'once', 'only', 'very', 'much', 'many', 'most', 'other', 'same', 'both', 'each', 'here', 'does', 'did', 'doing', 'done', 'make', 'made', 'take', 'took', 'come', 'came', 'give', 'gave', 'know', 'knew', 'want', 'need', 'appreciate', 'please', 'thanks', 'thank', 'hope', 'well', 'good', 'best', 'kind', 'regards']);
+function coverageTokens(quote) {
+    return [...new Set(String(quote || '').toLowerCase().match(/[a-z][a-z0-9.'-]{3,}/g) || [])]
+        .filter(w => !COVERAGE_STOPWORDS.has(w.replace(/[.'-]+$/, '')));
+}
+// Present if the answer overlaps the quote substantially. A single shared word is NOT enough:
+// the summary that dropped "testing kept running into the C01687288 problem" still contained
+// the word "testing" (in "testing agent versions"), which passed a one-token check and hid a
+// missing fact. A paraphrase that genuinely carries the fact reuses a third of its content words.
+function coverageHit(answer, quote) {
+    const a = String(answer || '').toLowerCase();
+    const toks = coverageTokens(quote);
+    if (!toks.length) return true;
+    const matched = toks.filter(t => a.includes(t)).length;
+    return matched >= 2 && (matched / toks.length) >= 0.4;
+}
+
+// Each signal also has a MEANING, and checking for that is far more reliable than word overlap:
+// a summary carries "the customer could not confirm the fix" if it says so in ANY words, and the
+// vocabulary for each of these is small and specific.
+const COVERAGE_SEMANTICS = {
+    recurrence: /\bagain\b|\brecurr\w*|\bre-?appear\w*|\bre-?occur\w*|\bcame? back\b|\bhas returned\b|\bstill (?:not|un)\w*|\bpersist\w*|\bnot (?:fully )?(?:resolved|fixed)\b/i,
+    urgency: /\burgen\w*|\bpriorit\w*|\bescalat\w*|\bexpedite\w*|\basap\b|\bcritical\b|\bimmediate\w*|\bimportance\b|\bas soon as\b|\bquickly\b/i,
+    impact: /\bproduction\b|\bbusiness[- ](?:impact|critical)\b|\bimpact\w*|\baffect\w*|\boutage\b|\bwidespread\b|\ball (?:their |the )?(?:windows |enrolled )?(?:machines|devices)\b|\bcannot (?:assist|serve|work|support)\b/i,
+    unverified: /\b(?:not|n'?t|never|unable|cannot|can'?t|yet to|awaiting|pending|still)\b[^.\n]{0,45}\b(?:confirm\w*|verif\w*|test\w*|validat\w*|establish\w*|know\w*|report\w*)\b|\bunconfirmed\b|\bunverified\b|\bnot (?:yet )?(?:known|confirmed|verified|established|reported)\b|\boutcome not reported\b/i,
+    blocker: /\bblock\w*|\bprevent\w*|\bheld up\b|\bstuck\b|\bcannot proceed\b|\bderail\w*|\bgetting in the way\b|\bbefore (?:the |any )?(?:CPU |high[- ]CPU )?(?:issue|test\w*|verification)\b/i
+};
+
+function checkCaseSummaryCoverage(text, info) {
+    const src = String(text || '');
+    if (!src.trim() || !info) return src;
+    const sig = info.signals || {};
+    const lc = info.lc || {};
+    const missing = [];
+    const errors = [];
+
+    const wants = [
+        ['recurrence', sig.recurrence, 'the RECURRENCE the customer reported'],
+        ['urgency', sig.urgency, "the customer's explicit request for urgency/priority"],
+        ['impact', sig.impact, 'the business / production impact the customer stated'],
+        ['unverified', sig.unverified, 'the customer saying this could NOT be confirmed yet'],
+        ['blocker', sig.blocker, 'the separate problem BLOCKING progress']
+    ];
+    for (const [key, s, label] of wants) {
+        if (!s || !s.quote) continue;
+        const semantic = COVERAGE_SEMANTICS[key];
+        const covered = (semantic && semantic.test(src)) || coverageHit(src, s.quote);
+        if (!covered) missing.push({ label, quote: s.quote, who: s.sender, when: s.time });
+    }
+
+    // Other SOTI case numbers referenced in the chain: an exact string, so this is exact.
+    try {
+        const own = String(info.caseNumber || '').trim().toUpperCase();
+        const refs = [...new Set(String(info.chain || '').match(/\bC0\d{6,8}\b/g) || [])]
+            .filter(n => n.toUpperCase() !== own && !src.includes(n));
+        if (refs.length) missing.push({ label: `the referenced SOTI case number${refs.length === 1 ? '' : 's'} ${refs.join(', ')}`, quote: '' });
+    } catch (e) { }
+
+    // A claim the chain positively contradicts. Checked only in the Summary section: "Next
+    // steps: … close the case once the customer confirms" is legitimate on an open case.
+    const summaryPart = (() => {
+        const m = src.match(/(^|\n)\s*\**\s*summary\s*\**\s*:?([\s\S]*?)(?=\n\s*\**\s*(?:troubleshoots?\s+done|next steps?)\b|$)/i);
+        return m ? m[2] : src;
+    })();
+    if (lc.state && lc.state !== 'closure' && /\b(?:case is (?:now )?(?:closed|closing|resolved)|in closure|proceed(?:ing)? (?:with|to) closure|soft closure|marked (?:as )?resolved)\b/i.test(summaryPart)) {
+        errors.push('the summary above describes this case as closed / in closure, but the chain shows it is still OPEN (the case state was verified from the correspondence)');
+    }
+    if (sig.unverified && /\b(?:confirmed|verified|validated)\b[^.\n]{0,40}\b(?:no change|no difference|did not (?:fix|resolve|help)|does not (?:fix|resolve|help)|unchanged|persists?)\b/i.test(summaryPart)) {
+        errors.push(`the summary above reports a confirmed test result, but ${(sig.unverified.sender || 'the customer')} wrote that it could not be confirmed: "${sig.unverified.quote}"`);
+    }
+
+    if (!missing.length && !errors.length) return src;
+    const parts = [];
+    if (errors.length) parts.push(`**Correction needed:** ${errors.join('; also, ')}.`);
+    if (missing.length) {
+        parts.push(`**Missing from the summary above** (extracted verbatim from the chain, so each one is a fact this case turns on):\n` +
+            missing.map(m => `- ${m.label}${m.quote ? ` — ${m.who || 'the customer'}${m.when ? ` (${m.when})` : ''}: "${m.quote}"` : ''}`).join('\n'));
+    }
+    return src + `\n\n${SUMMARY_CHECK_MARKER}\n\n${parts.join('\n\n')}`;
+}
+
 // Deterministic OLDEST-FIRST chronology of the email chain (date — sender — gist) for
 // the Case Summary prompt. The chain itself is injected NEWEST first, and small models
 // cannot reliably re-sort it — observed failure: the Case Timeline called the newest
@@ -5342,50 +5774,74 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
 // purpose: 'timeline' (default) instructs the model to base a dated Case Timeline on this
 // list; 'grounding' tells it to use the list ONLY to know what was done + the current state
 // and to NOT reproduce a dated timeline (used by the concise Case Summary format).
-function buildChainChronology(ci, purpose) {
+// opts.budget — character budget for the whole scaffold (default sized for the quick-action
+//   prompt). opts.lineFor(entry, oldestFirstIndex) — an already-condensed one-liner for an
+//   entry (the Case Summary pre-compresses long messages with the model; see
+//   buildCaseHistoryLines), used in place of the deterministic head-of-message gist.
+function buildChainChronology(ci, purpose, opts = {}) {
     const raw = ((ci && ci.email_chain) || '').trim();
     if (!raw) return '';
     let entries;
     try { entries = getCleanChainEntries(raw); } catch (e) { return ''; }
     if (!entries || !entries.length) return '';
     const grounding = purpose === 'grounding';
-    // OLDEST first. The cap used to be a plain slice(0, 24) of the oldest end, which on any
-    // chain longer than 24 messages silently threw away the NEWEST messages and then labelled
-    // the 24th-oldest one "THE NEWEST MESSAGE" — so the model reported a months-old state as
-    // the current one. Keep both ends instead, and say what was left out in between.
+    const lc = opts.lc || null;
+    // OLDEST first, and EVERY message present. Two earlier versions of this cap both lost
+    // messages: a slice of the oldest 24 threw away the newest ones, then a both-ends slice
+    // threw away the MIDDLE ("…[13 further messages]") — and on the case that prompted this
+    // rewrite those 13 were where the customer said the issue still occurred after updating the
+    // agent, where the device ID was handed over, and where the dev ticket was discussed. A
+    // summary built from that scaffold cannot list what was actually tried.
+    // Coverage is therefore non-negotiable: the LINE LENGTH flexes to fit the budget instead.
     const all = entries.slice().reverse();
-    // 26 keeps this scaffold at roughly the size it was when it (wrongly) showed only the
-    // oldest 24 — it is injected into the small-model quick-action prompt, where every
-    // kilobyte competes with the case data, so covering both ends must not cost extra budget.
-    const MAX_LINES = 26;
-    let ordered = all, elidedAfter = -1, elidedCount = 0;
-    if (all.length > MAX_LINES) {
-        const oldKeep = Math.floor(MAX_LINES * 0.45); // how the case began
-        const newKeep = MAX_LINES - oldKeep;          // where it stands now
-        ordered = all.slice(0, oldKeep).concat(all.slice(all.length - newKeep));
-        elidedAfter = oldKeep - 1;
-        elidedCount = all.length - MAX_LINES;
-    }
-    const lines = [];
-    ordered.forEach((e, i) => {
-        const isNewest = i === ordered.length - 1;
-        // The NEWEST message defines the current status — give it a longer gist so decisive
-        // tail content (e.g. "refer to SOTI support case C01641726") is never cut away. The
-        // "…" is appended only when text was ACTUALLY cut: on a short entry ("Case created")
-        // the old unconditional ellipsis implied missing content that was never there.
-        const g = chainOneLine(e.body, isNewest ? 260 : 110);
+    const lineFor = typeof opts.lineFor === 'function' ? opts.lineFor : null;
+    // Two line formats. FULL is the readable one. COMPACT spends ~25 fewer characters per line on
+    // the date/sender/tag prefix ("- 15 Apr — Imran Ali [SOTI]:" instead of
+    // "- 15 April 2026, 09:57 — Imran Ali [SOTI Support]:"), which on a 40-message chain is over a
+    // kilobyte — the difference between listing every message and rolling half of them up on a
+    // small model's budget. The saving comes out of repeated metadata, never out of coverage.
+    const tagsFor = (e, compact) => {
         const tags = [];
-        if (/\bINTERNAL\b/i.test(e.type || '')) tags.push('INTERNAL note');
-        if (/\bCALL\b/i.test(e.type || '')) tags.push('phone CALL LOG — a phone call, not an email');
-        if (OOO_AUTO_REPLY_RE.test(e.body)) tags.push('out-of-office auto-reply');
-        lines.push(`- ${formatChainDate(e) || e.time || 'undated'} — ${(e.sender || 'unknown').trim()}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${g.text}${g.truncated ? '…' : ''}"`);
-        if (i === elidedAfter && elidedCount > 0) {
-            lines.push(`- …[${elidedCount} further message${elidedCount === 1 ? '' : 's'} between ${formatChainDate(all[elidedAfter], { noTime: true }) || 'here'} and ${formatChainDate(ordered[elidedAfter + 1], { noTime: true }) || 'the next line'} — the case continued through them; they are omitted here only to save space]`);
+        if (/\bINTERNAL\b/i.test(e.type || '')) tags.push(compact ? 'note' : 'INTERNAL note');
+        if (/\bCALL\b/i.test(e.type || '')) tags.push(compact ? 'CALL' : 'phone CALL LOG — a phone call, not an email');
+        if (isOooAutoReply(e)) tags.push(compact ? 'OOO' : 'out-of-office auto-reply');
+        if (lc) {
+            const role = chainEntryRole(e, lc);
+            if (role === 'customer') tags.push(compact ? 'CUST' : 'THE CUSTOMER');
+            else if (role === 'SOTI Support' && !tags.length) tags.push(compact ? 'SOTI' : 'SOTI Support');
         }
+        return tags;
+    };
+    // The newest message defines the current status, so it always keeps a long gist; everything
+    // else shares whatever budget is left. The extra applies to exactly one line, so it is cheap
+    // and it buys the line the answer leans on hardest.
+    const NEWEST_EXTRA = 240;
+    const render = (cap, compact) => all.map((e, i) => {
+        const isNewest = i === all.length - 1;
+        // A model-condensed line is trimmed to the same cap as a raw gist would be — but it
+        // starts with the message's SUBSTANCE rather than its greeting, so the same number of
+        // characters carries the finding instead of "Hope all is well, following up…".
+        const g = chainOneLine((lineFor && lineFor(e, i)) || e.body, cap + (isNewest ? NEWEST_EXTRA : 0));
+        const tags = tagsFor(e, compact);
+        const when = compact
+            ? (formatChainDate(e, { shortMonth: true, noTime: true }) || e.time || 'undated')
+            : (formatChainDate(e) || e.time || 'undated');
+        const who = compact ? (bareSenderName(e.sender) || 'unknown') : ((e.sender || 'unknown').trim());
+        return `- ${when} — ${who}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${g.text}${g.truncated ? '…' : ''}"`;
     });
-    const newest = ordered[ordered.length - 1];
+    const totalBudget = Math.max(1200, opts.budget || (isSmallLocalModel() ? 4600 : 9000));
+    const newest = all[all.length - 1];
     // Same date rendering as the lines above, so the model can match this pointer to its line.
-    const newestWhen = formatChainDate(newest) || newest.time || '';
+    // A relative feed label ("19h ago") is resolved to a real date for the model, and the label
+    // is kept alongside it so the engineer can find that message in Salesforce — and so a
+    // computed clock time is never mistaken for something the email itself stated.
+    const newestWhen = (() => {
+        const shown = formatChainDate(newest) || newest.time || '';
+        const rawLabel = String(newest.time || '').trim();
+        return (shown && rawLabel && shown !== rawLabel && /\bago\b|\btoday\b|\byesterday\b/i.test(rawLabel))
+            ? `${shown} (shown in Salesforce as "${rawLabel}")`
+            : shown;
+    })();
     const newestLine = grounding
         ? `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the current state of the case comes from THIS message; attribute it to THIS author, not an older one.`
         : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
@@ -5402,15 +5858,61 @@ function buildChainChronology(ci, purpose) {
         if (!own && counts.size > 1) own = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
         const refs = [...counts.keys()].filter(n => n.toUpperCase() !== own);
         if (refs.length) {
+            // NOT only "an earlier case that fixed this": on the case that prompted this change
+            // the referenced case was an ACTIVE, unrelated fault blocking the test the customer
+            // was asked to run — and the summary mentioned neither the case number nor the block.
+            const use = 'An email may reference another case because it RESOLVED a similar issue before, or because ITS problem is currently BLOCKING this case. Either way it is decisive:';
             refCasesLine = grounding
-                ? `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. If an email says an earlier case resolved a similar issue, surface it in the Summary and make reviewing that case's resolution a numbered Next step.]`
-                : `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. If an email says an earlier case resolved a similar issue, that is a decisive fact: surface it in Key Details and Current Status, and make reviewing that case's resolution a numbered Next Step.]`;
+                ? `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. ${use} name the number in the Summary and make reviewing/clearing that case a numbered Next step.]`
+                : `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. ${use} name the number in Key Details and Current Status, and make reviewing/clearing that case a numbered Next Step.]`;
         }
     } catch (e) { }
-    const header = grounding
-        ? `[CASE HISTORY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Use this ONLY to know what troubleshooting/actions were already done and what the current state is — do NOT reproduce it as a dated timeline in your answer. Entries tagged [phone CALL LOG] are phone calls and [INTERNAL note] are internal notes: treat BOTH as troubleshooting actions/findings that belong under "Troubleshoots done", never as customer emails. Entries tagged [out-of-office auto-reply] carry no case signal — ignore them.]`
-        : `[EMAIL CHRONOLOGY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. Base the Case Timeline section on THIS list (summarize each event in your own words, using the full emails for detail). The FIRST line below is how the case started. Entries tagged [out-of-office auto-reply] or [INTERNAL note] are NOT substantive case correspondence — never present them as the inquiry, an answer, or a status change. Entries tagged [phone CALL LOG] are phone calls — present them in the timeline as calls, not emails.]`;
-    return `${header}\n${lines.join('\n')}${newestLine}${refCasesLine}`;
+    const n = all.length;
+    const span = (() => {
+        const a = formatChainDate(all[0], { noTime: true }), b = formatChainDate(newest, { noTime: true });
+        return (a && b && a !== b) ? `, ${a} → ${b}` : '';
+    })();
+    const peopleTag = lc && (lc.customerSender || lc.agentSender)
+        ? ` Lines tagged [THE CUSTOMER]/[CUST] are ${lc.customerSender || 'the customer'}'s own messages; every other correspondence line is SOTI-side${lc.agentSender ? ` (${[lc.agentSender].concat((lc.sotiStaff || []).filter(s => s !== lc.agentSender)).join(', ')})` : ''}.`
+        : '';
+    const buildHeader = (coverage) => grounding
+        ? `[CASE HISTORY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. ${coverage} Use it to know what troubleshooting/actions were already done and what the current state is — do NOT reproduce it as a dated timeline in your answer. Entries tagged [phone CALL LOG]/[CALL] are phone calls and [INTERNAL note]/[note] are internal notes: treat BOTH as troubleshooting actions/findings that belong under "Troubleshoots done", never as customer emails. Entries tagged [out-of-office auto-reply]/[OOO] carry no case signal — ignore them.${peopleTag}]`
+        : `[EMAIL CHRONOLOGY — OLDEST FIRST, derived mechanically from the chain; the dates, order, and authors here are EXACT. ${coverage} Base the Case Timeline section on THIS list (summarize each event in your own words, using the full emails for detail). The FIRST line below is how the case started. Entries tagged [out-of-office auto-reply]/[OOO] or [INTERNAL note]/[note] are NOT substantive case correspondence — never present them as the inquiry, an answer, or a status change. Entries tagged [phone CALL LOG]/[CALL] are phone calls — present them in the timeline as calls, not emails.${peopleTag}]`;
+    const fullCoverage = `EVERY ONE of the ${n} messages in this case${span} has its own line below — nothing is omitted, so this list is the COMPLETE record of what has happened on this case.`;
+
+    // Fit the lines to what is left after the fixed prose. Measured, not guessed: reserving a
+    // fixed constant for the header overshot the caller's budget by the ~1.4KB it actually takes.
+    // Order of sacrifice: line LENGTH first (both formats, longest → shortest), and only if even
+    // the most compact rendering does not fit, roll up the OLDEST messages with a visible note.
+    const overhead = buildHeader(fullCoverage).length + newestLine.length + refCasesLine.length + 4;
+    const lineBudget = Math.max(400, totalBudget - overhead);
+    const measure = (ls) => ls.reduce((a, l) => a + l.length + 1, 0);
+    const CAPS = [260, 200, 150, 110, 90, 70, 54, 42];
+    let lines = render(CAPS[0], false), fitted = false;
+    outer:
+    for (const compact of [false, true]) {
+        for (const cap of CAPS) {
+            lines = render(cap, compact);
+            if (measure(lines) <= lineBudget) { fitted = true; break outer; }
+        }
+    }
+    let coverage = fullCoverage;
+    if (!fitted) {
+        const kept = [];
+        let used = 0, cut = 0;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (used + lines[i].length + 1 <= lineBudget - 260) { kept.unshift(lines[i]); used += lines[i].length + 1; }
+            else { cut = i + 1; break; }
+        }
+        if (cut > 0) {
+            const from = formatChainDate(all[0], { noTime: true }) || 'the start of the case';
+            const to = formatChainDate(all[cut - 1], { noTime: true }) || 'then';
+            kept.unshift(`- …[the ${cut} OLDEST message${cut === 1 ? '' : 's'} of this case, ${from} → ${to}, are not listed individually here — see [ISSUE SUMMARY] and the [EMAIL CHAIN] section for them; the case ran continuously through them]`);
+            coverage = `This list covers the ${n}-message chain${span}: the ${cut} oldest messages are rolled up in the first line and EVERY message after them has its own line.`;
+            lines = kept;
+        }
+    }
+    return `${buildHeader(coverage)}\n${lines.join('\n')}${newestLine}${refCasesLine}`;
 }
 
 // ============================ FULL EMAIL-CHAIN DIGEST ============================
@@ -5458,12 +5960,15 @@ function chainEntryRole(e, lc) {
     const type = (e && e.type) || '';
     if (/\bCALL\b/i.test(type)) return 'phone call log';
     if (/\bINTERNAL\b/i.test(type)) return 'internal note';
-    const bare = (s) => String(s || '').replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase();
-    const sender = bare(e && e.sender);
-    if (OOO_AUTO_REPLY_RE.test((e && e.body) || '')) return 'out-of-office auto-reply';
-    if (lc && lc.customerSender && sender && sender === bare(lc.customerSender)) return 'customer';
-    if (lc && lc.agentSender && sender && sender === bare(lc.agentSender)) return 'SOTI Support';
-    if (SUPPORT_SIGNATURE_RE.test((e && e.sigBody) || (e && e.body) || '')) return 'SOTI Support';
+    if (isOooAutoReply(e)) return 'out-of-office auto-reply';
+    const sender = (e && e.sender) || '';
+    // sameSenderName, not string equality: the same customer appears as "Niels Harland (CM.com
+    // International B.V.)" AND "Niels Harland | CM.com" in one chain, and an exact compare left
+    // those messages with NO role — unlabelled in the digest and skipped by the signal scan.
+    if (lc && lc.customerSender && sameSenderName(sender, lc.customerSender)) return 'customer';
+    if (lc && lc.agentSender && sameSenderName(sender, lc.agentSender)) return 'SOTI Support';
+    if (lc && Array.isArray(lc.sotiStaff) && lc.sotiStaff.some(n => sameSenderName(sender, n))) return 'SOTI Support';
+    if (looksSupportAuthored((e && e.sigBody) || (e && e.body) || '')) return 'SOTI Support';
     return '';
 }
 
@@ -5533,6 +6038,10 @@ async function summarizeChainBatch(batch, opts = {}) {
             `[${i + 1}] ${it.date}${it.role ? ` — ${it.sender} (${it.role})` : ` — ${it.sender}`}:\n"""${it.text}"""`
         ).join('\n\n');
         const n = batch.length;
+        // maxWords — the Case Summary asks for shorter lines than the standalone digest does,
+        // because its scaffold shares one small-model prompt with the case data and the state
+        // directives; a line trimmed after generation loses its tail, one generated short does not.
+        const maxWords = Math.max(12, opts.maxWords || 30);
         const system = 'You compress support-case messages into one factual line each. You never add information, never merge messages, never skip one, and never copy a message out verbatim. Output ONLY the numbered lines.';
         const user = `Below are ${n} message${n === 1 ? '' : 's'} from a SOTI support case, in order.
 
@@ -5542,7 +6051,7 @@ ${n > 1 ? `[2] <…>\n…up to [${n}]` : ''}
 
 RULES:
 - One line per message. Never merge two messages into one line and never split one across two.
-- Maximum 30 words per line. Write it as a statement of what happened, in the past tense.
+- Maximum ${maxWords} words per line. Write it as a statement of what happened, in the past tense.
 - KEEP every concrete detail: names, versions, device names/IDs, error text and status codes, database fields and values, counts, ticket IDs (e.g. MCMR-42071), case numbers, dates mentioned INSIDE the message, and any commitment or request made.
 - DROP greetings, thanks, signatures, disclaimers and "I hope you are well" filler.
 - If a message is only an acknowledgement, say exactly that (e.g. "Acknowledged the customer's reply and said the developers were informed").
@@ -5568,7 +6077,7 @@ ${listed}`;
                     temperature: 0.0,
                     top_p: 0.9,
                     repeat_penalty: 1.1,
-                    num_predict: Math.min(1400, 70 * n + 120)
+                    num_predict: Math.min(1400, Math.round(maxWords * 2.4) * n + 120)
                 }
             })
         });
@@ -5768,6 +6277,69 @@ function buildChainFacts(entries, raw, ci, lc) {
     const ownCase = (((ci && ci.case_number) || '').trim().toUpperCase());
     const cases = uniq(raw.match(/\bC0\d{6,8}\b/g) || []).filter(x => x.toUpperCase() !== ownCase);
     return { n, counts, from, to, days, jiras, cases, oldest, newest, lc };
+}
+
+// ---------------------------------------------------------------------------
+// CASE-SUMMARY HISTORY LINES — the same map step, aimed at the Case Summary
+// ---------------------------------------------------------------------------
+// The Case Summary is ONE model call, and its accuracy is bounded by what the [CASE HISTORY]
+// scaffold in its prompt can hold. Deterministic gists solve that by truncation — they keep the
+// FIRST ~110 characters of each message, which on a support email is the greeting and the
+// throat-clearing, not the finding. ("Hope all is well, Following up on this case, did you
+// manage to test on v2026.1…" survives; "…the customer confirmed the workaround was refused"
+// does not.)
+// So the long messages are condensed by the model FIRST — the identical batched map step the
+// full-chain digest uses, 30 words per message, every concrete detail kept — and the finished
+// one-liners are handed to buildChainChronology. Every message keeps a line AND that line says
+// what the message actually contained.
+// Returns a Map(oldestFirstIndex → line). On any failure it returns an empty Map and the caller
+// falls back to the deterministic gists: slower to read, never wrong.
+async function buildCaseHistoryLines(ci, opts = {}) {
+    const out = new Map();
+    try {
+        const raw = ((ci && ci.email_chain) || '').trim();
+        if (!raw || !LOCAL_AI_MODEL) return out;
+        const entries = getCleanChainEntries(raw);
+        if (!entries.length) return out;
+        const oldestFirst = entries.slice().reverse();
+        const small = isSmallLocalModel();
+        // Only messages the scaffold cannot quote in full need the model. On a short chain that
+        // is usually none, and this whole pass costs nothing.
+        const targetLen = Math.max(60, opts.targetLen || (small ? 90 : 150));
+        const MODEL_INPUT_CAP = small ? 900 : 2400;
+        const pending = [];
+        oldestFirst.forEach((e, i) => {
+            const one = chainOneLine(e.body, targetLen);
+            if (!one.truncated) return;                     // already fits — quoted exactly
+            pending.push({ idx: i, date: formatChainDate(e) || e.time || 'undated', sender: (e.sender || 'Unknown').trim(), role: chainEntryRole(e, opts.lc || {}), text: chainOneLine(e.body, MODEL_INPUT_CAP).text });
+        });
+        if (!pending.length) return out;
+        const batches = buildChainDigestBatches(pending, {
+            maxPerBatch: small ? 8 : 20,
+            maxChars: small ? 3000 : 14000
+        });
+        // Same ceiling as the full digest: a 400-message chain must not run for an hour. Anything
+        // past it keeps its deterministic gist.
+        const MAX_BATCHES = small ? 20 : 12;
+        const run = batches.slice(0, MAX_BATCHES);
+        const numCtx = await getSessionCtx(LOCAL_AI_MODEL).catch(() => 8192);
+        let done = 0;
+        for (const batch of run) {
+            if (opts.signal && opts.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+            if (opts.onProgress) opts.onProgress(done + 1, run.length);
+            const got = await summarizeChainBatch(batch, { signal: opts.signal, numCtx, maxWords: small ? 20 : 30 });
+            batch.forEach((item, k) => {
+                const line = got.get(k + 1);
+                if (line && !chainDigestLineIsEcho(line, item.text)) out.set(item.idx, line.replace(/\s+/g, ' ').trim());
+            });
+            done++;
+            await paintYield(0);
+        }
+    } catch (e) {
+        if (e && e.name === 'AbortError') throw e;
+        console.warn('[Case summary] history condensation failed — falling back to deterministic gists', e);
+    }
+    return out;
 }
 
 // Build the whole answer. Deterministic everywhere it matters; the model only fills in prose
@@ -10096,6 +10668,10 @@ async function matchLearnedInsights(txt, logs) {
 // (Salesforce case-note fields are plain text — raw **bold**/## markers look broken there).
 function mdToPlainText(mdText) {
     let t = String(mdText || '');
+    // The Case Summary's automatic coverage check is a QA aid for the engineer reading the chat,
+    // never part of what gets pasted into the case record — cut it and everything after it.
+    const checkAt = t.indexOf(SUMMARY_CHECK_MARKER);
+    if (checkAt > 0) t = t.slice(0, checkAt).trimEnd();
     t = t.replace(/```[a-zA-Z]*\n?/g, '').replace(/`([^`]*)`/g, '$1'); // code fences/inline code
     t = t.replace(/^#{1,6}\s+/gm, '');                                  // headers
     t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1'); // bold
@@ -10294,6 +10870,11 @@ ${body}
 //     text (quick actions on open cases: their message is an instruction block that would
 //     poison the research keyword scoring). Ignored when skipResearch is set.
 //   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
+//   verifySummary — { signals, lc, chain, caseNumber } from the Case Summary action: after the
+//     answer is generated it is checked against those deterministically-extracted facts, and
+//     anything dropped (or provably contradicted) is appended as a visible note.
+//   chainCap — char cap for the [EMAIL CHAIN] context section, for a turn whose user message
+//     already carries a complete per-message scaffold of the same chain.
 //   forceChainDigest — serve this turn from buildFullChainSummary (the whole-chain map-reduce
 //     digest) instead of a single model call, without depending on isEmailChainSummaryRequest
 //     matching the wording.
@@ -10758,7 +11339,13 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             // research that grounds the fix isn't entirely trimmed away. Quick-action turns
             // carry the full chronology in the user message, so the tighter cap loses nothing.
             const researchChars = (RELEASE_NOTES_CONTENT + RESEARCHED_ARTICLE_CONTENT + PULSE_SEARCH_RESULTS).length;
-            const chainCapOverride = (fixItTurn || rnTurn) ? 1600 : ((isSmallModel && researchChars > 500) ? 3600 : undefined);
+            // opts.chainCap — a quick action that already carries a COMPLETE per-message scaffold
+            // in its user message (the Case Summary) does not need the chain twice: it caps this
+            // section so the room goes to the scaffold and the directives instead. The section
+            // still spends its budget upgrading the NEWEST messages to full text, which is the
+            // verbatim detail a one-line-per-message scaffold cannot carry.
+            const chainCapOverride = (fixItTurn || rnTurn) ? 1600
+                : (opts.chainCap ? opts.chainCap : ((isSmallModel && researchChars > 500) ? 3600 : undefined));
             const emailChainSection = buildEmailChainSection(ci, isSmallModel, chainCapOverride);
             let emailChainIdx = -1;
             if (emailChainSection) { emailChainIdx = liveDataLines.length; liveDataLines.push(emailChainSection); }
@@ -11247,6 +11834,14 @@ ${imgContext}`;
                 }
                 finalAnswer = postValidateCaseAnswer(finalAnswer, allowedMcmr);
             } catch (e) { console.warn('Case answer post-validation failed', e); }
+        }
+
+        // Case Summary only: check the finished summary against the facts extracted from the
+        // chain before the model ran, and append what it dropped or got provably wrong.
+        if (opts.verifySummary && finalAnswer.trim()) {
+            try {
+                finalAnswer = checkCaseSummaryCoverage(finalAnswer, opts.verifySummary);
+            } catch (e) { console.warn('Case summary coverage check failed', e); }
         }
 
         // STILL cut off after the continuation rounds — say so. Silently presenting a report that
@@ -11993,6 +12588,9 @@ function paintYield(ms = 50) {
 }
 
 // Shared progress-bar wrapper (mirrors the Analyse Now flow).
+// promptText may be a string OR an async builder fn(setLabel) → string, for a quick action that
+// has preparation work of its own to do first (the Case Summary condenses every long message in
+// the chain before it can write its prompt) and wants that visible in the progress bar.
 async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
     const pWrap = $('progWrap');
     const pLbl = $('progLbl');
@@ -12008,6 +12606,20 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
 
     // Yield control to let the browser paint the progress indicator
     await paintYield();
+
+    if (typeof promptText === 'function') {
+        const setLabel = (text) => { if (pLbl) pLbl.textContent = text; };
+        try {
+            promptText = await promptText(setLabel);
+        } catch (e) {
+            console.warn('Quick-action prompt preparation failed', e);
+            if (pWrap) pWrap.style.display = 'none';
+            toast('Could not prepare this action — see the console for details', 'e');
+            return;
+        }
+        setLabel(runningLabel);
+        await paintYield(0);
+    }
 
     await send(promptText, true, opts);
 
@@ -12090,18 +12702,24 @@ async function generateCaseSummary() {
     // email chain and injected as fact — the model must never guess it. Open cases also
     // get online research (release notes / Pulse docs) so the troubleshooting next steps
     // can cite real fixes; closure cases skip research entirely (irrelevant + slow).
-    const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
+    const chainRaw = $('emailChain').value || '';
+    const ciForChain = { email_chain: chainRaw, case_number: $('caseNum').value || '' };
+    const lc = detectCaseLifecycleState({ email_chain: chainRaw });
     const stateDirective = buildCaseStateDirective(lc, 'summary');
-    // Decisive signals (recurrence / urgency / business impact / already-committed next steps)
-    // are extracted deterministically and made mandatory — a summary that drops the customer's
-    // "same error again" is wrong no matter how well it reads. Applies to closure cases too: a
-    // recurrence is exactly the thing that must stop a case being summarised as done.
+    // Decisive signals (recurrence / urgency / business impact / unverified outcomes / blockers /
+    // already-committed next steps) are extracted deterministically and made mandatory — a
+    // summary that drops the customer's "same error again" is wrong no matter how well it reads.
+    // Applies to closure cases too: a recurrence is exactly the thing that must stop a case being
+    // summarised as done.
+    const signals = (() => {
+        try { return detectChainSignals(getCleanChainEntries(chainRaw), lc); }
+        catch (e) { return null; }
+    })();
     const signalsBlock = (() => {
-        try { return buildCaseSignalsBlock(detectChainSignals(getCleanChainEntries($('emailChain').value || ''), lc), 'summary'); }
+        try { return signals ? buildCaseSignalsBlock(signals, 'summary') : ''; }
         catch (e) { return ''; }
     })();
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
-    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
     // Who collects the evidence (Cloud → the agent, from the backend; On-Prem → the customer,
     // via a screen-share) and which real SOTI artefacts the checks may name. Both are
     // deterministic, and both only matter while the case is still open.
@@ -12111,34 +12729,93 @@ async function generateCaseSummary() {
     // One family / four checks on a CPU-bound model: the whole quick-action prompt lives inside
     // ~10K characters there, and the email chain must not lose room to a checklist.
     const playbook = isOpen ? buildSymptomPlaybook(buildCaseSymptomText(), small ? { maxFamilies: 1, maxChecks: 4 } : {}) : '';
+    const staffNames = (lc.sotiStaff || []).filter(s => s && s !== lc.agentSender);
     const peopleLine = (lc.customerSender || lc.agentSender)
-        ? `\n- PEOPLE (exact, from the chain): ${[lc.customerSender && `${lc.customerSender} is the CUSTOMER`, lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER handling the case`].filter(Boolean).join('; ')}. Never swap these roles.`
+        ? `\n- PEOPLE (exact, from the chain — these roles are VERIFIED, never swap them): ${[
+            lc.customerSender && `${lc.customerSender} is the CUSTOMER (the only person experiencing the issue)`,
+            lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER handling the case`,
+            staffNames.length && `${staffNames.join(' and ')} ${staffNames.length === 1 ? 'is' : 'are'} also SOTI-side (SOTI support / TAM), NOT the customer`
+        ].filter(Boolean).join('; ')}.`
         : '';
     const hosted = getMcHosted();
+    const chainEntryCount = (() => { try { return getCleanChainEntries(chainRaw).length; } catch (e) { return 0; } })();
 
-    const prompt = `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
+    // The prompt is built inside the progress bar because the [CASE HISTORY] scaffold is built
+    // first: on a long chain every message too long to quote is condensed by the model
+    // (buildCaseHistoryLines) so the scaffold can carry ALL of them without truncating each one
+    // down to its greeting. That is what makes "Troubleshoots done" complete on a 6-month case
+    // instead of listing only what happened at the two ends of the chain.
+    //
+    // BLOCK ORDER MATTERS. On a tight context the per-request trimmer in completions.create cuts
+    // the largest message from its END, so the blocks are ordered by how much the answer's
+    // CORRECTNESS depends on them: task/format, then the verified CASE STATE (open vs closing —
+    // it decides what "Next steps" may even contain), then the decisive signals, then the case
+    // history, and only then the log-access routing and the symptom checklist, which degrade the
+    // answer's usefulness rather than its truthfulness if they are the part that is lost.
+    const buildPrompt = async (setLabel) => {
+        let historyLines = new Map();
+        // Worth the extra model calls only when the chain is long enough that the deterministic
+        // gists would actually lose content; short chains go straight through as before.
+        if (chainEntryCount >= 8) {
+            try {
+                historyLines = await buildCaseHistoryLines(ciForChain, {
+                    lc,
+                    targetLen: small ? 90 : 170,
+                    onProgress: (i, n) => setLabel(`Reading the email chain — ${chainEntryCount} messages (pass ${i} of ${n})...`)
+                });
+            } catch (e) {
+                if (e && e.name === 'AbortError') throw e;
+                historyLines = new Map();
+            }
+        }
+        setLabel('Building case summary...');
+        const chronology = buildChainChronology(ciForChain, 'grounding', {
+            lc,
+            budget: small ? 4600 : 11000,
+            lineFor: (e, i) => historyLines.get(i) || ''
+        });
+        // Referring the model to "[CASE HISTORY]" when no chain is synced points it at a block
+        // that is not there — on those cases the rule names the sources that DO exist.
+        const historyRule = chronology
+            ? '- The [CASE HISTORY] block below lists EVERY message in this case in exact order. Read it end to end before you write: the summary must account for the WHOLE case, not only its newest and oldest messages.'
+            : '- There is no email correspondence synced for this case: work from the issue description, the meeting notes and this conversation only, and do not imply correspondence you cannot see.';
+        const historyRef = chronology ? 'the [CASE HISTORY] below' : 'the case data provided';
+
+        return `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
 
 RULES:
 - Use ONLY facts from the issue description, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — if something decisive is unknown, say so in one short phrase.
+${historyRule}
 - The email chain is ordered NEWEST FIRST: the current state comes from the most recent messages, which OVERRIDE the original issue description if the situation has moved on.
+- NEVER state an OUTCOME the chain does not state. If someone was asked to test, upgrade, reboot or re-enrol, report only what the chain says actually happened: if the result was never reported, or the customer said they could not confirm it, say exactly that. Writing "the customer tested it and confirmed no change" when the chain says "we haven't been able to confirm it yet" is a FABRICATION and the worst possible error in this answer.
+- Never state or imply that the case is closed, closing, resolved or in closure unless the CASE STATE directive below says so.
 - Refer to people by name (e.g. "Ayodeji"), never by internal message numbers. Do NOT output a dated timeline.${peopleLine}
-- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as "Technical Support, SOTI" (e.g. Ayodeji Augustine, Savio Basil Saju) is a SOTI SUPPORT ENGINEER, NOT the customer — never write that a SOTI engineer "is experiencing the issue". If no customer name is given, say "the customer" rather than naming a support engineer as the customer.
+- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as SOTI Support, or with a SOTI support job title (e.g. "Technical Support, SOTI", "Senior Technical Support Specialist", "Technical Account Manager"), or who writes [INTERNAL] notes / [CALL LOG] entries, is SOTI-side — NEVER write that they are experiencing the issue or that they reported it. If no customer name is given, say "the customer".
 - Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
 
-Summary: 2-5 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer reported, and where the case stands RIGHT NOW (from the newest message; name who said it and when if that is decisive, e.g. an internal note or a referenced earlier case). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, and any business impact the customer stated MUST be carried into this section even when a later message says the problem is currently gone.
+Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported, how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
 
-Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established — what support tested or tried, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), questions the customer already answered, and any findings from log analysis in this conversation. Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
+Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
 
 Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
 
-${chronology ? chronology + '\n\n' : ''}${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
+${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
+    };
 
-    await runQuickAIAction('Building case summary...', 'Case summary ready', prompt, {
+    await runQuickAIAction('Building case summary...', 'Case summary ready', buildPrompt, {
         forceConversational: true,
         freshContext: true,
         skipResearch: !researchQuery,
         researchQuery,
-        copyKind: 'summary'
+        copyKind: 'summary',
+        // The [CASE HISTORY] scaffold in the prompt already lists every message, so the chain
+        // section is capped to the newest messages' verbatim text rather than repeating the whole
+        // correspondence in a budget the scaffold and the directives need.
+        chainCap: chainEntryCount >= 8 ? (small ? 3000 : 8000) : undefined,
+        // Deterministic coverage check on the finished answer: the decisive facts were extracted
+        // from the chain by exact text match, so whether the summary carries them is checkable
+        // rather than a matter of trust.
+        verifySummary: { signals, lc, chain: chainRaw, caseNumber: $('caseNum').value || '' }
     });
 }
 
