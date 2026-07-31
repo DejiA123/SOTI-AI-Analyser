@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.5.2 — Case Summary repairs itself silently (no QA block, dropped facts restored, out-of-date status struck out); quoted reply tails cut so roles and closure state are read from the sender\'s OWN words; a conditional "close it if we hear nothing" no longer closes a case; symptom checks matched on the case subject and on plural symptom words', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.5.3 — Case Summary repairs itself silently (no QA block, dropped facts restored, out-of-date status struck out); an internal note\'s "I have notified him" is attributed to its author instead of copied; quoted reply tails cut so roles and closure state are read from the sender\'s OWN words; a conditional "close it if we hear nothing" no longer closes a case; symptom checks matched on the case subject and on plural symptom words', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -4585,6 +4585,42 @@ const PERISHABLE_LEAD_SRC = 'at (?:the )?(?:moment|present|time of writing)|at t
 const PERISHABLE_STATUS_RE = new RegExp(`^(?:${PERISHABLE_LEAD_SRC})\\b`, 'i');
 const PERISHABLE_MARKER_RE = new RegExp(`\\b(?:${PERISHABLE_LEAD_SRC})\\b`, 'i');
 
+// An internal note is written in the FIRST PERSON, by the engineer, to their colleagues: "I have
+// requested to install latest xsight agent but same issue", "I have notified him". Quoted into
+// the prompt as-is, a small model copies the line straight into "Troubleshoots done" — and the
+// case record then reads as if whoever is reading the summary did the work. The note records who
+// wrote it, so naming them is ATTRIBUTION, not invention.
+// Only the SUBJECT pronoun is rewritten. "him"/"her"/"them" are left exactly as written: their
+// antecedent sits in a neighbouring sentence, and guessing it is how "I have notified him" (about
+// the TAM) became "Imran Ali notified the customer" — fluent, and wrong about who was told.
+function attributeToAuthor(line, author) {
+    const who = bareSenderName(author) || 'SOTI Support';
+    const src = String(line || '').trim();
+    const out = src
+        .replace(/^I\s+have\b/i, `${who} has`)
+        .replace(/^I\s+am\b/i, `${who} is`)
+        .replace(/^I\s+/i, `${who} `)
+        .replace(/^We\s+have\b/i, 'SOTI Support has')
+        .replace(/^We\s+are\b/i, 'SOTI Support is')
+        .replace(/^We\s+/i, 'SOTI Support ');
+    if (out === src) return src;
+    // The subject moved to the third person, so the possessives that agreed with it have to move
+    // too — "SOTI Support has tested the agent on our own machine" is half-rewritten. they/their
+    // throughout: the chain records who wrote the note, never how they wish to be referred to.
+    return out.replace(/\bmy\b/gi, 'their').replace(/\bour\b/gi, 'their').replace(/\bmine\b/gi, 'theirs');
+}
+
+// The same lines under a note's "Next steps" heading become steps for the engineer to DO, so the
+// first person is stripped rather than attributed: "I would advise to reach out to TAM Andries"
+// is an instruction to reach out to the TAM, and naming its author ("Imran Ali would advise to
+// reach out…") turns an action into a report of someone's opinion.
+function toImperativeStep(line) {
+    let t = String(line || '').trim()
+        .replace(/^(?:I|we)\s+(?:would\s+|will\s+|shall\s+)?(?:like\s+to\s+)?(?:advise|suggest|recommend)\s+(?:that\s+)?(?:you\s+to\s+|you\s+should\s+|you\s+|we\s+should\s+|we\s+|to\s+)?/i, '')
+        .replace(/^(?:I|we)\s+(?:will|shall|am going to|are going to|plan to|need to|have to)\s+/i, '');
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
 // OTHER SOTI case numbers the emails mention — the ones worth chasing ("this was fixed in case
 // X", "testing kept running into the C01687288 problem"). The case's OWN number must never be
 // reported as one of them, and it reaches this text constantly through quoted subject lines
@@ -4751,9 +4787,11 @@ function detectChainSignals(entries, lc) {
             else recorded.push(it); // unclassifiable → a record, never a fabricated instruction
         }
         const src = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), type: /\bCALL\b/i.test(e.type || '') ? 'phone call log' : 'internal note' };
-        out.commitments = forward.slice(0, 5);
+        // Out of the note author's first person and into the case record's third person, before
+        // anything downstream can quote them verbatim (attributeToAuthor / toImperativeStep).
+        out.commitments = forward.map(toImperativeStep).filter(Boolean).slice(0, 5);
         if (out.commitments.length) out.commitmentSource = src;
-        out.recordedActions = recorded.slice(0, 6);
+        out.recordedActions = recorded.map(r => attributeToAuthor(r, src.sender)).filter(Boolean).slice(0, 6);
         if (out.recordedActions.length) out.recordedActionSource = src;
         break;
     }
@@ -4866,7 +4904,7 @@ function buildCaseSignalsBlock(sig, kind, small) {
         if (sig.blocker) asks.push('the separate fault blocking progress, with its case/ticket number');
         if (asks.length) lines.push(`MANDATORY FOR "Summary:" — state ${asks.join('; ')}. Use the customer's own terms and do not soften or drop any of them.`);
         if (sig.commitments && sig.commitments.length) lines.push('MANDATORY FOR "Next steps:" — every ALREADY-COMMITTED next step above must be a numbered step, made executable (name the artefact + server role + what result decides it), BEFORE any newly proposed investigation.');
-        if (sig.recordedActions && sig.recordedActions.length) lines.push('MANDATORY FOR "Troubleshoots done:" — every ACTIONS/FINDINGS ALREADY RECORDED line above belongs there. Never turn one into a next step.');
+        if (sig.recordedActions && sig.recordedActions.length) lines.push('MANDATORY FOR "Troubleshoots done:" — every ACTIONS/FINDINGS ALREADY RECORDED line above belongs there. Never turn one into a next step. Keep them in the THIRD PERSON as written above (they name who did it) — never write "I" or "we" anywhere in your answer.');
         if (sig.promises && sig.promises.length) lines.push('MANDATORY — never contradict or walk back anything already PROMISED to the customer above.');
     } else {
         if (sig.recurrence) {
@@ -4890,7 +4928,7 @@ function buildCaseSignalsBlock(sig, kind, small) {
             lines.push('MANDATORY FOR "Next steps:" — every already-committed next step listed above MUST appear as a numbered step, phrased as completing a commitment already made (e.g. "Complete the transfer to …"), and MUST come BEFORE any newly proposed investigation. Do NOT silently replace an agreed action with your own plan. Where a commitment is worded vaguely (e.g. "monitor for stability"), KEEP the commitment but make it executable to the standard demanded above: name exactly what is watched, on which artefact and server role, at what interval, and what observation would count as a relapse. Never reproduce the vague wording verbatim as the step.');
         }
         if (sig.recordedActions && sig.recordedActions.length) {
-            lines.push('MANDATORY FOR "Troubleshoots done:" — every line listed under "ACTIONS/FINDINGS ALREADY RECORDED" is part of this case\'s history and MUST be reflected there (merge it with an equivalent bullet rather than repeating it). It is FORBIDDEN to turn any of them into a "Next step": they have already happened.');
+            lines.push('MANDATORY FOR "Troubleshoots done:" — every line listed under "ACTIONS/FINDINGS ALREADY RECORDED" is part of this case\'s history and MUST be reflected there (merge it with an equivalent bullet rather than repeating it). It is FORBIDDEN to turn any of them into a "Next step": they have already happened. Each one already names the engineer who did it: keep that THIRD-PERSON attribution and never write "I" or "we" anywhere in your answer — this is a case record, not a personal note.');
         }
         if (sig.promises && sig.promises.length) {
             lines.push('MANDATORY — SOTI has already promised the actions listed under "ALREADY PROMISED TO THE CUSTOMER IN WRITING". You are FORBIDDEN from writing a step, or any wording, that contradicts, walks back, or refuses one of them. If a cheaper or faster route exists, present it as the first thing to TRY, and keep the promised action as the step that follows if it does not resolve the issue — never as a replacement for it, and never phrased as telling the customer they were wrong to ask.');
@@ -5948,7 +5986,13 @@ function checkCaseSummaryCoverage(text, info) {
     //    this one pass is allowed to touch a line outside the Summary section.
     src = stripSupersededStatus(src, sig.staleStatements, applied);
 
-    // 3. RESTORE the decisive facts it dropped. Measured against the text as it now stands.
+    // 3. PUT ANY REMAINING FIRST PERSON INTO THE THIRD. The signals block now names the engineer
+    //    in every recorded action, but the model also reads the raw chain, where the internal
+    //    notes are still written as "I have…". A summary bullet that says "I notified him" reads,
+    //    in the case record, as if its reader did the work.
+    src = attributeFirstPersonLines(src, (sig.recordedActionSource || {}).sender, applied);
+
+    // 4. RESTORE the decisive facts it dropped. Measured against the text as it now stands.
     const missing = [];
     const wants = [
         ['recurrence', sig.recurrence],
@@ -5996,6 +6040,34 @@ function appendToSummarySection(text, addition) {
         return `${trimmed}${/[.!?:]$/.test(trimmed) ? '' : '.'} ${add}${trailing}`;
     });
     return placed ? out : `${src.replace(/\s+$/, '')} ${add}`;
+}
+
+// Rewrite a bullet or step the model wrote in the first person. A case summary has no "I": the
+// engineer reading it did not do any of this, and a record that says "I notified him" is
+// unattributed at exactly the point where attribution is the content. Applied per line and only
+// where the line OPENS in the first person, so a customer quote mid-sentence is untouched:
+//   • under "Troubleshoots done" and the summary — name the engineer whose note it came from;
+//   • under "Next steps" — drop the lead so the step reads as the instruction it is.
+// `author` is the note's recorded author; without one the neutral "SOTI Support" still beats "I".
+function attributeFirstPersonLines(text, author, applied) {
+    const src = String(text || '');
+    if (!/^\s*(?:[-*•]|\d+[.)])?\s*(?:I|we)\s+/im.test(src)) return src;
+    const out = [];
+    let changed = 0;
+    let inNextSteps = false;
+    for (const line of src.split('\n')) {
+        if (FORWARD_SECTION_RE.test(line)) inNextSteps = true;
+        else if (HISTORICAL_SECTION_RE.test(line)) inNextSteps = false;
+        const m = line.match(/^(\s*(?:[-*•]|\d+[.)])?\s*)((?:I|we)\s+[\s\S]*)$/i);
+        if (!m) { out.push(line); continue; }
+        const rewritten = inNextSteps ? toImperativeStep(m[2]) : attributeToAuthor(m[2], author);
+        if (!rewritten || rewritten === m[2]) { out.push(line); continue; }
+        changed++;
+        out.push(m[1] + rewritten);
+    }
+    if (!changed) return src;
+    if (applied) applied.push(`rewrote ${changed} first-person line${changed === 1 ? '' : 's'} in the third person`);
+    return out.join('\n');
 }
 
 // Does this text assert a negative? Needed to tell "the customer does not have a test device"
