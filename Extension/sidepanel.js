@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.5.3 — Case Summary repairs itself silently (no QA block, dropped facts restored, out-of-date status struck out); an internal note\'s "I have notified him" is attributed to its author instead of copied; quoted reply tails cut so roles and closure state are read from the sender\'s OWN words; a conditional "close it if we hear nothing" no longer closes a case; symptom checks matched on the case subject and on plural symptom words', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.5.5 — Case Summary progress climbs continuously (percentage creeps between passes, never parks); Case Summary repairs itself silently (no QA block, dropped facts restored, out-of-date status struck out); an internal note\'s "I have notified him" is attributed to its author instead of copied; quoted reply tails cut so roles and closure state are read from the sender\'s OWN words; a conditional "close it if we hear nothing" no longer closes a case; symptom checks matched on the case subject and on plural symptom words', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -6702,15 +6702,22 @@ async function buildCaseHistoryLines(ci, opts = {}) {
         const run = batches.slice(0, MAX_BATCHES);
         const numCtx = await getSessionCtx(LOCAL_AI_MODEL).catch(() => 8192);
         let done = 0;
+        // onProgress(done, total) reports work COMPLETED, so it runs 0 → total and the caller can
+        // show a true percentage. It used to report the pass about to START (done + 1), which both
+        // overstated progress and could never reach 100%. Reported once before the loop as well:
+        // the first pass blocks for seconds, and the user should see what is being worked on
+        // before it does.
+        const report = () => { if (opts.onProgress) opts.onProgress(done, run.length); };
+        report();
         for (const batch of run) {
             if (opts.signal && opts.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
-            if (opts.onProgress) opts.onProgress(done + 1, run.length);
             const got = await summarizeChainBatch(batch, { signal: opts.signal, numCtx, maxWords: small ? 20 : 30 });
             batch.forEach((item, k) => {
                 const line = got.get(k + 1);
                 if (line && !chainDigestLineIsEcho(line, item.text)) out.set(item.idx, line.replace(/\s+/g, ' ').trim());
             });
             done++;
+            report();
             await paintYield(0);
         }
     } catch (e) {
@@ -12986,6 +12993,26 @@ function paintYield(ms = 50) {
 }
 
 // Shared progress-bar wrapper (mirrors the Analyse Now flow).
+// The Case Summary's preparation label. A PERCENTAGE, not "pass 3 of 5": the pass count is an
+// implementation detail the engineer cannot act on, while a number that climbs tells them the run
+// is alive and roughly how much of it is left — which matters, because condensing a long chain on
+// a CPU-bound model is a minute of apparently nothing happening.
+// Returns { text, fraction, next, render }:
+//   fraction — work actually COMPLETED, the only number the bar is allowed to claim;
+//   next     — where the pass now running will land, so the bar can creep toward it instead of
+//              standing still. With a two-pass chain the real checkpoints are 0/50/100, and a bar
+//              that only moves on checkpoints sits dead at 0% for half a minute and then jumps;
+//   render   — the label for any displayed percentage, so the creeping number and the bar are
+//              always the same number.
+function chainReadingLabel(messageCount, done, total) {
+    const clamp = (x) => Math.max(0, Math.min(1, x));
+    const n = Math.max(0, Number(messageCount) || 0);
+    const fraction = total > 0 ? clamp(done / total) : 0;
+    const next = total > 0 ? clamp((done + 1) / total) : 1;
+    const render = (pct) => `Reading the email chain — ${n} message${n === 1 ? '' : 's'} · ${Math.round(pct)}%`;
+    return { text: render(fraction * 100), fraction, next, render };
+}
+
 // promptText may be a string OR an async builder fn(setLabel) → string, for a quick action that
 // has preparation work of its own to do first (the Case Summary condenses every long message in
 // the chain before it can write its prompt) and wants that visible in the progress bar.
@@ -13005,12 +13032,61 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
     // Yield control to let the browser paint the progress indicator
     await paintYield();
 
+    // Between two real checkpoints the bar creeps, so it is never standing still. Checkpoints on
+    // this work are coarse — a two-pass chain only ever reports 0, 50 and 100 — and a bar that
+    // moves only on them sits dead at 0% for half a minute and then jumps, which reads as a hang
+    // followed by a glitch. `stepMs` is measured from the step that just finished, so the creep is
+    // paced for THIS machine and THIS model instead of a guess; the first step uses a default and
+    // corrects itself from the second onwards.
+    let trickle = null, stepStartedAt = 0, stepMs = 15000;
+    const stopTrickle = () => { if (trickle) { clearInterval(trickle); trickle = null; } };
+
     if (typeof promptText === 'function') {
-        const setLabel = (text) => { if (pLbl) pLbl.textContent = text; };
+        const paintAt = (pct, render) => {
+            const v = Math.max(0, Math.min(100, pct));
+            if (pLbl) pLbl.textContent = render(v);
+            if (!pFill) return;
+            pFill.style.animation = 'none';
+            pFill.style.transform = 'none';
+            pFill.style.width = `${Math.round(v)}%`;
+        };
+        // setLabel(text) alone keeps the indeterminate slide — "something is happening, duration
+        // unknown". setLabel(text, fraction) switches the bar to a REAL fill, and a third argument
+        // says where the step now running will finish, which is what lets it creep. `text` may be
+        // a render(pct) function so the number in the label creeps with the bar rather than
+        // freezing at the last checkpoint while the bar moves underneath it.
+        const setLabel = (text, fraction, next) => {
+            const render = typeof text === 'function' ? text : () => String(text);
+            stopTrickle();
+            if (typeof fraction !== 'number' || !isFinite(fraction)) {
+                if (pLbl) pLbl.textContent = render(0);
+                if (pFill) {
+                    pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
+                    pFill.style.transform = '';
+                    pFill.style.width = '30%';
+                }
+                return;
+            }
+            const from = Math.max(0, Math.min(1, fraction));
+            const to = (typeof next === 'number' && isFinite(next)) ? Math.max(from, Math.min(1, next)) : from;
+            const now = Date.now();
+            if (stepStartedAt) stepMs = Math.max(1500, Math.min(120000, now - stepStartedAt));
+            stepStartedAt = now;
+            paintAt(from * 100, render);
+            if (to <= from) return;
+            trickle = setInterval(() => {
+                // Ease toward the next checkpoint and never reach it: the bar must not claim work
+                // that has not happened, but it must not look stopped either. If the step runs long
+                // the curve flattens and keeps inching instead of parking on the checkpoint.
+                const eased = 1 - Math.exp(-(Date.now() - stepStartedAt) / (stepMs * 0.45));
+                paintAt((from + (to - from) * Math.min(0.92, eased)) * 100, render);
+            }, 400);
+        };
         try {
             promptText = await promptText(setLabel);
         } catch (e) {
             console.warn('Quick-action prompt preparation failed', e);
+            stopTrickle();
             if (pWrap) pWrap.style.display = 'none';
             toast('Could not prepare this action — see the console for details', 'e');
             return;
@@ -13019,6 +13095,7 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
         await paintYield(0);
     }
 
+    stopTrickle();
     await send(promptText, true, opts);
 
     if (pLbl && pFill) {
@@ -13159,7 +13236,10 @@ async function generateCaseSummary() {
                 historyLines = await buildCaseHistoryLines(ciForChain, {
                     lc,
                     targetLen: small ? 90 : 170,
-                    onProgress: (i, n) => setLabel(`Reading the email chain — ${chainEntryCount} messages (pass ${i} of ${n})...`)
+                    onProgress: (done, total) => {
+                        const p = chainReadingLabel(chainEntryCount, done, total);
+                        setLabel(p.render, p.fraction, p.next);
+                    }
                 });
             } catch (e) {
                 if (e && e.name === 'AbortError') throw e;
