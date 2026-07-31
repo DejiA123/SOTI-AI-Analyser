@@ -165,6 +165,7 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 - Extended case retention to 30 days; added 90-day retention purge for learned insights.
 - **Scoped `OLLAMA_ORIGINS`** in the installer from `*` to the extension + standalone origins only (see §14.1).
 - **Made winget (verified package) the primary Ollama install path** ahead of the remote-script installer (see §14.2).
+- **Reordered the installer fallback chain to most-verified-first** — the signature-verified `OllamaSetup.exe` path now runs ahead of the `install.ps1` fetch-and-eval, which is now the last resort (see §14.2, §15.3).
 - **Hardened the Pulse-sync domain check** from a substring match to strict hostname parsing (see §14.4).
 - **Pinned the extension ID** via a `key` in `manifest.json`, replacing `chrome-extension://*` in `OLLAMA_ORIGINS` (see §15.1).
 - **Enforced local-only inference** with `OLLAMA_NO_CLOUD=1` (see §15.2).
@@ -192,8 +193,12 @@ A dynamic pentest was performed against the running application (live browser: n
 
 ### 14.2 [HIGH → MITIGATED] Unverified remote code execution in the installer
 - **Found:** the installer fetched `https://ollama.com/install.ps1` and ran it via `Invoke-Expression` with no integrity check ("fetch-and-eval"), with full user privileges outside the browser sandbox.
-- **Mitigated:** the installer now tries **winget first** (`winget install Ollama.Ollama` — a signed, hash-verified package), so the common case never fetch-and-evals. The official script remains only as a fallback for machines without winget.
-- **Residual (accept-risk):** the fallback still trusts `ollama.com` over HTTPS (the vendor's own documented method). For a locked-down rollout, pre-stage a vetted Ollama installer via managed software deployment instead of per-machine internet fetch.
+- **Mitigated:** the installer's fallback chain is ordered **most-verified first**, so the fetch-and-eval path is only reachable once every verified path is unavailable:
+  1. **winget** (`winget install Ollama.Ollama`) — signed, hash-verified package; fetches and evaluates no remote script at all.
+  2. **`OllamaSetup.exe`** — downloaded, then Authenticode- and publisher-verified by `Test-InstallerSignature` before execution (§15.3).
+  3. **`install.ps1`** — last resort, reached only on a machine with no winget **and** no usable signed installer.
+- **Verified:** all 8 combinations of path availability were executed against the shipped Step-1 block; `Install-OllamaOfficial` is never invoked while `winget` or the signature-verified `.exe` can still succeed, and the script exits `1` only when all three fail.
+- **Residual (accept-risk):** the last-resort fallback still trusts `ollama.com` over HTTPS (the vendor's own documented method), and a *signature rejection* in step 2 currently falls through to it rather than aborting — so a machine with no winget facing a tampered download would still reach the unverified path. For a locked-down rollout, pre-stage a vetted Ollama installer via managed software deployment instead of per-machine internet fetch.
 
 ### 14.3 [MEDIUM] No encryption at rest — unchanged, open by prior decision (see §9.1).
 
@@ -249,7 +254,8 @@ does not supersede §14.
   (`CN=Ollama Inc.`) before execution; a failing binary is deleted, not run.
 - **Verified:** genuine Ollama binary accepted; a byte-tampered copy rejected (`HashMismatch`);
   an unsigned file rejected; a validly-signed Google binary rejected (wrong publisher).
-- **Residual:** the `install.ps1` fetch-and-eval fallback remains as accepted risk per §14.2.
+- **Ordering:** this verified path now runs **ahead of** the `install.ps1` fetch-and-eval fallback, not behind it (§14.2) — previously the unverified path ran second and the verified one third, so on a machine without winget the signature check was never reached.
+- **Residual:** the `install.ps1` fetch-and-eval fallback remains as accepted risk per §14.2, now as the last resort rather than the first fallback.
 
 ### 15.4 [LOW → RESOLVED] Backend fallback never started the server
 - **Found:** the non-tray fallback ran `ollama.exe` with no argument. Confirmed on 0.32.1 this
