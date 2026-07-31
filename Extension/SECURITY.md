@@ -7,9 +7,14 @@ The application has a **privacy-favourable, local-first architecture**:
 - **All AI processing is local** (Ollama on `127.0.0.1:11434`). No cloud AI, no API keys, no third-party data processor.
 - **No telemetry, analytics, or tracking** of any kind.
 - **All network egress is restricted** to localhost plus first-party SOTI/Salesforce hosts, enforced by tightly-scoped `host_permissions` and a hardened Content-Security-Policy.
-- Personal data stays on the analyst's device.
+- **No personal data reaches any third party.** Case content is processed and stored on the analyst's device. One **first-party** exception is documented at §4.1: a small number of case-derived keywords are sent to SOTI's own `pulse.soti.net` in a search query string.
 
-**One residual technical risk is open by customer decision: local data is not encrypted at rest** (see §9.1). With the compensating controls documented below, the application is assessed as **suitable for a controlled, policy-managed rollout**, subject to the operational recommendations in §10 and the security team's own review/pen-test.
+**Two residual technical risks are open:**
+
+1. **Local data is not encrypted at rest** (§9.1) — open by customer decision, with mandated OS disk encryption as the compensating control.
+2. **Case-derived keywords are sent to `pulse.soti.net`** (§9.2, detail in §4.1) — first-party recipient, but the data lands in access logs outside this application's retention controls. Remediation options are listed; **this one is not yet closed.**
+
+With the compensating controls documented below, the application is assessed as **suitable for a controlled, policy-managed pilot**, subject to the operational recommendations in §10, closure of risk 2, and the security team's own review/pen-test.
 
 ---
 
@@ -44,13 +49,42 @@ The application has a **privacy-favourable, local-first architecture**:
 Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destinations are **exclusively**:
 
 - `http://127.0.0.1:11434` / `localhost` — local Ollama.
-- `https://pulse.soti.net` — release notes / help (first-party). Only **product/version terms** travel here; **no personal data**.
+- `https://pulse.soti.net` — release notes, help pages and community search (first-party SOTI). **Case-derived text reaches this host — see §4.1.**
 - `salesforce.com` / `force.com` — content script **reads the DOM only** (no outbound fetch of case data).
 - Local bundled files (`lib/`, `knowledge/`).
 
 **Confirmed absent:** telemetry/analytics (Google Analytics, Sentry, Segment, etc.), third-party CDNs, CORS proxies, external fonts/scripts/CSS, cookies, clipboard/geolocation access, `externally_connectable`.
 
 **Verified live:** with every external fetch failing, the app still functions from local data; and an injected external image beacon to a *resolvable* host is **blocked by CSP** (`securitypolicyviolation`, directive `img-src`, disposition `enforce`).
+
+### 4.1 Case-derived text sent to `pulse.soti.net` — CORRECTION
+
+> **A previous version of this section stated that "only product/version terms" travel to `pulse.soti.net` and that "no personal data" does. That was incorrect.** The flow below was identified in a later source review and is recorded here in full. §11.2 and §11.4 have been corrected to match.
+
+When the assistant researches a case it searches the SOTI Pulse community forum:
+
+```js
+// sidepanel.js:10251
+sotiFetch(`${PULSE_ORIGIN}/community/search?query=${encodeURIComponent(kq)}`, 6000)
+```
+
+`kq` is **up to six keywords taken from the case itself**, not a fixed product vocabulary:
+
+- Quick actions build the research query in `buildCaseResearchQuery()` (`sidepanel.js:7002`) from `buildCaseSymptomText(600)` (`:6972`), which concatenates the **scraped Salesforce issue summary** with the **bodies of up to four emails from the case chain** (300 chars each).
+- A short or deictic chat message ("fix it", "what next?") is enriched at `:9789` with the case's issue summary before keywords are extracted.
+- That text is tokenised at `:10162` — `split(/\W+/)`, keep tokens longer than 3 characters, minus a stopword list — and the **first six surviving tokens** are sent (`:10233`).
+
+**The stopword list removes Salesforce field *labels* (`firstname`, `lastname`, `phone`, `customer`, `company`) but not the *values* behind them.** Any token over three characters passes, so customer surnames, company names, site and host identifiers, usernames and device model strings can all be transmitted.
+
+**Frequency — this is the default path, not an edge case.** `buildCaseResearchQuery()` prefixes every quick-action query with the literal string `"troubleshoot issue: "`, which by itself satisfies the `isTroubleshoot` test at `:9806`, so the community search fires on essentially **every quick action against an open case**.
+
+**Assessment**
+
+- The recipient is **first-party SOTI infrastructure**. No data reaches an external organisation, and there is no third-party processor involved.
+- The data travels in a **URL query string** — the worst available carrier. Query strings are written in cleartext to web-server access logs and to any CDN, WAF or forward proxy in the path, and are retained under *those* systems' policies, **outside** this application's 30/90-day retention controls.
+- Volume is bounded (≤ 6 tokens per search); the *kind* of content is not.
+
+**Status: OPEN.** Remediation options: restrict the query to a product/symptom allowlist, or remove the community-search feature. Until it is closed, the Pulse access-log retention period should be obtained from that service's owner and recorded in §11.4.
 
 ---
 
@@ -100,11 +134,12 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 ## 9. Residual risks (critical view)
 
 1. **[MEDIUM] No encryption at rest.** Case PII sits in `chrome.storage.local` in plaintext, protected only by OS/profile security. **Open by customer decision.** *Compensating controls:* sandboxed per-extension storage, 30/90-day retention, and mandated OS disk encryption (§10.1). A passphrase-based AES-GCM option is designed but not built.
-2. **[LOW] No app-level authentication.** Anyone with the unlocked browser profile can open the panel and read cases. Ties to (1).
-3. **[LOW] Prompt injection.** Attacker-influenced case/email content flows into the local LLM and could skew its analysis output. No data-exfiltration risk (local model); analysts should treat AI output as advisory.
-4. **[LOW] Standalone mode** uses `localStorage` (wiped by site-data clears) and relies only on the meta-CSP (no `host_permission` enforcement). Deploy the **extension** only.
-5. **[LOW] Learned insights** may retain incidental PII fragments (now 90-day bounded).
-6. **[INFO] Vendored libraries are not integrity-pinned.**
+2. **[MEDIUM] Case-derived text leaves the device to a first-party host.** Up to six keywords taken from the case issue summary and customer email bodies are sent to `pulse.soti.net` in a URL query string, on essentially every quick action against an open case (§4.1). The recipient is SOTI-internal — no third party — but the data lands in web-server/CDN access logs governed by that service's retention policy, outside this application's controls. **Open**; remediation options in §4.1.
+3. **[LOW] No app-level authentication.** Anyone with the unlocked browser profile can open the panel and read cases. Ties to (1).
+4. **[LOW] Prompt injection.** Attacker-influenced case/email content flows into the local LLM and could skew its analysis output. No data-exfiltration risk (local model); analysts should treat AI output as advisory.
+5. **[LOW] Standalone mode** uses `localStorage` (wiped by site-data clears) and relies only on the meta-CSP (no `host_permission` enforcement). Deploy the **extension** only.
+6. **[LOW] Learned insights** may retain incidental PII fragments (now 90-day bounded).
+7. **[INFO] Vendored libraries are not integrity-pinned.**
 
 ---
 
@@ -136,10 +171,10 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 | Purpose | AI-assisted support case/log analysis |
 | Categories of data subjects | Customer contacts named in support cases |
 | Categories of personal data | Names, emails, phone numbers, company, log-embedded identifiers |
-| Recipients | None external — processed locally on the analyst device |
-| International transfers | None (local processing) |
-| Retention | Cases 30 days inactivity; insights 90 days; manual erasure available |
-| Technical/organisational measures | Local-only processing; scoped permissions; hardened CSP; retention limits; OS disk encryption (mandated); see this document |
+| Recipients | **No third party.** Case analysis and AI inference happen entirely on the analyst device. **One first-party flow exists:** up to six case-derived keywords are sent to `pulse.soti.net` (SOTI-operated) in a search query string — see §4.1 |
+| International transfers | **None to any third party.** The `pulse.soti.net` flow in §4.1 is SOTI-internal; **confirm the hosting region of that service with its owner** before signing off this entry |
+| Retention | Cases 30 days inactivity; insights 90 days; manual erasure available. **Note:** the §4.1 keywords fall under Pulse's own access-log retention, not this app's — see §11.4 |
+| Technical/organisational measures | On-device processing and inference; scoped permissions; hardened CSP; retention limits; OS disk encryption (mandated); see this document |
 
 ### 11.3 DPIA trigger assessment
 - Automated processing of customer support data with AI **likely warrants a DPIA**. Recommend completing a full DPIA covering: necessity/proportionality, the §9 risks, and the mitigations in this document.
@@ -149,6 +184,7 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 - Learned insights: auto-deleted after **90 days**.
 - Analysts may erase any case immediately ("Clear all cases & logs").
 - Salesforce remains the system of record; the local store is a working cache.
+- **Not controlled by this application:** the case-derived keywords sent to `pulse.soti.net` (§4.1) are retained under that service's own web-server/CDN access-log policy. Obtain that retention period from the service owner and record it here: _____.
 
 ### 11.5 Data-subject rights handling
 - **Erasure/access:** local data is per-analyst-device; document the process for locating and clearing it on request (extension "Clear all" + profile).
@@ -166,6 +202,7 @@ Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destina
 - **Scoped `OLLAMA_ORIGINS`** in the installer from `*` to the extension + standalone origins only (see §14.1).
 - **Made winget (verified package) the primary Ollama install path** ahead of the remote-script installer (see §14.2).
 - **Reordered the installer fallback chain to most-verified-first** — the signature-verified `OllamaSetup.exe` path now runs ahead of the `install.ps1` fetch-and-eval, which is now the last resort (see §14.2, §15.3).
+- **Corrected §4, §9, §11.2 and §11.4**, which previously stated that only product/version terms reached `pulse.soti.net` and that there were no external recipients. A source review found case-derived keywords are sent to that host; the flow is now documented in full at §4.1 and tracked as an open risk at §9.2. **This was a documentation error, not a regression** — the behaviour pre-dated the claim.
 - **Hardened the Pulse-sync domain check** from a substring match to strict hostname parsing (see §14.4).
 - **Pinned the extension ID** via a `key` in `manifest.json`, replacing `chrome-extension://*` in `OLLAMA_ORIGINS` (see §15.1).
 - **Enforced local-only inference** with `OLLAMA_NO_CLOUD=1` (see §15.2).
