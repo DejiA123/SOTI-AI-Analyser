@@ -215,13 +215,21 @@ if (Test-OllamaInstalled) {
     Write-Success "Ollama is already installed."
 } else {
     Write-Header "Step 1: Install Ollama"
-    # SECURITY: prefer winget first - it installs a signed, hash-verified package from the
-    # Windows Package Manager repo, so the common case does NOT fetch a remote script and pipe
-    # it into Invoke-Expression. Fall back to Ollama's official installer / setup.exe only if
-    # winget is unavailable (older Windows).
+    # SECURITY: the install paths are ordered MOST-VERIFIED FIRST, so the unverified one is only
+    # ever reached when every verified path above it is unavailable:
+    #   1. winget          - signed, hash-verified package from the Windows Package Manager repo.
+    #                        No remote script is fetched or evaluated at all.
+    #   2. OllamaSetup.exe - downloaded, then Authenticode status AND publisher (CN=Ollama Inc.)
+    #                        are verified by Test-InstallerSignature before it is allowed to run;
+    #                        a tampered/unsigned/wrong-publisher binary is deleted, not executed.
+    #   3. install.ps1     - LAST RESORT. Pipes remote script text into Invoke-Expression with no
+    #                        integrity check, so it must stay behind both verified paths: it is
+    #                        reached only on a machine with no winget AND no usable signed
+    #                        installer (older Windows where winget is absent and the .exe
+    #                        download itself failed).
     $ok = Install-OllamaViaWinget
-    if (-not $ok) { $ok = Install-OllamaOfficial }
     if (-not $ok) { $ok = Install-OllamaViaSetupExe }
+    if (-not $ok) { $ok = Install-OllamaOfficial }
     if (-not $ok) {
         Write-Err "Automatic install did not complete."
         Write-Info "Manual install: open PowerShell and run: irm https://ollama.com/install.ps1 | iex"
