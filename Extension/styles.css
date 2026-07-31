@@ -946,6 +946,10 @@ body {
     left: 0;
     transform: translateX(-100%);
     animation: progress-slide 2s infinite ease-in-out;
+    /* Determinate mode (a real percentage — see setLabel in runQuickAIAction) sets width and
+       turns the slide off. Transitioning width makes those steps glide instead of jumping;
+       the keyframes animate transform, so the two never fight. */
+    transition: width .35s ease;
 }
 
 @keyframes progress-slide {
