@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.5.0 — Log Whisperer chronology overhaul: root cause must precede symptoms, chronic-noise suppression, SSO/Entra authorization-trail intelligence, per-file coverage windows, deterministic answer verification', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.5.2 — Case Summary repairs itself silently (no QA block, dropped facts restored, out-of-date status struck out); quoted reply tails cut so roles and closure state are read from the sender\'s OWN words; a conditional "close it if we hear nothing" no longer closes a case; symptom checks matched on the case subject and on plural symptom words', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -3987,7 +3987,18 @@ const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\
 //     Date: Wednesday, 10 June 2026 at 10:38
 // With only the "Sent:" form recognised, that tail survived and the CUSTOMER was labelled
 // SOTI Support.
-const REPLY_HEADER_ANY_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?(?:Sent|Date):[ \\t]';
+// The spacing has to be forgiving, because the header is scraped out of rendered HTML and comes
+// back padded and split. This is the exact shape that defeated the earlier pattern — a run of
+// spaces after "From:", and a BLANK LINE before "Sent:":
+//        From:    Sougata Das
+//     <blank>
+//      Sent:  Tuesday, July 28, 2026 4:00 PM
+// One optional newline was not enough for that, so the tail survived on every message in the
+// chain: the customer's own emails kept the SOTI reply quoted underneath, role detection read
+// that quoted "Technical Support, SOTI" signature as the sender's own and labelled the CUSTOMER
+// as the support engineer, and the closure scan then read the customer's quoted text as a SOTI
+// closure notice — dated to the wrong message. Allow padding, and up to three blank lines.
+const REPLY_HEADER_ANY_SRC = 'From:[ \\t]*[^\\n]{0,200}?(?:[ \\t]*\\r?\\n){0,3}[ \\t]*(?:Sent|Date):[ \\t]*';
 
 // Support-authored template phrases — customers never write these. Used to tell a SOTI
 // engineer's message from the customer's (lifecycle detection AND the chain digest's role
@@ -4237,6 +4248,17 @@ function senderNameVariants(sender) {
 // message that already exists elsewhere in the chain, so cutting it loses nothing.
 function cleanEmailBody(body, sender, cutReplyTail) {
     let t = String(body || '');
+    // The Salesforce feed is scraped out of rendered HTML and the scraper only unescapes &nbsp;,
+    // so "Thanks &amp; Regards" and "don&#39;t" reach the prompt — and then the summary — with
+    // the escape still in them. Decode the handful that actually occur. &amp; goes LAST so
+    // "&amp;quot;" (a double-escape, which the feed does produce) resolves in one pass.
+    t = t.replace(/&nbsp;/gi, ' ')
+        .replace(/&(?:quot|ldquo|rdquo);/gi, '"')
+        .replace(/&(?:apos|lsquo|rsquo|#0*39);/gi, "'")
+        .replace(/&(?:ndash|mdash);/gi, '–')
+        .replace(/&(?:lt|#0*60);/gi, '<')
+        .replace(/&(?:gt|#0*62);/gi, '>')
+        .replace(/&(?:amp|#0*38);/gi, '&');
     // A pasted/forwarded Outlook message begins with its OWN routing header
     // (From:/Sent:/To:/Cc:/Subject: lines). That header is pure metadata — the sender and
     // date are already captured on the entry — so leaving it in makes every gist/snippet
@@ -4555,6 +4577,33 @@ const SIG_UNVERIFIED_RE = /\b(?:not|n'?t|never|unable to|cannot|can'?t|could ?n'
 // measured.
 const SIG_BLOCKER_RE = /\b(?:blocked|blocking|blocker|held up|hold(?:ing)? up|stuck (?:on|behind)|derail\w*|prevent(?:s|ed|ing)? (?:us|me|testing)?)\b|\bkept running into\b|\brunning into\b[^.\n]{0,60}\binstead\b|\bran into\b[^.\n]{0,40}\b(?:issue|problem|error|failure)\b|\bcould ?n'?t (?:get|proceed|continue)\b/i;
 
+// The phrases that pin a claim to the moment it was written. Two shapes are needed and they must
+// stay in step, so both are built from one source: ..._STATUS_RE asks "is this line a status
+// claim?" (detectChainSignals classifying a note), ..._MARKER_RE asks "does this line talk about
+// right now at all?" (stripSupersededStatus deciding whether a summary line is restating one).
+const PERISHABLE_LEAD_SRC = 'at (?:the )?(?:moment|present|time of writing)|at this (?:time|point|stage)|currently|right now|for (?:the )?(?:moment|now)|as (?:of|things stand) now|as it stands|presently|so far';
+const PERISHABLE_STATUS_RE = new RegExp(`^(?:${PERISHABLE_LEAD_SRC})\\b`, 'i');
+const PERISHABLE_MARKER_RE = new RegExp(`\\b(?:${PERISHABLE_LEAD_SRC})\\b`, 'i');
+
+// OTHER SOTI case numbers the emails mention — the ones worth chasing ("this was fixed in case
+// X", "testing kept running into the C01687288 problem"). The case's OWN number must never be
+// reported as one of them, and it reaches this text constantly through quoted subject lines
+// ("Subject: RE: Case: C01717439 - …"). Two ways to know which is own:
+//   • the case-number field, when the panel has it;
+//   • otherwise the MOST FREQUENT number in the chain, because the own number appears in every
+//     quoted subject line while a genuine reference is usually mentioned once.
+// That fallback used to require two DISTINCT numbers to be present, so a chain mentioning only
+// its own number reported that number as a case to go and review — a next step pointing the
+// engineer back at the case they are already reading.
+function referencedCaseNumbers(rawChain, ownFromField) {
+    const counts = new Map();
+    for (const m of String(rawChain || '').match(/\bC0\d{6,8}\b/g) || []) counts.set(m, (counts.get(m) || 0) + 1);
+    if (!counts.size) return [];
+    let own = String(ownFromField || '').trim().toUpperCase();
+    if (!own) own = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return [...counts.keys()].filter(n => n.toUpperCase() !== own.toUpperCase());
+}
+
 // Is the character at `p` a real sentence end, or a dot inside a version / decimal
 // ("v2026.1.1.1453")? Quoting the customer verbatim is the whole point of these blocks, and a
 // quote that opens "1453, but we haven't been able to confirm…" reads like a fragment of
@@ -4586,12 +4635,13 @@ function quoteAround(text, idx, len, max = 240) {
 // Scan the cleaned chain for those signals. `entries` is newest-first (getCleanChainEntries),
 // `lc` supplies the customer/agent role split so a customer's urgency is not confused with a
 // support template. Returns { recurrence, urgency, impact, unverified, blocker, commitments } —
-// each either null or { sender, time, quote }, except commitments/promises which are string[].
+// each either null or { sender, time, quote }, except commitments / recordedActions / promises /
+// staleStatements, which are string[].
 function detectChainSignals(entries, lc) {
     const out = {
         recurrence: null, urgency: null, impact: null, unverified: null, blocker: null,
         commitments: [], commitmentSource: null, recordedActions: [], recordedActionSource: null,
-        promises: [], promiseSource: null
+        promises: [], promiseSource: null, staleStatements: []
     };
     if (!entries || !entries.length) return out;
     const custName = ((lc && lc.customerSender) || '').trim();
@@ -4629,33 +4679,74 @@ function detectChainSignals(entries, lc) {
         if (out.recurrence && out.urgency && out.impact && out.unverified && out.blocker) break;
     }
 
+    // Engineers dump three different kinds of line under one "Next steps" header in a note, and
+    // they must not all become "next steps": an action still TO DO, an action ALREADY DONE ("I
+    // have requested the latest XSight agent but same issue"), and a plain finding ("There is a
+    // workaround … but customer refused"). Injecting the last two as mandatory next steps
+    // produced steps an engineer cannot perform; they are records, and they belong under
+    // "Troubleshoots done" instead. These classify each line so it lands in the right section.
+    const PAST_ACTION_RE = /^(?:i|we|support|soti)?\s*(?:have|has|had)\s+\S+(?:ed|en|ne|un|t)\b|^(?:i|we)\s+(?:requested|tested|checked|installed|created|raised|escalated|advised|asked|shared|sent|tried|performed|reviewed|analysed|analyzed|collected|gathered|confirmed|reproduced|notified|upgraded|enrolled|enroled)\b|^(?:already|previously)\b/i;
+    const STATEMENT_RE = /^(?:there (?:is|are|was|were)|at the moment|currently|customer (?:said|says|mentioned|refused|prefers|prefer|prefered|preferred|has|is|does|did|will)|the customer\b|this (?:is|was|has|sounds)|it (?:is|was|seems|appears)|no |not )/i;
+    const FORWARD_RE = /^(?:i|we|support|soti)?\s*(?:will|shall|'?ll|would (?:advise|suggest|recommend|like)|need(?:s)? to|plan(?:ning)? to|going to|am going to|are going to|should|must|to )\b|^(?:reach out|transfer|transferring|monitor|follow[- ]up|following up|check|collect|gather|request|arrange|schedule|escalate|create|raise|test|verify|confirm|install|upgrade|downgrade|send|provide|review|continue|await|pick(?: it| this)? up|advise|suggest|recommend|ask|share|call|invite|enable|disable|apply|run|capture|reproduce)\b/i;
+
+    // Split a note into the units those regexes classify: one per line, or per sentence.
+    const noteItems = (text) => String(text || '')
+        .split(/\n+|(?<=\.)\s+(?=[A-Z])/)
+        .map(s => s.replace(/^[-*\d.)\s]+/, '').trim())
+        .filter(s => s.length > 6 && s.length < 200);
+    // Has the case moved on since entry `i`? entries are NEWEST first, so "newer" = lower index,
+    // and an out-of-office auto-reply carries no case signal so it is not the case moving on.
+    const supersededAt = (i) => {
+        for (let j = 0; j < i; j++) if (!isOooAutoReply(entries[j])) return true;
+        return false;
+    };
+
+    // PERISHABLE STATUS — a claim explicitly pinned to the moment it was written ("At the moment,
+    // they do not have a test device", "Currently testing"). Unlike an action or a finding it has
+    // no shelf life: it describes a state, and the case moves on. On this chain an internal note
+    // of 24 July said "At the moment, they do not have a test device"; five days later the
+    // customer wrote that their test server was on v2026.1.1.1453 and that a SECOND test device
+    // had been enrolled the previous Friday — and the summary still reported, as current fact,
+    // that the customer had no test device. So a perishable line counts as a finding only while
+    // its note is still the last word on the case. Once ANY substantive message postdates it,
+    // "at the moment" no longer means now: the line is quarantined here instead of being
+    // asserted, and never injected as a fact the summary must carry.
+    // Collected across the WHOLE chain — not just the note that supplies the commitments below —
+    // because the model reads the raw chain as well, so a summary can repeat one of these even
+    // when nothing injected it. checkCaseSummaryCoverage uses this list to strike it back out.
+    const stale = [];
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (!/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
+        if (!supersededAt(i)) continue;
+        for (const it of noteItems(e.body)) {
+            if (PAST_ACTION_RE.test(it)) continue;   // an action already taken stays a fact
+            if (PERISHABLE_STATUS_RE.test(it)) stale.push(it);
+        }
+    }
+    out.staleStatements = [...new Set(stale)].slice(0, 8);
+
     // What SOTI has already told itself it will do next. Call logs and internal notes are
     // written in the "Summary / Troubleshoots done / Next steps" template, and the actions
     // under "Next steps" are commitments already made — a summary that omits them sends the
     // engineer to re-derive a plan that was already agreed (here: "Transferring the case to
     // the customer's region", which no generated next-steps list ever mentioned).
-    for (const e of entries) {
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
         if (!/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
         // Engineers write the template header either way — "Next steps:" and "Next steps - " are
         // both common, and requiring the colon silently dropped every commitment on a case whose
         // internal notes used the dash form.
         const m = (e.body || '').match(/\bnext steps?\s*[:\-–—]\s*([\s\S]{3,600})$/i);
         if (!m) continue;
-        const items = m[1].split(/\n+|(?<=\.)\s+(?=[A-Z])/).map(s => s.replace(/^[-*\d.)\s]+/, '').trim())
-            .filter(s => s.length > 6 && s.length < 200);
+        const items = noteItems(m[1]);
         if (!items.length) continue;
-        // Engineers dump three different kinds of line under that one header, and they must not
-        // all become "next steps": an action still TO DO, an action ALREADY DONE ("I have
-        // requested the latest XSight agent but same issue"), and a plain finding ("At the moment
-        // they do not have a test device"). Injecting the last two as mandatory next steps
-        // produced steps an engineer cannot perform; they are records, and they belong under
-        // "Troubleshoots done" instead. Split them here so each lands in the right section.
-        const PAST_ACTION_RE = /^(?:i|we|support|soti)?\s*(?:have|has|had)\s+\S+(?:ed|en|ne|un|t)\b|^(?:i|we)\s+(?:requested|tested|checked|installed|created|raised|escalated|advised|asked|shared|sent|tried|performed|reviewed|analysed|analyzed|collected|gathered|confirmed|reproduced|notified|upgraded|enrolled|enroled)\b|^(?:already|previously)\b/i;
-        const STATEMENT_RE = /^(?:there (?:is|are|was|were)|at the moment|currently|customer (?:said|says|mentioned|refused|prefers|prefer|prefered|preferred|has|is|does|did|will)|the customer\b|this (?:is|was|has|sounds)|it (?:is|was|seems|appears)|no |not )/i;
-        const FORWARD_RE = /^(?:i|we|support|soti)?\s*(?:will|shall|'?ll|would (?:advise|suggest|recommend|like)|need(?:s)? to|plan(?:ning)? to|going to|am going to|are going to|should|must|to )\b|^(?:reach out|transfer|transferring|monitor|follow[- ]up|following up|check|collect|gather|request|arrange|schedule|escalate|create|raise|test|verify|confirm|install|upgrade|downgrade|send|provide|review|continue|await|pick(?: it| this)? up|advise|suggest|recommend|ask|share|call|invite|enable|disable|apply|run|capture|reproduce)\b/i;
+        const superseded = supersededAt(i);
         const forward = [], recorded = [];
         for (const it of items) {
-            if (PAST_ACTION_RE.test(it) || STATEMENT_RE.test(it)) recorded.push(it);
+            if (PAST_ACTION_RE.test(it)) recorded.push(it);
+            else if (superseded && PERISHABLE_STATUS_RE.test(it)) continue; // out of date — never asserted as current
+            else if (STATEMENT_RE.test(it)) recorded.push(it);
             else if (FORWARD_RE.test(it)) forward.push(it);
             else recorded.push(it); // unclassifiable → a record, never a fabricated instruction
         }
@@ -4895,6 +4986,18 @@ function detectCaseLifecycleState(ci) {
     const sentenceAround = (text, idx, len) => quoteAround(text, idx, len, 220);
     const mk = (e, m) => ({ sender: (e.sender || '').trim() || 'unknown sender', time: (e.time || '').trim(), quote: sentenceAround(e.body, m.index, m[0].length) });
 
+    // A CONDITIONAL is not a confirmation. "Please wait for this week, if no response then close
+    // the case" sets up something to do LATER if nothing happens — it is not the customer saying
+    // the case is finished, and the next day that customer wrote "The device is online now, can
+    // you please look into it?". Read as consent it produced "Next steps: 1. Proceed with closing
+    // the case" on a case whose customer had just asked for work to start. The test is on the
+    // matched SENTENCE, so an unconditional "you can close the case" alongside an unrelated "if"
+    // elsewhere in the email is unaffected. Erring toward OPEN is the safe direction: a
+    // troubleshooting plan on a case that is quietly finishing costs a scroll; a closure
+    // instruction on a live case loses the customer's request.
+    const CONDITIONAL_CLOSURE_RE = /\bif\b|\bunless\b|\bin case\b|\botherwise\b|\bshould (?:there|we|you|they)\b|\bonce\b|\buntil\b|\bwhen (?:we|you|they|i)\b|\bwait for\b|\bno response\b|\bnot? (?:hear|heard|reply|replied|respond)\w*\b/i;
+    const conditionalAt = (e, m) => CONDITIONAL_CLOSURE_RE.test(sentenceAround(e.body, m.index, m[0].length));
+
     // Did the case visibly CARRY ON after a given point in the chain? Closure talk only means
     // the case is closing while it is the LAST thing that happened. A soft-closure nudge sits
     // mid-chain on most long cases ("we'll be marking this case with a soft closure … reply
@@ -4936,8 +5039,11 @@ function detectCaseLifecycleState(ci) {
             ? sameSenderName(e.sender, res.customerSender)
             : !isStaffEntry(e);
         const reopenM = isCust ? scan.match(REOPEN_SIGNAL) : null;
-        const consentM = isCust ? scan.match(CUSTOMER_CONSENT) : null;
-        const closingM = !isCust ? scan.match(SUPPORT_CLOSING) : null;
+        let consentM = isCust ? scan.match(CUSTOMER_CONSENT) : null;
+        let closingM = !isCust ? scan.match(SUPPORT_CLOSING) : null;
+        // "close it if we don't hear back" is a plan, not a verdict — see CONDITIONAL_CLOSURE_RE.
+        if (consentM && conditionalAt(e, consentM)) consentM = null;
+        if (closingM && conditionalAt(e, closingM)) closingM = null;
         if (res.state === 'unknown') {
             // A customer "still broken / new problem" beats a consent phrase in the same message.
             if (reopenM && !consentM) { res.state = 'active'; res.evidence.push({ ...mk(e, reopenM), kind: 'reopen' }); return res; }
@@ -5172,7 +5278,7 @@ const SYMPTOM_PLAYBOOK = [
     },
     {
         id: 'console-access',
-        match: /\b(cannot access|can'?t access|unable to (?:access|open|load|log ?in|sign ?in)|console (?:is )?(?:down|not loading|unavailable|inaccessible)|web ?console|webconsole|login (?:fails|failed|issue)|blank page)\b/i,
+        match: /\b(cannot access|can'?t access|unable to (?:access|open|load|log ?in|sign ?in)|console (?:is )?(?:down|not loading|unavailable|inaccessible)|web ?console|webconsole|login (?:fails|failed|issues?)|blank page)\b/i,
         title: 'Web console unreachable / will not load or sign in',
         checks: [
             'Confirm the "SOTI MobiControl Management Service" Windows service is running on the server — if it is stopped or crash-looping the console URL does not load at all, and restarting it restores the console in most outage cases.',
@@ -5185,7 +5291,7 @@ const SYMPTOM_PLAYBOOK = [
     },
     {
         id: 'devices-offline',
-        match: /\b(offline|not check(?:ing)? ?in|check-?in fail|disconnect\w*|not connect\w*|lost connection|dropped off|stopped reporting|unreachable device)\b/i,
+        match: /\b(offline|not check(?:ing)? ?in|check-?in fail\w*|disconnect\w*|not connect\w*|lost connection|dropped off|stopped reporting|unreachable devices?)\b/i,
         title: 'Devices showing offline / not checking in',
         checks: [
             'Verify the agent→Deployment Server path itself: agents connect OUTBOUND to the DS on TCP 5494 (Binary) and/or 443 (HTTPS). "The device has internet" does not prove that path — confirm the DS FQDN resolves from the device network and those ports are open to it.',
@@ -5239,7 +5345,7 @@ const SYMPTOM_PLAYBOOK = [
     },
     {
         id: 'sql-database',
-        match: /\b(sql|database|db\b|deadlock|timeout expired|login failed for user|cannot open database|connection pool)\b/i,
+        match: /\b(sql|database\w*|db\b|deadlock\w*|timeout expired|login failed for user|cannot open database|connection pool)\b/i,
         title: 'SQL / database faults behind the symptom',
         checks: [
             'Search MS.log and DS.log for SqlException, "Timeout expired", "Transaction was deadlocked", "Login failed for user", "Cannot open database" and "Connection pool exhausted" at the failure timestamps.',
@@ -5250,7 +5356,7 @@ const SYMPTOM_PLAYBOOK = [
     },
     {
         id: 'certificate',
-        match: /\b(certificat\w*|ssl|tls|handshake|scep|root ca|chain|crl|ocsp|expired cert)\b/i,
+        match: /\b(certificat\w*|ssl|tls|handshake\w*|scep|root ca|chain|crl|ocsp|expired cert)\b/i,
         title: 'Certificate / TLS trust failures',
         checks: [
             'Check expiry and chain of the server certificate actually presented on the failing endpoint, and that its subject/SAN matches the FQDN clients use.',
@@ -5283,7 +5389,15 @@ const SYMPTOM_PLAYBOOK = [
     },
     {
         id: 'profile-package',
-        match: /\b(profile|policy|package|application|app deploy\w*|oemconfig|script|run control)\b/i,
+        // PLURALS. `\bprofile\b` does not match "profiles" — the trailing \b fails on the "s" —
+        // and a support case never says "the profile is not visible", it says "profiles and
+        // packages are not visible". Every term in this family was singular-only, so the ONE
+        // family written for profile/package problems scored zero on a case whose subject line
+        // was "Not able to see configurations for a device … we are not able to see the profiles
+        // and packages deployed". The whole playbook then came back EMPTY, the model had no SOTI
+        // artefact to name, and "Next steps" fell back to the generic filler this table exists to
+        // prevent. "script\w*" is still safe: the leading \b keeps it out of "description".
+        match: /\b(profile\w*|polic(?:y|ies)|package\w*|application\w*|app deploy\w*|oemconfig\w*|script\w*|run control)\b/i,
         title: 'Profile / package deployment failures',
         checks: [
             'Search MS.log and DS.log for "Profile deployment failed", "Policy conflict", "Package deployment failed", "OEMConfig parse error" or "Script execution failed" at the deployment timestamp.',
@@ -5297,7 +5411,7 @@ const SYMPTOM_PLAYBOOK = [
         // NOT perform\w*: "after performing the Sync LifeGuard OTA Device Status action" and
         // "we will perform backend checks" are the VERB, and they scored the slowness family
         // onto cases with no slowness in them at all. Only the noun forms are symptom words.
-        match: /\b(slow\w*|performance|performing (?:slowly|poorly|badly)|latency|hang\w*|freez\w*|unresponsive|timeout|high cpu|memory)\b/i,
+        match: /\b(slow\w*|performance|performing (?:slowly|poorly|badly)|latency|hang\w*|freez\w*|unresponsive|timeout\w*|high cpu|memory)\b/i,
         title: 'Slowness / timeouts',
         checks: [
             'Correlate the slow periods with MS.log and DS.log timeout/deadlock entries and with SQL Server waits, blocking and deadlock reports at the same timestamps.',
@@ -5310,11 +5424,21 @@ const SYMPTOM_PLAYBOOK = [
 
 // Pick the playbook families this case's evidence actually supports and render them as
 // candidate checks. maxFamilies/maxChecks keep the block affordable on small local models.
+// opts.headline — the case's own SUBJECT LINE ("Windows Modern Agent high CPU"). The scored text
+// is the issue summary PLUS the newest few emails, and those emails are mostly logistics:
+// scheduling a call, chasing an update, "can you push the latest agent". On the high-CPU case
+// that chatter mentioned installing and upgrading agents often enough to make "Installer /
+// upgrade failure" outscore "Slowness / timeouts" — so a case about an agent pegging the CPU was
+// handed checks for reading "Return value 3" out of an MSI log. The subject line is the one
+// sentence the customer wrote to name their problem, so a family that matches THERE outranks one
+// that only matches the surrounding correspondence. When no family matches the subject (it may
+// be worded in terms the table does not carry), full-text scoring decides exactly as before.
 function buildSymptomPlaybook(caseText, opts = {}) {
     const text = String(caseText || '').replace(/\s+/g, ' ').trim();
     if (!text || text.length < 12) return '';
     const maxFamilies = opts.maxFamilies || 2;
     const maxChecks = opts.maxChecks || 6;
+    const headline = String(opts.headline || '').replace(/\s+/g, ' ').trim();
 
     const scored = [];
     for (const fam of SYMPTOM_PLAYBOOK) {
@@ -5324,6 +5448,7 @@ function buildSymptomPlaybook(caseText, opts = {}) {
         // tail must not outrank a family that genuinely matches two different signals.
         let score = new Set((text.match(new RegExp(fam.match.source, 'gi')) || []).map(s => s.toLowerCase())).size;
         if (fam.boost && fam.boost.test(text)) score += 3;
+        if (headline && fam.match.test(headline)) score += 5;
         scored.push({ fam, score });
     }
     if (!scored.length) return '';
@@ -5672,23 +5797,39 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
 }
 
 // ---------------------------------------------------------------------------
-// CASE-SUMMARY COVERAGE CHECK — verify the finished summary, don't trust it
+// CASE-SUMMARY REPAIR — fix the finished summary, don't annotate it
 // ---------------------------------------------------------------------------
 // Everything checked here was extracted from the chain by exact text match before the model ran,
 // so "did the answer carry it?" is a decidable question. A prompt rule is not a guarantee on a
-// local model; a check is. Anything missing is appended as a short, quotable note rather than
-// silently tolerated — and the two claims the chain can PROVE false (a closed/resolved state on
-// an open case, a confirmed outcome the customer said was unconfirmed) are called out as errors.
+// local model; a check is. What the check DOES with its verdict changed, though: it used to
+// append a visible "Automatic check against the email chain — missing from the summary above…"
+// block listing the gaps, which put the engineer's own QA homework on screen underneath an
+// answer they then had to correct by hand. It now repairs the summary in place and says nothing:
+//   • a decisive fact the summary dropped is written into the "Summary:" section as one plain
+//     sentence, in the same voice as the rest ("The customer has asked for this to be picked up
+//     with urgency.") — the fact lands where the prompt asked for it in the first place;
+//   • a claim the chain PROVES false (a closed/resolved state on an open case, a confirmed
+//     outcome the customer said was unconfirmed) has its sentence deleted — removing a false
+//     claim can never introduce a new one, and the surrounding summary still stands;
+//   • a point-in-time status the case has since moved past ("At the moment, they do not have a
+//     test device", written into an internal note five days before the customer described their
+//     test server and a second test device) is struck out wherever it appears.
+// The result is one clean summary that is ready to paste, with no QA apparatus to read past.
 // The word check is deliberately loose: a summary that says "production impact" satisfies the
 // production-impact signal however it phrases the rest of the sentence.
-// The check block is an internal QA aid, not part of the case record — it is rendered in the
-// chat but stripped from the one-click Copy (see mdToPlainText), so nothing here can ever be
-// pasted into Salesforce as if it were the summary itself.
+// Retained so the one-click Copy still strips the block from summaries generated BEFORE this
+// change and restored from saved state; nothing writes this marker any more.
 const SUMMARY_CHECK_MARKER = '---\n*Automatic check against the email chain (not part of the summary — this section is left out of the Copy):*';
 const COVERAGE_STOPWORDS = new Set(['the', 'this', 'that', 'they', 'them', 'their', 'there', 'have', 'has', 'had', 'been', 'was', 'were', 'and', 'but', 'not', 'with', 'from', 'into', 'for', 'our', 'your', 'his', 'her', 'its', 'are', 'is', 'be', 'to', 'of', 'in', 'on', 'at', 'it', 'we', 'us', 'you', 'yet', 'now', 'still', 'also', 'just', 'about', 'would', 'could', 'should', 'will', 'can', 'may', 'more', 'some', 'any', 'all', 'one', 'two', 'get', 'got', 'said', 'says', 'like', 'than', 'then', 'when', 'what', 'which', 'while', 'after', 'before', 'over', 'under', 'again', 'once', 'only', 'very', 'much', 'many', 'most', 'other', 'same', 'both', 'each', 'here', 'does', 'did', 'doing', 'done', 'make', 'made', 'take', 'took', 'come', 'came', 'give', 'gave', 'know', 'knew', 'want', 'need', 'appreciate', 'please', 'thanks', 'thank', 'hope', 'well', 'good', 'best', 'kind', 'regards']);
+// Content words of a quote, as bare words. Trailing punctuation is stripped BEFORE the set is
+// built: the raw match keeps it ("test device." → "device."), and a token carrying a full stop
+// only matches an answer that happens to end its sentence on the same word, so "…a test device
+// available" scored as a miss against "…a test device." Internal dots survive, because
+// "MS.log" and "v2026.1.1.1453" are exactly the tokens worth matching on.
 function coverageTokens(quote) {
-    return [...new Set(String(quote || '').toLowerCase().match(/[a-z][a-z0-9.'-]{3,}/g) || [])]
-        .filter(w => !COVERAGE_STOPWORDS.has(w.replace(/[.'-]+$/, '')));
+    const words = (String(quote || '').toLowerCase().match(/[a-z][a-z0-9.'-]{3,}/g) || [])
+        .map(w => w.replace(/[.'-]+$/, ''));
+    return [...new Set(words)].filter(w => w.length >= 4 && !COVERAGE_STOPWORDS.has(w));
 }
 // Present if the answer overlaps the quote substantially. A single shared word is NOT enough:
 // the summary that dropped "testing kept running into the C01687288 problem" still contained
@@ -5713,57 +5854,228 @@ const COVERAGE_SEMANTICS = {
     blocker: /\bblock\w*|\bprevent\w*|\bheld up\b|\bstuck\b|\bcannot proceed\b|\bderail\w*|\bgetting in the way\b|\bbefore (?:the |any )?(?:CPU |high[- ]CPU )?(?:issue|test\w*|verification)\b/i
 };
 
-function checkCaseSummaryCoverage(text, info) {
+// Where the "Summary:" section's prose starts and ends. Group 1 = the header, group 3 = the body.
+// The section ends at whatever header comes next — including the "Key Details" / "Case Timeline"
+// sections the prompt forbids but a small model still emits now and then, so a restored sentence
+// lands at the end of the summary paragraph rather than after a section that followed it.
+const SUMMARY_SECTION_RE = /((?:^|\n)[^\S\n]*\**[^\S\n]*summary[^\S\n]*\**[^\S\n]*:?[^\S\n]*\**[^\S\n]*)((?:\r?\n)*)([\s\S]*?)(?=\n[^\S\n]*\**[^\S\n]*(?:troubleshoots?\s+done|troubleshooting steps?|next steps?|key details|case timeline|current status|root cause|resolution)\b|$)/i;
+
+// Read the "Summary:" body, hand it to `fn`, and put what comes back in its place. Everything
+// this pass does is confined to that section: "Next steps: … close the case once the customer
+// confirms" is legitimate on an open case, and a "Troubleshoots done" bullet is a record of the
+// past that must never be rewritten.
+function editSummarySection(text, fn) {
     const src = String(text || '');
+    const m = src.match(SUMMARY_SECTION_RE);
+    if (!m) return src;
+    const edited = fn(m[3]);
+    if (edited === m[3]) return src;
+    return src.slice(0, m.index) + m[1] + m[2] + edited + src.slice(m.index + m[0].length);
+}
+
+// Sentence-split that survives the version strings these summaries are full of: "v2026.1.1.1453"
+// must not become four sentences, so a dot only ends a sentence when whitespace follows.
+function splitSentences(body) {
+    return String(body || '').split(/(?<=[.!?])(?=\s)/);
+}
+
+// One short sentence stating a decisive fact the summary dropped, written in the summary's own
+// voice so the repaired paragraph reads as one piece. Derived from the extracted quote — never
+// invented — and deliberately plain: this is the fact the prompt already demanded, restored.
+function repairSentenceFor(key, s) {
+    const q = String((s && s.quote) || '');
+    switch (key) {
+        case 'recurrence':
+            return 'The customer has reported that the issue returned after previously being treated as fixed.';
+        case 'urgency':
+            return 'The customer has explicitly asked for this to be picked up with urgency.';
+        case 'impact':
+            if (/\bproduction\b/i.test(q)) return 'The customer states this is now impacting production.';
+            if (/\b(?:customers?|users?|clients?)\b/i.test(q)) return 'The customer states their own users are affected.';
+            return 'The customer has stated the business impact this is causing.';
+        case 'unverified':
+            return 'The customer has not been able to confirm that outcome yet, so it remains unverified.';
+        case 'blocker': {
+            const ref = (q.match(/\bC0\d{6,8}\b/) || [])[0];
+            return `A separate fault${ref ? ` (${ref})` : ''} is blocking progress on this case.`;
+        }
+        default:
+            return '';
+    }
+}
+
+// Repair the finished summary against the facts extracted from the chain before the model ran.
+// Returns the corrected text; the verdict itself is logged, never shown.
+function checkCaseSummaryCoverage(text, info) {
+    let src = String(text || '');
     if (!src.trim() || !info) return src;
     const sig = info.signals || {};
     const lc = info.lc || {};
-    const missing = [];
-    const errors = [];
+    const applied = [];
 
+    // 1. STRIKE OUT what the chain proves false, before anything is measured against the text —
+    //    a sentence that is about to be deleted must not count as covering the fact it gets wrong.
+    const falseClaims = [];
+    if (lc.state && lc.state !== 'closure') {
+        falseClaims.push({
+            why: 'claimed closure on a case the chain shows is still open',
+            re: /\b(?:case is (?:now )?(?:closed|closing|resolved)|in closure|proceed(?:ing)? (?:with|to) closure|soft closure|marked (?:as )?resolved)\b/i
+        });
+    }
+    if (sig.unverified) {
+        falseClaims.push({
+            why: 'reported a confirmed test result the customer said could not be confirmed',
+            re: /\b(?:confirmed|verified|validated)\b[^.\n]{0,40}\b(?:no change|no difference|did not (?:fix|resolve|help)|does not (?:fix|resolve|help)|unchanged|persists?)\b/i
+        });
+    }
+    if (falseClaims.length) {
+        src = editSummarySection(src, (body) => {
+            const sentences = splitSentences(body);
+            const kept = sentences.filter(s => !falseClaims.some(c => c.re.test(s)));
+            // Never hand back an empty summary — a flawed paragraph beats a missing one, and the
+            // repair below still restores whatever fact the deleted sentence got wrong.
+            if (!kept.length || kept.join('').trim().length < 40) return body;
+            if (kept.length !== sentences.length) {
+                for (const c of falseClaims) if (sentences.some(s => c.re.test(s))) applied.push(`removed: ${c.why}`);
+            }
+            return kept.join('').replace(/[^\S\n]{2,}/g, ' ');
+        });
+    }
+
+    // 2. STRIKE OUT any point-in-time status the case has moved past. detectChainSignals keeps
+    //    these out of the prompt, but the model reads the raw chain too, so the claim can still
+    //    reach the answer on its own — most often as a "Troubleshoots done" bullet, which is why
+    //    this one pass is allowed to touch a line outside the Summary section.
+    src = stripSupersededStatus(src, sig.staleStatements, applied);
+
+    // 3. RESTORE the decisive facts it dropped. Measured against the text as it now stands.
+    const missing = [];
     const wants = [
-        ['recurrence', sig.recurrence, 'the RECURRENCE the customer reported'],
-        ['urgency', sig.urgency, "the customer's explicit request for urgency/priority"],
-        ['impact', sig.impact, 'the business / production impact the customer stated'],
-        ['unverified', sig.unverified, 'the customer saying this could NOT be confirmed yet'],
-        ['blocker', sig.blocker, 'the separate problem BLOCKING progress']
+        ['recurrence', sig.recurrence],
+        ['urgency', sig.urgency],
+        ['impact', sig.impact],
+        ['unverified', sig.unverified],
+        ['blocker', sig.blocker]
     ];
-    for (const [key, s, label] of wants) {
+    for (const [key, s] of wants) {
         if (!s || !s.quote) continue;
         const semantic = COVERAGE_SEMANTICS[key];
         const covered = (semantic && semantic.test(src)) || coverageHit(src, s.quote);
-        if (!covered) missing.push({ label, quote: s.quote, who: s.sender, when: s.time });
+        if (covered) continue;
+        const sentence = repairSentenceFor(key, s);
+        if (sentence) { missing.push(sentence); applied.push(`restored: ${key}`); }
     }
-
     // Other SOTI case numbers referenced in the chain: an exact string, so this is exact.
+    // referencedCaseNumbers already excludes this case's own number (including when the
+    // case-number field is empty and the only number in the chain is its own).
     try {
-        const own = String(info.caseNumber || '').trim().toUpperCase();
-        const refs = [...new Set(String(info.chain || '').match(/\bC0\d{6,8}\b/g) || [])]
-            .filter(n => n.toUpperCase() !== own && !src.includes(n));
-        if (refs.length) missing.push({ label: `the referenced SOTI case number${refs.length === 1 ? '' : 's'} ${refs.join(', ')}`, quote: '' });
+        const refs = referencedCaseNumbers(info.chain, info.caseNumber).filter(n => !src.includes(n));
+        if (refs.length) {
+            missing.push(`The chain also references case ${refs.join(' and ')}.`);
+            applied.push(`restored: referenced case ${refs.join(', ')}`);
+        }
     } catch (e) { }
 
-    // A claim the chain positively contradicts. Checked only in the Summary section: "Next
-    // steps: … close the case once the customer confirms" is legitimate on an open case.
-    const summaryPart = (() => {
-        const m = src.match(/(^|\n)\s*\**\s*summary\s*\**\s*:?([\s\S]*?)(?=\n\s*\**\s*(?:troubleshoots?\s+done|next steps?)\b|$)/i);
-        return m ? m[2] : src;
-    })();
-    if (lc.state && lc.state !== 'closure' && /\b(?:case is (?:now )?(?:closed|closing|resolved)|in closure|proceed(?:ing)? (?:with|to) closure|soft closure|marked (?:as )?resolved)\b/i.test(summaryPart)) {
-        errors.push('the summary above describes this case as closed / in closure, but the chain shows it is still OPEN (the case state was verified from the correspondence)');
-    }
-    if (sig.unverified && /\b(?:confirmed|verified|validated)\b[^.\n]{0,40}\b(?:no change|no difference|did not (?:fix|resolve|help)|does not (?:fix|resolve|help)|unchanged|persists?)\b/i.test(summaryPart)) {
-        errors.push(`the summary above reports a confirmed test result, but ${(sig.unverified.sender || 'the customer')} wrote that it could not be confirmed: "${sig.unverified.quote}"`);
-    }
+    if (missing.length) src = appendToSummarySection(src, missing.join(' '));
+    if (applied.length) console.info('[Case summary] repaired —', applied.join('; '));
+    return src;
+}
 
-    if (!missing.length && !errors.length) return src;
-    const parts = [];
-    if (errors.length) parts.push(`**Correction needed:** ${errors.join('; also, ')}.`);
-    if (missing.length) {
-        parts.push(`**Missing from the summary above** (extracted verbatim from the chain, so each one is a fact this case turns on):\n` +
-            missing.map(m => `- ${m.label}${m.quote ? ` — ${m.who || 'the customer'}${m.when ? ` (${m.when})` : ''}: "${m.quote}"` : ''}`).join('\n'));
+// Add sentences to the end of the "Summary:" paragraph (or to the end of the answer when it has
+// no section headers at all, e.g. a summary the model wrote as free prose).
+function appendToSummarySection(text, addition) {
+    const src = String(text || '');
+    const add = String(addition || '').trim();
+    if (!add) return src;
+    let placed = false;
+    const out = editSummarySection(src, (body) => {
+        placed = true;
+        const trimmed = body.replace(/\s+$/, '');
+        const trailing = body.slice(trimmed.length);
+        if (!trimmed) return add + trailing;
+        return `${trimmed}${/[.!?:]$/.test(trimmed) ? '' : '.'} ${add}${trailing}`;
+    });
+    return placed ? out : `${src.replace(/\s+$/, '')} ${add}`;
+}
+
+// Does this text assert a negative? Needed to tell "the customer does not have a test device"
+// from "collect a Device Debug Report from the test device": both talk about a test device, only
+// one restates the stale claim.
+const STATUS_NEGATION_RE = /\b(?:no|not|never|none|without|lacks?|lacking|unable|cannot)\b|n[’']t\b/i;
+
+// A section header can share its line with the text that follows it ("Summary: The customer…"),
+// so a pass that skips header lines wholesale would skip that whole paragraph. Split the header
+// off and return [header, rest] so the body can still be examined; [null, line] when there is no
+// header on this line.
+const SECTION_HEADER_SPLIT_RE = new RegExp(`^(\\s*\\**\\s*(?:${HISTORICAL_SECTION_SRC}|${FORWARD_SECTION_SRC})\\s*\\**\\s*:\\s*)([\\s\\S]*)$`, 'i');
+function splitSectionHeader(line) {
+    const m = String(line).match(SECTION_HEADER_SPLIT_RE);
+    return m ? [m[1], m[2]] : [null, line];
+}
+
+// Delete every line/sentence that restates a status the case has since moved past. Four
+// conditions must ALL hold, because deleting a line the engineer needed is a worse failure than
+// leaving one stale line the prompt no longer asks for:
+//   1. it is NOT in "Next steps" — a step is an instruction, never a status claim, so the
+//      forward-looking section is off limits to this pass entirely;
+//   2. it is itself phrased as a point-in-time claim ("at the moment", "currently", "at
+//      present"). This is what separates the paraphrase being struck out ("At present the
+//      customer does not have a test device") from the legitimate line that shares its nouns
+//      ("A second test device was enrolled last Friday and still has no agent UI"). A bare
+//      restatement with no time marker therefore survives — accepted deliberately: nothing asks
+//      the model to write one any more, so precision is worth more here than reach;
+//   3. it reuses 60%+ of the stale statement's content words (≥2 of them), which catches the
+//      paraphrase without firing on a line that merely shares one;
+//   4. it has the SAME polarity as the statement. Word overlap cannot see negation, so without
+//      this a summary line saying the opposite of the stale claim would be deleted for agreeing
+//      with it.
+function stripSupersededStatus(text, staleStatements, applied) {
+    const src = String(text || '');
+    const stale = (staleStatements || [])
+        .map(s => ({ toks: coverageTokens(s), neg: STATUS_NEGATION_RE.test(s) }))
+        .filter(s => s.toks.length >= 3);
+    if (!src.trim() || !stale.length) return src;
+    const matches = (line) => {
+        if (!PERISHABLE_MARKER_RE.test(line)) return false;
+        const lower = line.toLowerCase();
+        const neg = STATUS_NEGATION_RE.test(line);
+        return stale.some(s => {
+            if (s.neg !== neg) return false;
+            const hit = s.toks.filter(t => lower.includes(t)).length;
+            return hit >= 2 && (hit / s.toks.length) >= 0.6;
+        });
+    };
+    const kept = [];
+    let removed = 0;
+    let inNextSteps = false;
+    for (const line of src.split('\n')) {
+        let head = null, body = line;
+        if (FORWARD_SECTION_RE.test(line)) {
+            inNextSteps = true;
+            [head, body] = splitSectionHeader(line);
+        } else if (HISTORICAL_SECTION_RE.test(line)) {
+            inNextSteps = false;
+            [head, body] = splitSectionHeader(line);
+        }
+        if (inNextSteps || !body.trim()) { kept.push(line); continue; }
+        // A whole bullet goes; inside a paragraph only the offending sentence does.
+        if (!head && /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(body)) {
+            if (matches(body.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, ''))) { removed++; continue; }
+            kept.push(line);
+            continue;
+        }
+        if (!matches(body)) { kept.push(line); continue; }
+        const sentences = splitSentences(body);
+        const survivors = sentences.filter(s => !matches(s));
+        if (survivors.length === sentences.length) { kept.push(line); continue; }
+        removed += sentences.length - survivors.length;
+        const rebuilt = survivors.join('').replace(/[^\S\n]{2,}/g, ' ').trim();
+        if (rebuilt) kept.push((head || '') + rebuilt);
+        else if (head) kept.push(head.replace(/\s+$/, ''));
     }
-    return src + `\n\n${SUMMARY_CHECK_MARKER}\n\n${parts.join('\n\n')}`;
+    if (!removed) return src;
+    if (applied) applied.push(`removed ${removed} out-of-date status claim${removed === 1 ? '' : 's'}`);
+    return renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
 }
 
 // Deterministic OLDEST-FIRST chronology of the email chain (date — sender — gist) for
@@ -5847,16 +6159,10 @@ function buildChainChronology(ci, purpose, opts = {}) {
         : `\nTHE NEWEST MESSAGE (the LAST line above) is from ${(newest.sender || 'unknown').trim()}${newestWhen ? `, sent ${newestWhen}` : ''} — the "Current Status" MUST be based on THIS message and attributed to THIS author, not an older one.`;
     // Other SOTI case numbers referenced inside the emails are gold for troubleshooting
     // ("this happened before and was resolved in case X") — extract them deterministically
-    // so they can never be lost to gisting/truncation. The CURRENT case's own number (from
-    // the field, or the most frequent number in the chain — it appears in every quoted
-    // subject line) is excluded.
+    // so they can never be lost to gisting/truncation. The case's OWN number is excluded.
     let refCasesLine = '';
     try {
-        const counts = new Map();
-        for (const m of raw.match(/\bC0\d{6,8}\b/g) || []) counts.set(m, (counts.get(m) || 0) + 1);
-        let own = ((ci && ci.case_number) || '').trim().toUpperCase();
-        if (!own && counts.size > 1) own = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-        const refs = [...counts.keys()].filter(n => n.toUpperCase() !== own);
+        const refs = referencedCaseNumbers(raw, (ci && ci.case_number) || '');
         if (refs.length) {
             // NOT only "an earlier case that fixed this": on the case that prompted this change
             // the referenced case was an ACTIVE, unrelated fault blocking the test the customer
@@ -6596,6 +6902,22 @@ function buildCaseSymptomText(maxChars = 900) {
         }
     } catch (e) { /* no chain, or unparseable — the issue summary alone still works */ }
     return parts.join(' ').slice(0, maxChars);
+}
+
+// The case's SUBJECT LINE — the first real line of the issue summary, before the Salesforce
+// template fields start ("Windows Modern Agent high CPU", "Not able to see configurations for a
+// device"). It is the customer's own one-line statement of the problem, and buildSymptomPlaybook
+// weights a family that matches it above one that only matches the surrounding email chatter.
+// Returns '' when the summary opens straight into a template field, which leaves the playbook's
+// full-text scoring to decide on its own.
+function buildCaseHeadline(maxChars = 160) {
+    const raw = (buildEffectiveIssueSummary(null) || '').trim();
+    if (!raw) return '';
+    for (const line of raw.split('\n')) {
+        const t = stripCaseTemplateLabels(line.trim());
+        if (t.length >= 6) return t.slice(0, maxChars);
+    }
+    return '';
 }
 
 function buildCaseResearchQuery() {
@@ -10668,8 +10990,9 @@ async function matchLearnedInsights(txt, logs) {
 // (Salesforce case-note fields are plain text — raw **bold**/## markers look broken there).
 function mdToPlainText(mdText) {
     let t = String(mdText || '');
-    // The Case Summary's automatic coverage check is a QA aid for the engineer reading the chat,
-    // never part of what gets pasted into the case record — cut it and everything after it.
+    // Case summaries are repaired in place now and carry no QA block, but one generated by an
+    // older build and restored from saved state still can — cut it and everything after it so an
+    // old answer can never paste an internal check into the case record.
     const checkAt = t.indexOf(SUMMARY_CHECK_MARKER);
     if (checkAt > 0) t = t.slice(0, checkAt).trimEnd();
     t = t.replace(/```[a-zA-Z]*\n?/g, '').replace(/`([^`]*)`/g, '$1'); // code fences/inline code
@@ -10871,8 +11194,9 @@ ${body}
 //     poison the research keyword scoring). Ignored when skipResearch is set.
 //   copyKind — tag the assistant reply so it renders a one-click plain-text Copy button.
 //   verifySummary — { signals, lc, chain, caseNumber } from the Case Summary action: after the
-//     answer is generated it is checked against those deterministically-extracted facts, and
-//     anything dropped (or provably contradicted) is appended as a visible note.
+//     answer is generated it is checked against those deterministically-extracted facts and
+//     REPAIRED in place — a dropped fact is written back into the summary, a provably false or
+//     out-of-date claim is struck out. The repair is silent; only the console records it.
 //   chainCap — char cap for the [EMAIL CHAIN] context section, for a turn whose user message
 //     already carries a complete per-message scaffold of the same chain.
 //   forceChainDigest — serve this turn from buildFullChainSummary (the whole-chain map-reduce
@@ -11836,12 +12160,14 @@ ${imgContext}`;
             } catch (e) { console.warn('Case answer post-validation failed', e); }
         }
 
-        // Case Summary only: check the finished summary against the facts extracted from the
-        // chain before the model ran, and append what it dropped or got provably wrong.
+        // Case Summary only: repair the finished summary against the facts extracted from the
+        // chain before the model ran — restore what it dropped, strike out what it got provably
+        // wrong or what the case has moved past. Silent: the engineer gets a summary, not a QA
+        // report to work through.
         if (opts.verifySummary && finalAnswer.trim()) {
             try {
                 finalAnswer = checkCaseSummaryCoverage(finalAnswer, opts.verifySummary);
-            } catch (e) { console.warn('Case summary coverage check failed', e); }
+            } catch (e) { console.warn('Case summary repair failed', e); }
         }
 
         // STILL cut off after the continuation rounds — say so. Silently presenting a report that
@@ -12728,7 +13054,7 @@ async function generateCaseSummary() {
     const logAccess = isOpen ? buildLogAccessDirective('summary', small) : '';
     // One family / four checks on a CPU-bound model: the whole quick-action prompt lives inside
     // ~10K characters there, and the email chain must not lose room to a checklist.
-    const playbook = isOpen ? buildSymptomPlaybook(buildCaseSymptomText(), small ? { maxFamilies: 1, maxChecks: 4 } : {}) : '';
+    const playbook = isOpen ? buildSymptomPlaybook(buildCaseSymptomText(), { headline: buildCaseHeadline(), ...(small ? { maxFamilies: 1, maxChecks: 4 } : {}) }) : '';
     const staffNames = (lc.sotiStaff || []).filter(s => s && s !== lc.agentSender);
     const peopleLine = (lc.customerSender || lc.agentSender)
         ? `\n- PEOPLE (exact, from the chain — these roles are VERIFIED, never swap them): ${[
@@ -12812,9 +13138,9 @@ ${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${chronology ? '\n\
         // section is capped to the newest messages' verbatim text rather than repeating the whole
         // correspondence in a budget the scaffold and the directives need.
         chainCap: chainEntryCount >= 8 ? (small ? 3000 : 8000) : undefined,
-        // Deterministic coverage check on the finished answer: the decisive facts were extracted
-        // from the chain by exact text match, so whether the summary carries them is checkable
-        // rather than a matter of trust.
+        // Deterministic repair of the finished answer: the decisive facts were extracted from the
+        // chain by exact text match, so whether the summary carries them is checkable rather than
+        // a matter of trust — and a gap is closed rather than reported.
         verifySummary: { signals, lc, chain: chainRaw, caseNumber: $('caseNum').value || '' }
     });
 }
@@ -12911,7 +13237,7 @@ async function fixCustomerIssue() {
     const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
     const small = isSmallLocalModel();
     const logAccess = buildLogAccessDirective('fix', small);
-    const playbook = buildSymptomPlaybook(buildCaseSymptomText(), small ? { maxFamilies: 1, maxChecks: 4 } : {});
+    const playbook = buildSymptomPlaybook(buildCaseSymptomText(), { headline: buildCaseHeadline(), ...(small ? { maxFamilies: 1, maxChecks: 4 } : {}) });
 
     const prompt = `You are the senior SOTI support engineer on this case. Solve the customer's reported issue END TO END and give me the complete fix I can act on right now. Be decisive and specific — this must be an actual resolution, not a list of generic suggestions.
 
