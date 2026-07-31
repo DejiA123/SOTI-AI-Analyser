@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.5.6 — closure detection fixed end to end: "away on personal leave" auto-replies are recognised (five of them no longer count as the case carrying on past a confirmed closure); customer confidentiality footers stripped, so a legal disclaimer can no longer be quoted as the customer "demanding priority"; "please proceed with closing the case" / "appears to have been resolved" read as consent; the primary contact is the person support actually corresponds with, not whoever opened the case, and addressing SOTI no longer makes you SOTI staff; a plan recorded before the case moved on is checked rather than obeyed, and a note\'s "the customer has not responded" is dropped once they have; a reopen signal beats a consent phrase in the same message; closed cases spend the freed log-access/checklist budget on the case history, so every message reaches "Troubleshoots done"', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.5.7 — the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel. Previously — build 2.5.6, closure detection fixed end to end: "away on personal leave" auto-replies are recognised (five of them no longer count as the case carrying on past a confirmed closure); customer confidentiality footers stripped, so a legal disclaimer can no longer be quoted as the customer "demanding priority"; "please proceed with closing the case" / "appears to have been resolved" read as consent; the primary contact is the person support actually corresponds with, not whoever opened the case, and addressing SOTI no longer makes you SOTI staff; a plan recorded before the case moved on is checked rather than obeyed, and a note\'s "the customer has not responded" is dropped once they have; a reopen signal beats a consent phrase in the same message; closed cases spend the freed log-access/checklist budget on the case history, so every message reaches "Troubleshoots done"', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -217,6 +217,330 @@ function stripEmailChainMarkers(text) {
         .replace(/\bMessage\s+\d+\b(?!\s*(?:of|\)))/g, "an email in the chain");
 }
 
+// ---------------------------------------------------------------------------
+// PROMPT-SCAFFOLD LEAK GUARD
+// ---------------------------------------------------------------------------
+// Every case-writing prompt is assembled from bracketed ALL-CAPS blocks — [CASE HISTORY],
+// [CASE STATE], [LOG ACCESS], [MCMR RULE], [SOTI CHECKS THAT FIT THIS SYMPTOM — …] — that
+// exist ONLY inside the prompt. A small local model does not read them as its own briefing:
+// it reads them as places the ENGINEER can go, and writes next steps like
+//     2. Review the [SOTI CHECKS…]/research blocks for any findings related to version 26.1.0
+//     3. Check the [MCMR RULE] block for a matching fix and recommend the upgrade if found
+// Both are worse than useless: there is no such block anywhere the engineer can open, and the
+// step hands back the exact work the model was asked to do. Deleting the label on its own is
+// no fix either — it leaves "Review the /research blocks for any findings".
+// So a reference is CLASSIFIED, not merely erased:
+//   • a block that names something the engineer knows ([RELEASE NOTES], [CASE HISTORY],
+//     [CALL LOG]) is rewritten into plain English and its sentence survives intact;
+//   • a block that is pure machinery ([MCMR RULE], [LOG ACCESS], [SOTI CHECKS…]) has its
+//     reference removed — and when the whole point of the step was to go and read it, the
+//     step is deleted, the same treatment "verify the configuration" already gets;
+//   • a "per the [X] directive," / "(see the [X] block)" clause wrapped around a REAL
+//     instruction is removed on its own, leaving the instruction standing.
+// Fenced code and raw log lines are never touched: a quoted log line is evidence, not prose.
+// Whitespace inside a label is `\s{1,3}`, never `\s+`: a bounded run cannot backtrack across a
+// pathological line of thousands of spaces, and no real label ever holds more than a space or two.
+const _rxEsc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s{1,3}');
+
+// name — exactly as the prompt spells it (longest variants are matched first).
+// say  — what the answer should say instead; '' when the block has no engineer-facing
+//        meaning at all, in which case the reference is removed rather than reworded.
+// drop — whether finding this block in a step is grounds for deleting the step. False for
+//        the inline chain markers ([INTERNAL], [CALL LOG], [OCR]), which mark real content
+//        inside the case data rather than a section of the prompt.
+const PROMPT_BLOCKS = [
+    { name: 'SOTI CHECKS THAT FIT THIS SYMPTOM', say: '', drop: true },
+    { name: 'SOTI CHECKS', say: '', drop: true },
+    { name: 'MCMR CITATION RULE', say: '', drop: true },
+    { name: 'MCMR RULE', say: '', drop: true },
+    { name: 'LOG ACCESS', say: '', drop: true },
+    { name: 'CASE STATE', say: '', drop: true },
+    { name: 'DECISIVE CASE SIGNALS', say: '', drop: true },
+    { name: 'CASE SIGNALS', say: '', drop: true },
+    { name: 'RAW LOG COVERAGE NOTE', say: '', drop: true },
+    { name: 'END CONVERSATION SO FAR', say: '', drop: true },
+    { name: 'CONVERSATION SO FAR', say: 'this conversation', drop: true },
+    { name: 'CASE HISTORY', say: 'the case history', drop: true },
+    { name: 'EMAIL CHRONOLOGY', say: 'the email chain', drop: true },
+    { name: 'EMAIL CHAIN', say: 'the email chain', drop: true },
+    { name: 'ISSUE SUMMARY', say: 'the issue description', drop: true },
+    { name: 'REPORTED ISSUE / CASE SYMPTOM', say: 'the reported issue', drop: true },
+    { name: 'REPORTED ISSUE', say: 'the reported issue', drop: true },
+    { name: 'CASE SYMPTOM', say: 'the reported symptom', drop: true },
+    { name: 'CASE CONTEXT', say: 'the case details', drop: true },
+    { name: 'CASE ISSUE', say: 'the reported issue', drop: true },
+    { name: 'CASE', say: 'the case details', drop: true },
+    { name: 'SCRAPPED TEXT FROM ATTACHED IMAGES', say: 'the text read from the attached images', drop: true },
+    { name: 'FAILURE-ANCHORED RAW WINDOWS', say: 'the attached logs', drop: true },
+    { name: 'FOCUSED RAW LOG CONTEXT', say: 'the attached logs', drop: true },
+    { name: 'INSTALLER LOG ANALYSIS', say: 'the installer log analysis', drop: true },
+    { name: 'EXACT OCCURRENCE COUNT', say: 'the occurrence count', drop: true },
+    { name: 'LOG ANALYSIS DATA', say: 'the log analysis', drop: true },
+    { name: 'FULL LOG CONTENT', say: 'the attached logs', drop: true },
+    { name: 'ATTACHED LOGS', say: 'the attached logs', drop: true },
+    { name: 'DIAGNOSTIC DATA', say: 'the diagnostic data', drop: true },
+    { name: 'LOG HEAD', say: 'the attached logs', drop: true },
+    { name: 'LEARNED FROM PAST CONFIRMED CASES', say: 'past confirmed cases', drop: true },
+    { name: 'REFERENCED SOTI CASES', say: 'the earlier SOTI cases referenced in the chain', drop: true },
+    { name: 'SUPPORTING REFERENCE', say: 'the supporting reference', drop: true },
+    { name: 'RELEASE NOTES / KNOWN FIXES', say: 'the release notes', drop: true },
+    { name: 'SOTI OFFLINE RELEASE NOTES', say: 'the release notes', drop: true },
+    { name: 'RELEASE NOTES', say: 'the release notes', drop: true },
+    { name: 'OFFLINE PULSE KNOWLEDGE MATCHES', say: 'the SOTI documentation', drop: true },
+    { name: 'SOTI PULSE COMMUNITY THREADS', say: 'the SOTI Pulse community threads', drop: true },
+    { name: 'SOTI PULSE CONSOLE DATA', say: 'the MobiControl release notes', drop: true },
+    { name: 'SOTI PULSE AGENT DATA', say: 'the Android Agent release notes', drop: true },
+    { name: 'PULSE SEARCH', say: 'the SOTI Pulse search results', drop: true },
+    { name: 'DOCS SEARCH', say: 'the SOTI documentation', drop: true },
+    { name: 'DEEP RESEARCH', say: 'the SOTI documentation', drop: true },
+    { name: 'LATEST MOBICONTROL VERSION', say: 'the latest MobiControl version', drop: true },
+    { name: 'ALL MOBICONTROL VERSIONS', say: 'the MobiControl versions', drop: true },
+    { name: 'LATEST ANDROID AGENT VERSION', say: 'the latest Android Agent version', drop: true },
+    { name: 'ALL ANDROID AGENT VERSIONS', say: 'the Android Agent versions', drop: true },
+    { name: 'LATEST IDENTITY VERSION', say: 'the latest SOTI Identity version', drop: true },
+    { name: 'ALL IDENTITY VERSIONS', say: 'the SOTI Identity versions', drop: true },
+    { name: 'CURRENT DATE & TIME', say: 'the current date', drop: true },
+    { name: 'USER ATTACHED AN IMAGE WHICH YOU SAW IN A PREVIOUS TURN', say: 'the attached image', drop: true },
+    { name: 'TASK — TROUBLESHOOTING PLAN', say: '', drop: true },
+    { name: 'TASK', say: '', drop: true },
+    { name: 'NEW — ADDED SINCE LAST MESSAGE', say: 'newly attached', drop: false },
+    { name: 'NEW', say: 'newly attached', drop: false },
+    { name: 'MC VERSIONS', say: 'the MobiControl versions', drop: true },
+    { name: 'AGENT VERSIONS', say: 'the Android Agent versions', drop: true },
+    { name: 'IDENTITY VERSIONS', say: 'the SOTI Identity versions', drop: true },
+    // Markers that sit INSIDE the case data the engineer pasted, not sections of the prompt.
+    // Worth de-bracketing so the answer reads as prose, never worth deleting a line over.
+    { name: 'CALL LOG', say: 'the call log', drop: false },
+    { name: 'INTERNAL', say: 'internal', drop: false },
+    { name: 'OCR', say: 'the text read from the attached image', drop: false }
+];
+const _blocksLongestFirst = PROMPT_BLOCKS.slice().sort((a, b) => b.name.length - a.name.length);
+const _nameAlt = _blocksLongestFirst.map(b => _rxEsc(b.name)).join('|');
+// Only distinctive multi-word names may be recognised WITHOUT their brackets, and only when
+// a structural noun follows ("the LOG ACCESS directive"). Without that gate a bare "CASE" or
+// "INTERNAL" in ordinary prose would be rewritten.
+const _isDistinctive = (b) => b.name.length >= 8 && b.name.includes(' ');
+const _bareAlt = _blocksLongestFirst.filter(_isDistinctive).map(b => _rxEsc(b.name)).join('|');
+const _dropAlt = _blocksLongestFirst.filter(b => b.drop).map(b => _rxEsc(b.name)).join('|');
+const _bareDropAlt = _blocksLongestFirst.filter(b => b.drop && _isDistinctive(b)).map(b => _rxEsc(b.name)).join('|');
+
+// Deliberately excludes "note", "data", "part" and "field": those are ordinary nouns, and
+// swallowing one turns "Taran's [INTERNAL] note" into "Taran's internal".
+const _BLOCK_NOUN = '(?:\\s{1,3}(?:block|section|directive|rule|list|entry|header|heading|scaffold|instruction|guideline)s?|\\s{1,3}entries)?';
+const _BLOCK_LOC = '(?:\\s{1,3}(?:above|below|earlier|later|provided|supplied|attached|in\\s{1,3}this\\s{1,3}prompt|of\\s{1,3}this\\s{1,3}prompt|in\\s{1,3}the\\s{1,3}prompt))?';
+const _BLOCK_GLUE = '(?:\\s{0,3}/\\s{0,3}[A-Za-z][A-Za-z-]*)?';   // "[SOTI CHECKS…]/research"
+const _BLOCK_ART = '(?:\\b(?:the|this|that|those|these|a|an|its|our|your)\\s{1,3})?';
+// A reference in every shape the model writes it:
+//   [MCMR RULE] / [MCMR RULE — ABSOLUTE. …]  fully bracketed, name alone or whole header
+//   [MCMR RULE                               opening bracket, never closed (a truncated echo,
+//                                            and what a half-arrived streaming chunk looks like)
+//   MCMR RULE]                               the close survived, the open did not
+//   the MCMR RULE block                      no brackets, but carrying its structural noun
+// Every whitespace run here is BOUNDED (\s{0,3}, never \s*). An unbounded run inside a pattern
+// that is scanned at every character position costs O(n) per position on a line of runaway
+// whitespace, which is O(n²) over the line — a 40 KB line took five seconds before this.
+const _shape = (alt, bare) => '(?:' + [
+    `\\[\\s{0,3}(?:${alt})[^\\]\\n]{0,200}\\]`,
+    `\\[\\s{0,3}(?:${alt})\\b(?![^\\]\\n]{0,200}\\])[.…]{0,3}`,
+    `\\b(?:${bare})\\s{0,3}\\]`,
+    `\\b(?:${bare})\\b(?=\\s{1,3}(?:block|section|directive|rule|list|heading|header)s?\\b)`
+].join('|') + ')';
+const _refSrc = _shape(_nameAlt, _bareAlt);
+const _dropRefSrc = _shape(_dropAlt, _bareDropAlt);
+const _phraseSrc = _BLOCK_ART + _refSrc + _BLOCK_GLUE + _BLOCK_NOUN + _BLOCK_LOC;
+
+const SCAFFOLD_PROBE_RE = new RegExp(_refSrc, 'i');
+// "As stated in the [X] block, do the real thing" — the clause goes, the instruction stays.
+const SCAFFOLD_LEADIN_RE = new RegExp(
+    `(^|[.!?]\\s{1,3}|\\n\\s{0,3}(?:[-*•]|\\d+[.)])\\s{0,3})` +
+    `(?:as\\s{1,3}(?:stated|noted|described|listed|shown|set\\s{1,3}out|required|instructed|directed|indicated|specified|defined|mandated|outlined)\\s{1,3}(?:in|by|under|within)\\s{1,3}` +
+    `|as\\s{1,3}per\\s{1,3}|per\\s{1,3}|according\\s{1,3}to\\s{1,3}|following\\s{1,3}|in\\s{1,3}line\\s{1,3}with\\s{1,3}|in\\s{1,3}accordance\\s{1,3}with\\s{1,3}|in\\s{1,3}keeping\\s{1,3}with\\s{1,3}|guided\\s{1,3}by\\s{1,3}|referring\\s{1,3}to\\s{1,3}|drawing\\s{1,3}on\\s{1,3}|based\\s{1,3}on\\s{1,3})` +
+    // `(?:\s{0,3}[,:;])?\s{0,3}`, never `\s*[,:;]?\s*`: two unbounded runs separated by an
+    // OPTIONAL single character can split a whitespace run every possible way, which is
+    // exponential. Every optional group here consumes a literal, and every run is bounded.
+    `(${_phraseSrc})(?:\\s{0,3}[,:;])?\\s{0,3}`, 'gi');
+// "…, as required by the [X] directive." / "… (see the [X] block)". Deliberately NOT a bare
+// "in"/"from": "the fix listed in [RELEASE NOTES]" is a real sentence and only needs the label
+// reworded, which the phrase pass below does. Only an explicit cross-reference is deleted.
+const SCAFFOLD_TRAILER_RE = new RegExp(
+    `(?:\\s{0,3}[,;])?\\s{0,3}\\(?(?:see(?:\\s{1,3}also)?|refer\\s{1,3}to|as\\s{1,3}(?:stated|noted|listed|described|required|instructed|directed|specified)\\s{1,3}(?:in|by|under))\\s{1,3}(${_phraseSrc})\\s{0,3}\\)?(?=[.,;:)\\]]|$)`, 'gi');
+const SCAFFOLD_PHRASE_RE = new RegExp(_phraseSrc, 'gi');
+// A step whose MAIN verb takes a prompt block as its object. Anchored at the start of the step
+// on purpose: "Collect MS.log from the Management Server (see the [LOG ACCESS] directive)" also
+// contains a consult verb next to a reference, and that step must survive with its parenthetical
+// trimmed. Group 1 is the short lead-in clause a step may open with ("For a matching fix, check
+// the [MCMR RULE] block") — allowed only when it carries no concrete artefact of its own, so
+// "Collect MS.log, then review the [MCMR RULE] block" is never mistaken for a pure pointer.
+const _CONSULT = 'review|re-?read|check|consult|read|refer\\s{1,3}to|see|follow|use|utili[sz]e|apply|cross[- ]?reference|reference|examine|inspect|look\\s{1,3}(?:at|into|through|up)|go\\s{1,3}through|revisit|leverage|search|scan|analy[sz]e';
+const SCAFFOLD_CONSULT_STEP_RE = new RegExp(
+    `^\\W{0,4}(?:([^.\\n]{0,40}?),\\s{0,3})?(?:the\\s{1,3})?(?:${_CONSULT})\\b[^.\\n]{0,60}?${_dropRefSrc}`, 'i');
+// The same thing written the other way round: "The [MCMR RULE] block should be checked first."
+const SCAFFOLD_PASSIVE_STEP_RE = new RegExp(
+    `^\\W{0,4}(?:the\\s{1,3})?${_dropRefSrc}[^.\\n]{0,60}?\\b(?:${_CONSULT})(?:ed|ing|s)?\\b`, 'i');
+const SCAFFOLD_DROP_PROBE_RE = new RegExp(_dropRefSrc, 'i');
+const STEP_LINE_RE = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
+const RAW_LOG_LINE_RE = /^\s*(?:\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2})/;
+// Function words and the structural nouns a block reference drags along. Deliberately does NOT
+// include ordinary content words ("findings", "issue", "urgency") — the fewer words this set
+// swallows, the harder it is for the fallback below to delete a step that says something.
+const _STEP_FILLER = new Set(['the', 'this', 'that', 'a', 'an', 'and', 'or', 'for', 'from', 'with', 'any', 'all', 'its', 'it', 'to', 'of', 'in', 'on', 'at', 'as', 'by', 'if', 'is', 'are', 'be', 'was', 'were', 'above', 'below', 'block', 'blocks', 'section', 'sections', 'directive', 'directives', 'rule', 'rules', 'list', 'lists', 'entry', 'entries', 'note', 'notes', 'data', 'heading', 'header', 'scaffold']);
+
+// Which block a candidate reference actually names, or null if it only looks like one.
+// The block is identified from the START of the reference, so a model that echoed a whole
+// header ("[MCMR RULE — ABSOLUTE. A wrong MCMR reference…]") still resolves to MCMR RULE.
+// Two gates stop an ordinary bracketed phrase being mistaken for prompt scaffolding:
+//   • the name must be written in CAPITALS, as every prompt label is — "[Release notes]" is
+//     prose someone bracketed, not a label;
+//   • inside a CLOSED bracket, what follows the name must be the start of a header (nothing,
+//     an ellipsis, a dash, a colon, a slash) and never a value — so "[CASE C01641726]" keeps
+//     its case number instead of collapsing to "the case details".
+for (const b of PROMPT_BLOCKS) b._head = new RegExp('^' + _rxEsc(b.name) + '(?![A-Za-z0-9])');
+const _HEADER_TAIL_RE = /^(?:\s{0,3}$|\s{0,3}[…\-—–:,/]|\.{2,3})/;
+function _matchScaffoldBlock(m) {
+    let s = String(m).replace(/^\s{0,3}(?:the|this|that|those|these|a|an|its|our|your)\s{1,3}/i, '');
+    const bracketed = s.startsWith('[');
+    if (bracketed) s = s.slice(1).replace(/^\s{0,3}/, '');
+    const close = bracketed ? s.indexOf(']') : -1;
+    const inner = close >= 0 ? s.slice(0, close) : s;
+    for (const b of _blocksLongestFirst) {
+        const hit = inner.match(b._head);
+        if (!hit) continue;
+        if (hit[0] !== hit[0].toUpperCase()) return null;
+        if (close >= 0 && !_HEADER_TAIL_RE.test(inner.slice(hit[0].length))) return null;
+        return b;
+    }
+    return null;
+}
+// True when the step really does point at a block the guard is allowed to delete a step over.
+function _hasGenuineDropRef(text) {
+    const rx = new RegExp(_dropRefSrc, 'gi');
+    for (const hit of String(text).matchAll(rx)) {
+        const b = _matchScaffoldBlock(hit[0]);
+        if (b && b.drop) return true;
+    }
+    return false;
+}
+
+const _STEP_MARKER_RE = /^[ \t]{0,8}(?:[-*•]|\d+[.)])[ \t]{0,8}/;
+function _stripScaffoldFromLine(line) {
+    let out = line
+        // Both meta-clause passes verify the reference is a real block before deleting the
+        // clause around it — otherwise "According to [Case C01641726], the customer…" would
+        // lose its opening.
+        .replace(SCAFFOLD_LEADIN_RE, (m, boundary, phrase) => _matchScaffoldBlock(phrase) ? boundary : m)
+        .replace(SCAFFOLD_TRAILER_RE, (m, phrase) => _matchScaffoldBlock(phrase) ? '' : m)
+        // A reference that opened its sentence took the sentence's capital with it
+        // ("Summary: The [CASE HISTORY] shows…"), so the wording that replaces it inherits it.
+        .replace(SCAFFOLD_PHRASE_RE, (m, offset, whole) => {
+            const block = _matchScaffoldBlock(m);
+            if (!block) return m;               // it only looked like a label — leave it alone
+            const say = block.say;
+            if (!say) return '';
+            // Only the tail of the prefix decides this, so only the tail is examined — slicing
+            // and scanning the whole prefix at every match is what makes a long line quadratic.
+            const tail = whole.slice(Math.max(0, offset - 16), offset);
+            const opensSentence = (offset === 0 || /(?:[.!?:][ \t]{1,3}|^[ \t]{0,8}(?:[-*•]|\d+[.)])[ \t]{0,3})$/.test(tail)) && /^[A-Z]/.test(m.trimStart());
+            return opensSentence ? say.charAt(0).toUpperCase() + say.slice(1) : say;
+        });
+    out = out
+        // Grammar left behind by a removal: a preposition with nothing to govern, a doubled
+        // article, orphaned punctuation, the double space where the reference used to be.
+        // Bounded runs again ({1,8}, not +): each of these is scanned at every character of the
+        // line, and an unbounded run makes that quadratic on a line of runaway whitespace.
+        .replace(/\b(?:in|from|per|under|within|of|by|on|to|at|against|with)\s{1,8}(?=[,.;:)]|$)/gi, '')
+        .replace(/\bthe\s{1,8}the\b/gi, 'the')
+        .replace(/\(\s{0,8}\)/g, '')
+        .replace(/\s{1,8}([,.;:!?])/g, '$1')
+        .replace(/([,;:])\s{0,8}([,.;:])/g, '$2')
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/^([ \t]{0,8}(?:[-*•]|\d+[.)])?[ \t]{0,8})[,;:]\s{0,8}/, '$1')
+        .replace(/[ \t]+$/, '');
+    // "…, confirm the urgency with the customer" once its lead-in clause is gone — restore the
+    // capital the removed clause was carrying, and only when the line opened with one.
+    const marker = (line.match(_STEP_MARKER_RE) || [''])[0];
+    const before = line.slice(marker.length);
+    const outMarker = (out.match(_STEP_MARKER_RE) || [''])[0];
+    const after = out.slice(outMarker.length);
+    if (/^[A-Z]/.test(before) && /^[a-z]/.test(after)) out = outMarker + after.charAt(0).toUpperCase() + after.slice(1);
+    return out;
+}
+
+// True when the ONLY thing this step does is send the engineer to a block of the prompt —
+// either because its verb takes the block as its object ("Check the [MCMR RULE] block for a
+// matching fix"), or because nothing of substance is left once the reference is removed.
+// The threshold is deliberately low: "Confirm the urgency with the customer" survives on three
+// content words, because deleting a real instruction is a far worse error than leaving a thin
+// one for the vague-step filter to judge on its own terms.
+function _isScaffoldOnlyStep(body) {
+    if (!SCAFFOLD_DROP_PROBE_RE.test(body) || !_hasGenuineDropRef(body)) return false;
+    const m = body.match(SCAFFOLD_CONSULT_STEP_RE);
+    if (m && !CONCRETE_ANCHOR_RE.test(m[1] || '')) return true;
+    if (SCAFFOLD_PASSIVE_STEP_RE.test(body)) return true;
+    const rest = _stripScaffoldFromLine(body);
+    const words = (rest.match(/[A-Za-z][A-Za-z0-9'-]*/g) || []).filter(w => !_STEP_FILLER.has(w.toLowerCase()));
+    return words.length < 3;
+}
+
+// The prompt side of the same problem. The blocks HAVE to be named in the instructions — there
+// is no other way to tell the model which directive to obey — so the instructions must also say
+// that those names are for it and not for the answer. Kept to one bullet, in the plainest words
+// a 2B model will still act on. The guard above is what enforces this; the rule is what makes
+// enforcement rare enough that it never has to delete a step worth keeping.
+const NO_SCAFFOLD_PROMPT_RULE = '- The bracketed ALL-CAPS names in this prompt ([CASE HISTORY], [CASE STATE], [LOG ACCESS], [MCMR RULE], [SOTI CHECKS…] and every other one) are MY briefing to YOU. The engineer reading your answer cannot see them and has no such block to open. NEVER print one of those names, and NEVER write a step that says to read, review, check or consult one — take what is inside it and write the finding itself.';
+
+// Which lines of an answer are EVIDENCE rather than prose: the body of a code fence, and any
+// quoted raw log line. Rewriting a label inside one silently falsifies the very citation the
+// engineer is checking, so nothing here ever edits them.
+// Only MATCHED fence pairs protect. An answer that opens a fence and never closes it is
+// malformed, and treating everything after it as untouchable is exactly how a leaked label
+// would slip through — so the trailing unpaired fence protects nothing.
+function _evidenceLineMask(lines) {
+    const fences = [];
+    lines.forEach((l, i) => { if (/^\s*```/.test(l)) fences.push(i); });
+    const mask = lines.map(l => RAW_LOG_LINE_RE.test(l));
+    for (let p = 0; p + 1 < fences.length; p += 2) {
+        for (let i = fences[p]; i <= fences[p + 1]; i++) mask[i] = true;
+    }
+    if (fences.length % 2) mask[fences[fences.length - 1]] = true; // the stray marker itself
+    return mask;
+}
+
+// Run `fn` over the PROSE of an answer only. Shared, because the label rewriting further down
+// had the same blind spot.
+function mapProseLines(text, fn) {
+    const src = String(text || '');
+    if (!src.includes('\n') && !/^\s*```/.test(src)) return fn(src);
+    const lines = src.split('\n');
+    const evidence = _evidenceLineMask(lines);
+    return lines.map((line, i) => evidence[i] ? line : fn(line)).join('\n');
+}
+
+function stripPromptScaffold(text) {
+    const src = String(text || '');
+    if (!src || !SCAFFOLD_PROBE_RE.test(src)) return src;
+    const lines = src.split('\n');
+    const evidence = _evidenceLineMask(lines);
+    const kept = [];
+    let removed = 0;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (evidence[i]) { kept.push(line); continue; }
+
+        // A section header is cleaned like any other line — "Summary: the [CASE HISTORY] shows…"
+        // carries the whole summary on the header line — but it is never a step, so it is never
+        // deleted.
+        if (STEP_LINE_RE.test(line) && !FORWARD_SECTION_RE.test(line) && !HISTORICAL_SECTION_RE.test(line)
+            && _isScaffoldOnlyStep(line.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, ''))) { removed++; continue; }
+        const cleaned = _stripScaffoldFromLine(line);
+        // A line that was nothing but a block header ("[CASE HISTORY]") is now empty: drop it
+        // rather than leave a blank where a heading used to be.
+        if (line.trim() && !cleaned.replace(/[\s*_#>-]/g, '')) { removed++; continue; }
+        kept.push(cleaned);
+    }
+    if (!removed) return kept.join('\n');
+    return renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
+}
+
 function sanitizeAssistantResponse(text) {
     if (!text) return "";
     
@@ -230,30 +554,28 @@ function sanitizeAssistantResponse(text) {
         .replace(/<\|think\|>[\s\S]*?<\|\/?think\|>/gi, '')
         .replace(/<\/?\|?think\|?>/gi, '')
         .trim();
-    
-    // Replace bracketed labels with natural English to maintain grammar if the model outputs them as nouns
-    cleaned = cleaned
-        .replace(/\[LATEST MOBICONTROL VERSION\]/gi, "latest MobiControl version")
-        .replace(/\[ALL MOBICONTROL VERSIONS\]/gi, "MobiControl versions")
-        .replace(/\[LATEST ANDROID AGENT VERSION\]/gi, "latest Android Agent version")
-        .replace(/\[ALL ANDROID AGENT VERSIONS\]/gi, "Android Agent versions")
-        .replace(/\[LATEST IDENTITY VERSION\]/gi, "latest SOTI Identity version")
-        .replace(/\[ALL IDENTITY VERSIONS\]/gi, "SOTI Identity versions")
-        .replace(/\[RELEASE NOTES\]/gi, "release notes")
-        .replace(/\[PULSE SEARCH\]/gi, "SOTI Pulse search")
-        .replace(/\[DOCS SEARCH\]/gi, "SOTI Docs search")
-        .replace(/\[DEEP RESEARCH\]/gi, "deep research");
 
-    const LABELS = 'MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|LATEST MOBICONTROL VERSION|ALL MOBICONTROL VERSIONS|LATEST ANDROID AGENT VERSION|ALL ANDROID AGENT VERSIONS|LATEST IDENTITY VERSION|ALL IDENTITY VERSIONS|RELEASE NOTES|RELEASE_NOTES|PULSE SEARCH|PULSE_SEARCH|PULSESEARCH|DOCS SEARCH|DOCS_SEARCH|DOCSSEARCH|DEEP RESEARCH|DEEP_RESEARCH|DEEPRESEARCH|CASE|CASE CONTEXT|CASE_CONTEXT|ISSUE SUMMARY|ISSUE_SUMMARY|ISSUESUMMARY';
+    // The prompt's own scaffolding, out — before anything else reads the text. A step whose
+    // object is one of those blocks is deleted; every other reference is reworded into English
+    // so the sentence around it survives. Runs on the streaming text too, so the engineer never
+    // watches "[MCMR RULE]" appear in an answer they are about to copy into Salesforce.
+    try { cleaned = stripPromptScaffold(cleaned); } catch (e) { console.warn('Scaffold leak guard failed', e); }
+
+    // The underscore / no-space spellings of the same labels, which the guard above does not
+    // carry (they are not how any prompt writes them, only how a model sometimes echoes them).
+    // Fence-aware like everything else here, so a quoted log line is never edited.
+    const LABELS = 'MC VERSIONS|AGENT VERSIONS|IDENTITY VERSIONS|RELEASE_NOTES|PULSE_SEARCH|PULSESEARCH|DOCS_SEARCH|DOCSSEARCH|DEEP_RESEARCH|DEEPRESEARCH|CASE_CONTEXT|ISSUE_SUMMARY|ISSUESUMMARY';
     const labelRx = new RegExp(`\\[(?:${LABELS})\\]`, 'gi');
     const accordingRx = new RegExp(`\\b(?:According to|based on)\\s+(?:available information|(?:${labelRx.source}(?:,\\s*|\\s+and\\s+)?)+)\\s*,?\\s*`, 'gi');
     const strayRx = new RegExp(`\\s*${labelRx.source}(?:,\\s*|\\s+and\\s+)?\\s*`, 'gi');
     const refRx = /\b(?:for more (?:detailed )?information|reference|see)\s*,?\s*(?:at\s*)?\[(?:DEEP RESEARCH|DEEP_RESEARCH|DEEPRESEARCH|DOCS SEARCH|DOCS_SEARCH|DOCSSEARCH|PULSE SEARCH|PULSE_SEARCH|PULSESEARCH)\][^\n.]*/gi;
-    
-    cleaned = cleaned
+
+    cleaned = mapProseLines(cleaned, (l) => l
         .replace(accordingRx, "")
         .replace(strayRx, " ")
-        .replace(refRx, "")
+        .replace(refRx, ""));
+
+    cleaned = cleaned
         .replace(/\bNo specific highlights[^.]*\./gi, "")
         // Remove leftover citation PLACEHOLDERS the model copies from the template instead of
         // real values ("Line N", "Line X", "@ Timestamp T", "(timestamp)", "ExceptionClass").
@@ -269,7 +591,11 @@ function sanitizeAssistantResponse(text) {
         // "consult/contact support" deflections.
         .replace(/\b[Bb]ased on (?:the )?(?:provided|retrieved|available|the above)[^,.\n]*,?\s*/g, "")
         .replace(/\b(?:the )?(?:retrieved|provided) (?:knowledge base|documentation|context|information)\b/gi, "the SOTI documentation")
-        .replace(/[^.\n]*\b(?:consult the full SOTI documentation|contact SOTI support|was not (?:explicitly )?detailed in[^.\n]*)\b[^.\n]*\.?/gi, "")
+        // The wildcards are bounded to a sentence's worth of characters. Unbounded, this pattern
+        // rescans the rest of the line from every character position — quadratic, and this runs
+        // on every render tick of a streaming answer, so a model stuck repeating one token froze
+        // the panel (40 KB of it cost two seconds per tick). No real sentence exceeds 300 chars.
+        .replace(/[^.\n]{0,300}\b(?:consult the full SOTI documentation|contact SOTI support|was not (?:explicitly )?detailed in[^.\n]{0,300})\b[^.\n]{0,300}\.?/gi, "")
         // Small-model artifact: a bold pair split across a newline ("**\nKey Details:**")
         // is invalid markdown that would render as literal asterisks — rejoin it.
         .replace(/\*\*\s*\n\s*([^\n*]{1,60}:)\s*\*\*/g, "\n**$1**")
@@ -5964,6 +6290,34 @@ function stripVagueNextSteps(text) {
 }
 
 // ---------------------------------------------------------------------------
+// EMPTY-PLAN NOTICE
+// ---------------------------------------------------------------------------
+// A "Next steps:" heading with nothing under it is the one outcome the filters above can
+// produce that reads as a broken app rather than an answer — it happens when every step the
+// model wrote was a pointer back into its own prompt ("Review the [SOTI CHECKS…] block"), and
+// the scaffold guard deleted them all. Say so plainly instead of leaving a bare heading: this
+// line is the tool speaking, and it tells the engineer the one thing they can act on.
+const EMPTY_PLAN_NOTICE = '*No usable next step was produced for this case — click the button again, or switch to a larger model in Settings (⚙).*';
+
+function flagEmptyNextSteps(text) {
+    const src = String(text || '');
+    if (!src.trim() || src.includes(EMPTY_PLAN_NOTICE)) return src;
+    const lines = src.split('\n');
+    const at = lines.findIndex(l => FORWARD_SECTION_RE.test(l));
+    if (at === -1) return src;
+    // A forward section written as prose rather than bullets is still a plan — only a section
+    // with no content of any kind before the next heading (or the end) gets the notice.
+    for (let i = at + 1; i < lines.length; i++) {
+        if (HISTORICAL_SECTION_RE.test(lines[i]) || FORWARD_SECTION_RE.test(lines[i])) break;
+        if (lines[i].replace(/[\s*_#>-]/g, '')) return src;
+    }
+    // A header carrying its own content ("Next steps: upgrade to 2026.1.1") is not empty.
+    if (lines[at].replace(FORWARD_SECTION_RE, '').replace(/[\s*_#>:-]/g, '')) return src;
+    lines.splice(at + 1, 0, '', EMPTY_PLAN_NOTICE);
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+// ---------------------------------------------------------------------------
 // LOG-ACCESS CONTRADICTION FLAG
 // ---------------------------------------------------------------------------
 // The [LOG ACCESS] directive tells the model who collects the evidence; this catches the
@@ -6020,7 +6374,12 @@ function flagLogAccessMismatch(text, hosted) {
 function postValidateCaseAnswer(text, allowedMcmrCodes) {
     let out = String(text || '');
     try { out = enforceMcmrCitations(out, allowedMcmrCodes).text; } catch (e) { console.warn('MCMR enforcement failed', e); }
+    // Idempotent, and normally a no-op: the streaming sanitizer clears the scaffold as the
+    // answer arrives. It runs again here so a case-writing answer is covered even if it reached
+    // this function by a route that did not stream through sanitizeAssistantResponse.
+    try { out = stripPromptScaffold(out); } catch (e) { console.warn('Scaffold leak guard failed', e); }
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
+    try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
     try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
     return out;
 }
@@ -8821,7 +9180,8 @@ RULES:
 1. Ground EVERY statement ONLY in the data in this prompt ([CASE], [ISSUE SUMMARY], [EMAIL CHAIN], the chronology and CASE STATE directive inside the task, and [RELEASE NOTES]/[DEEP RESEARCH]/[PULSE SEARCH]/[DOCS SEARCH] if present). NEVER invent facts, findings, links, steps, dates, or commitments.
 2. [EMAIL CHAIN] is ordered NEWEST FIRST and OVERRIDES [ISSUE SUMMARY]. The task's chronology and CASE STATE directive are deterministic facts — never contradict them.
 3. If [RELEASE NOTES] has a "FIXED IN VERSION X" entry matching the issue, cite that version (written IN FULL, e.g. "2026.1.0") and its MCMR code verbatim and recommend the upgrade. If it says NO MATCHING FIX FOUND, never mention MCMRs or an upgrade as the fix.
-4. No meta-commentary ("Based on the provided…"), no internal markers ("Message 5"), no "check the website"/"contact support", no preamble or closing remarks. Start directly with the requested output.`;
+4. No meta-commentary ("Based on the provided…"), no internal markers ("Message 5"), no "check the website"/"contact support", no preamble or closing remarks. Start directly with the requested output.
+5. The bracketed ALL-CAPS names in this prompt ([CASE], [CASE HISTORY], [CASE STATE], [LOG ACCESS], [MCMR RULE], [SOTI CHECKS…], [RELEASE NOTES] and the rest) are MY briefing to YOU. The agent reading your answer cannot see them and has no such block to open. NEVER print one of those names, and NEVER write a step that says to read, review, check or consult one — take what is inside it and write the finding itself.`;
 }
 
 function getLeanQAPrompt(isSmall = false) {
@@ -8831,7 +9191,7 @@ function getLeanQAPrompt(isSmall = false) {
 RULES:
 1. Answer directly using ONLY facts present in [RELEASE NOTES], [LATEST MOBICONTROL VERSION], [LATEST ANDROID AGENT VERSION], [PULSE SEARCH], [DOCS SEARCH], [DEEP RESEARCH], [OFFLINE PULSE KNOWLEDGE MATCHES] and the case data. Never invent or extrapolate.
 2. NEVER say "check the website"/"visit Pulse"/"contact support" or output links — you already have the data; print the facts. Keep answers short and direct, no fluff.
-3. NEVER write meta-commentary about sources/context. FORBIDDEN: "Based on the provided documentation/information", "the retrieved knowledge base", "the provided context", "consult the full SOTI documentation", "was not explicitly detailed". State facts directly, no preamble.
+3. NEVER write meta-commentary about sources/context. FORBIDDEN: "Based on the provided documentation/information", "the retrieved knowledge base", "the provided context", "consult the full SOTI documentation", "was not explicitly detailed". State facts directly, no preamble. The bracketed ALL-CAPS names in this prompt are MY briefing to YOU — the agent cannot see them and has no such block to open, so NEVER print one and NEVER write a step that says to read, review, check or consult one.
 4. Release notes = "Resolved Issues". List them from [RELEASE NOTES] exactly as written, MCMR codes + descriptions word-for-word. NEVER mix [SOTI PULSE CONSOLE DATA] with [SOTI PULSE AGENT DATA] — answer only from the product asked about. Never invent extra issues; if asked for more than provided, say only these are available; if none for the product, say none were found. If the agent simply asks to check the release notes, IMMEDIATELY present the [RELEASE NOTES] entries relevant to the customer's case — NEVER ask what to check, and NEVER claim no notes were provided while a [RELEASE NOTES] section exists in this prompt.
 5. GUIDES: build step-by-step instructions ONLY from the EXACT TEXT in [OFFLINE PULSE KNOWLEDGE MATCHES]/[DEEP RESEARCH]/[DOCS SEARCH]; cite exact SOTI procedures (e.g. afw#mobicontrol); NEVER invent generic Android/IT steps (USB Debugging, ADB…). Only for a pure how-to/feature question with no matching text may you reply "I could not find a SOTI guide for this specific task in my current context." — NEVER for case troubleshooting (rule 8).
 6. STATUS / WHAT-NEXT: read [EMAIL CHAIN] from the TOP (ordered NEWEST FIRST); it OVERRIDES [ISSUE SUMMARY] (only the original problem, may be superseded). If the newest emails show the issue resolved or moved on, do NOT suggest old troubleshooting — address the newest open item, or confirm the fix and suggest closing the case.
@@ -13531,6 +13891,7 @@ ${historyRule}
 - Never state or imply that the case is closed, closing, resolved or in closure unless the CASE STATE directive below says so.
 - Refer to people by name (e.g. "Ayodeji"), never by internal message numbers. Do NOT output a dated timeline.${peopleLine}
 - CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as SOTI Support, or with a SOTI support job title (e.g. "Technical Support, SOTI", "Senior Technical Support Specialist", "Technical Account Manager"), or who writes [INTERNAL] notes / [CALL LOG] entries, is SOTI-side — NEVER write that they are experiencing the issue or that they reported it. If no customer name is given, say "the customer".
+${NO_SCAFFOLD_PROMPT_RULE}
 - Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
 
 Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported, how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
@@ -13603,6 +13964,7 @@ STRICT RULES:
 - Ground EVERY statement ONLY in the case information, issue summary, email chain, meeting notes, any log analysis in this conversation, and our chat history. NEVER invent facts, findings, links, dates, or commitments.${peopleLine}
 - The email chain is ordered NEWEST FIRST — continue the conversation from the MOST RECENT messages; never re-answer something the chain shows is already settled.
 - Professional, warm SOTI support tone. Keep it concise — short paragraphs, no filler.
+${NO_SCAFFOLD_PROMPT_RULE}
 - Output ONLY the email in PLAIN TEXT — no markdown symbols like ** or ##, no emojis, no preamble such as "Here is the draft", and no commentary after it. Ready to paste into the email client.
 - Use exactly this layout:
 Subject: <short subject${caseNum ? ` referencing Case ${caseNum}` : ''} and the topic>
@@ -13661,6 +14023,7 @@ RULES:
 - If the evidence points to a known defect, name it and the version it is fixed in and make upgrading a concrete step — but ONLY using a fix listed in the [MCMR RULE] block. If that block lists none, do not mention MCMR codes, release notes, or an upgrade at all. If it is a configuration issue, give the exact SOTI console location and the precise setting to change.
 - Every step must name the exact artefact it acts on (the log file and the server role it sits on, the Windows service, the console path, the port, the SQL object, the error string to search for) and what result confirms it worked. "Verify the configuration", "check the logs", "review the setup" and similar contentless steps are FORBIDDEN.
 - Route every evidence-collection step exactly as the [LOG ACCESS] block below dictates — it states whether the agent pulls the logs from the backend or must request them from the customer.
+${NO_SCAFFOLD_PROMPT_RULE}
 - Output EXACTLY these sections, in this order, and NOTHING else:
 
 **Root cause:** 1-3 sentences naming the most likely cause, with the specific evidence from the case/logs that points to it. If more than one cause is plausible, name the most likely and note the alternative in one short clause.
@@ -13731,6 +14094,7 @@ RULES:
 - "30/60/90:" MUST be ${milestoneDirective}.
 - "Date of Update:" MUST be ${today}.
 - "Research Links:" list ONLY real URLs that actually appear in the provided research or case data; if there are none, write "None".
+${NO_SCAFFOLD_PROMPT_RULE}
 - Output PLAIN TEXT only — no markdown symbols like ** or ##, no emojis, no preamble.
 
 TEMPLATE (fill in after each header):
@@ -13781,6 +14145,7 @@ STRICT RULES:
 - The email chain is ordered NEWEST FIRST — the resolution comes from the MOST RECENT messages.
 - CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER; anyone who signs off as "Technical Support, SOTI" is a SOTI SUPPORT ENGINEER. Never state a SOTI engineer had the issue.
 - If the case is NOT actually resolved yet, say so plainly under "Solution:" and give the current status / plan — do NOT fabricate a resolution.
+${NO_SCAFFOLD_PROMPT_RULE}
 - Output PLAIN TEXT only — no markdown symbols like ** or ##, no emojis, no preamble.
 
 TEMPLATE:
