@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.5.7 — the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel. Previously — build 2.5.6, closure detection fixed end to end: "away on personal leave" auto-replies are recognised (five of them no longer count as the case carrying on past a confirmed closure); customer confidentiality footers stripped, so a legal disclaimer can no longer be quoted as the customer "demanding priority"; "please proceed with closing the case" / "appears to have been resolved" read as consent; the primary contact is the person support actually corresponds with, not whoever opened the case, and addressing SOTI no longer makes you SOTI staff; a plan recorded before the case moved on is checked rather than obeyed, and a note\'s "the customer has not responded" is dropped once they have; a reopen signal beats a consent phrase in the same message; closed cases spend the freed log-access/checklist budget on the case history, so every message reaches "Troubleshoots done"', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.6.0 — the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks (node tests/run.js) pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -487,6 +487,17 @@ function _isScaffoldOnlyStep(body) {
 // a 2B model will still act on. The guard above is what enforces this; the rule is what makes
 // enforcement rare enough that it never has to delete a step worth keeping.
 const NO_SCAFFOLD_PROMPT_RULE = '- The bracketed ALL-CAPS names in this prompt ([CASE HISTORY], [CASE STATE], [LOG ACCESS], [MCMR RULE], [SOTI CHECKS…] and every other one) are MY briefing to YOU. The engineer reading your answer cannot see them and has no such block to open. NEVER print one of those names, and NEVER write a step that says to read, review, check or consult one — take what is inside it and write the finding itself.';
+
+// Mail-SYSTEM text is not case content, and a model with no rule about it will happily report a
+// spam banner as the state of the case. The failure this exists to stop, verbatim from a real
+// generated summary: "The current state is that the customer has the SOTI documentation regarding
+// a suspected phishing attempt", plus a next step telling the engineer to ask the customer to
+// forward back "the contents of the email received from EU - Support … as an attachment" — the
+// email in question being SOTI's own reply, quoted underneath the customer's two-line message,
+// under a spam banner the customer's own mail gateway had stamped on top. The chain cleaner now
+// strips all three; this rule is the second line of defence, because a scrape shape nobody has
+// seen yet will always eventually get through the cleaner.
+const NO_BOILERPLATE_PROMPT_RULE = '- Mail-SYSTEM text is NOT case content and NOBODY on this case "said" it: spam / phishing / external-sender banners a mail gateway stamps onto a message ("SUSPECTED SPAM", "EXTERNAL SENDER", advice to report or forward suspicious mail), corporate confidentiality and legal footers, survey and unsubscribe links, and the quoted copy of an earlier email that a reply keeps underneath the new text. You are FORBIDDEN from reporting any of it as something a person said, sent, attached, asked for or was worried about, from treating it as a security incident or a case event, and from turning it into a next step. When a reply quotes an earlier email, ONLY the new text above the quote belongs to that sender — the quoted part is a message that is already elsewhere in this case.';
 
 // Which lines of an answer are EVIDENCE rather than prose: the body of a code fence, and any
 // quoted raw log line. Rewriting a label inside one silently falsifies the very citation the
@@ -4299,10 +4310,48 @@ function buildCaseContextForPrompt(ci, small) {
 // break between the From: and Sent: lines, so on a normal pasted/synced thread NOTHING matched:
 // the whole chain collapsed into a single un-split blob and every quoted email (including the
 // ORIGINAL, oldest message) was invisible to the chronology / lifecycle / message enumeration.
-// Fix: bound the From-line run with [^\n] but then allow ONE optional line break before "Sent:".
-// Kept as a source string so it can be embedded in both lookahead (split) and search (tail-cut)
-// regexes without drift. Case-insensitive; callers add the 'i' flag.
-const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\t]';
+// Fix: bound each header line with [^\n], and allow the address to sit on lines of its own
+// between the two labels. Kept as a source string so it can be embedded in both lookahead (split)
+// and search (tail-cut) regexes without drift. Case-insensitive; callers add the 'i' flag.
+//
+// The "From:" and "Sent:" labels AS THE SENDER'S OWN MAIL CLIENT WROTE THEM. Salesforce scrapes
+// whatever Outlook produced on the customer's machine, so a Russian, German or French reply quotes
+// its parent email under "От: … Дата:", "Von: … Gesendet:" or "De: … Envoyé:". An English-only
+// pattern recognises none of those, and the consequences are not cosmetic — observed on a live
+// case (C01720260, a Russian customer):
+//   • the quoted SOTI email survived inside the CUSTOMER's reply, so the customer's message
+//     carried SOTI's own "Technical Support, SOTI" signature and role detection labelled the
+//     CUSTOMER as the support engineer (and then took the "Case created" row's contact as the
+//     customer — one human, reported as two people, with the roles swapped);
+//   • the duplicate email was summarised as a SECOND event, and the generated next steps told the
+//     engineer to ask the customer to forward back the very email SOTI had sent them.
+// The label lists are deliberately structural rather than exhaustive-linguistic: a match still
+// requires "<from-label>:" followed, within a few lines, by "<sent-label>:", which ordinary prose
+// does not do.
+const REPLY_FROM_LABEL_SRC = 'From|От|Von|De|Da|Van|Od|Från|Fra|Lähettäjä|Nadawca|Kimden|Feladó|Odesílatel|Από';
+// The unambiguous "sent" labels — used to SPLIT a pasted blob into messages, where a false split
+// costs more than a missed one, so the bare-noun forms (Date/Datum/Data) are deliberately absent.
+const REPLY_SENT_LABEL_SRC = 'Sent|Дата|Отправлено|Gesendet|Envoyé|Envoye|Enviado|Enviada|Inviato|Verzonden|Wysłano|Wyslano|Skickat|Sendt|Elküldve|Odesláno|Gönderilen|Lähetetty';
+// The same list plus the bare-noun forms — used to CUT a quoted tail off a body, where a missed
+// tail is the expensive error (it drags a whole duplicate email, signature included, into the
+// sender's own message) and an over-eager cut only loses text that is quoted elsewhere anyway.
+const REPLY_SENT_LABEL_ANY_SRC = REPLY_SENT_LABEL_SRC + '|Date|Datum|Data|Ημερομηνία|Tarih';
+// The other two routing-header labels, needed to recognise (and drop) a header block a forwarded
+// message OPENS with — "Кому:"/"Тема:" in the Russian client that motivated this.
+// A bare "A" (Italian/Spanish "To") is deliberately absent: a body line that legitimately opens
+// "A: …" is far more likely to be prose than a routing header, and these labels are also used to
+// blank out addressee lines before the support-authorship test.
+const MAIL_TO_LABEL_SRC = 'To|Кому|An|À|Para|Aan|Do|Til|Kime|Címzett';
+const MAIL_SUBJECT_LABEL_SRC = 'Subject|Тема|Betreff|Objet|Asunto|Oggetto|Onderwerp|Temat|Ämne|Emne|Konu|Tárgy|Předmět|Θέμα';
+// Between the two labels the header may carry the sender's name and address — on ONE line
+// ("From: George Lam <g@soti.net> Sent: …") or on lines of their OWN, which is how Apple Mail and
+// Outlook-for-Mac lay it out and what defeated the previous single-newline allowance:
+//     От:
+//     EU - Support <support.eu@soti.net>
+//     Дата:  пятница, 31 июля 2026 г. в 18:48
+// French and Italian clients put a space BEFORE the colon ("De : … Envoyé :"), so the separator
+// has to tolerate one — without it the French tail survived every test chain.
+const REPLY_HEADER_SRC = `(?:${REPLY_FROM_LABEL_SRC})[ \\t]?:[ \\t]?(?:[^\\n]{0,200}\\r?\\n[ \\t]*){0,3}[^\\n]{0,200}?(?:${REPLY_SENT_LABEL_SRC})[ \\t]?:[ \\t]`;
 
 // The same header as written by Outlook-on-the-web / Apple Mail / Gmail, which label the
 // timestamp "Date:" instead of "Sent:". Used ONLY to cut a quoted tail off a message body —
@@ -4324,7 +4373,75 @@ const REPLY_HEADER_SRC = 'From:[ \\t]?[^\\n]{0,200}?(?:\\r?\\n[ \\t]*)?Sent:[ \\
 // that quoted "Technical Support, SOTI" signature as the sender's own and labelled the CUSTOMER
 // as the support engineer, and the closure scan then read the customer's quoted text as a SOTI
 // closure notice — dated to the wrong message. Allow padding, and up to three blank lines.
-const REPLY_HEADER_ANY_SRC = 'From:[ \\t]*[^\\n]{0,200}?(?:[ \\t]*\\r?\\n){0,3}[ \\t]*(?:Sent|Date):[ \\t]*';
+const REPLY_HEADER_ANY_SRC = `(?:${REPLY_FROM_LABEL_SRC})[ \\t]?:[ \\t]*(?:[^\\n]{0,200}\\r?\\n[ \\t]*){0,3}[^\\n]{0,200}?(?:${REPLY_SENT_LABEL_ANY_SRC})[ \\t]?:[ \\t]*`;
+
+// Everything that opens a QUOTED COPY of an earlier email inside a reply. The routing header is
+// the common form, but Gmail, Apple Mail and every localised client also use a one-line
+// attribution ("On Friday, 31 July 2026 at 18:48, EU - Support wrote:", "31 июля 2026 г.
+// ... написал(а):"), and a body that keeps one keeps the whole email under it.
+const QUOTED_TAIL_SRC = [
+    '-{3,}\\s*(?:Original Message|Forwarded message|Исходное сообщение|Пересылаемое сообщение|Ursprüngliche Nachricht|Message d\'origine|Mensaje original)\\s*-{3,}',
+    REPLY_HEADER_ANY_SRC,
+    'On[ \\t][^\\n]{6,160}\\bwrote:',
+    // No \b before a Cyrillic word: JavaScript's \b is ASCII-only, so it never matches between a
+    // space and "н" and the whole alternative was dead.
+    '[^\\n]{0,90}?написал(?:\\(а\\)|а)?[ \\t]*:',
+    'Le[ \\t][^\\n]{6,160}\\ba écrit\\s*:',
+    'Am[ \\t][^\\n]{6,160}\\bschrieb[^\\n]{0,40}:',
+    'El[ \\t][^\\n]{6,160}\\bescribió\\s*:'
+].join('|');
+const QUOTED_TAIL_RE_SRC = '(?:^|[\\n\\s])(?:' + QUOTED_TAIL_SRC + ')';
+
+// ---------------------------------------------------------------------------
+// MAIL-GATEWAY BOILERPLATE — the text the mail SYSTEM adds, which is not case content
+// ---------------------------------------------------------------------------
+// A spam/phishing banner is stamped onto the message by the RECIPIENT's mail gateway; a
+// confidentiality footer is stamped on by the SENDER's. Neither is anything a human on this case
+// said, yet both read like case content to a model. On case C01720260 the customer's gateway
+// banner ("**** SUSPECTED SPAM — USE CAUTION WHEN CLICKING LINKS OR OPENING ATTACHMENT ****")
+// and their corporate anti-phishing advice ("forward the message as an attachment to
+// security@…") were summarised as the state of the case — "the customer has the SOTI
+// documentation regarding a suspected phishing attempt" — and produced a next step telling the
+// engineer to ask the customer for "the contents of the email … as an attachment". The email in
+// question was SOTI's own.
+// Matched conservatively: a banner keyword ALONE is never enough, it must sit inside the
+// scanner's own delimiters or alongside the advisory vocabulary (links / attachments / sender /
+// organisation), so a customer genuinely reporting a phishing problem is untouched.
+const MAIL_GATEWAY_BANNER_RES = [
+    // Star-delimited scanner banner: "**** SUSPECTED SPAM - USE CAUTION WHEN CLICKING LINKS ****"
+    /\*{2,}[^*\n]{0,300}?(?:suspected spam|external email|external sender|phishing|use caution|do not click)[^*]{0,300}?\*{2,}/gi,
+    // The same banner without the stars, on its own line. "CAUTION"/"WARNING" must be followed by
+    // "this…"/"external…" — a bare opener would also match a pasted log line ("WARNING: failed to
+    // send attachment to device"), and deleting evidence out of a message is worse than leaving a
+    // banner in it.
+    /^[ \t]*\**[ \t]*(?:suspected spam|external (?:e-?mail|sender|message)|(?:caution|warning|attention|alert)[:!]?[ \t]*(?:this|the following|external)\b)[^\n]{0,300}$/gim,
+    /\bthis (?:message|e-?mail) (?:came|originated|was sent)\b[^\n.]{0,40}\b(?:from )?(?:outside|external)\b[^\n.]{0,120}\.?/gi,
+    /\bdo not click\b[^\n.]{0,40}\b(?:links?|attachments?)\b[^\n.]{0,140}\.?/gi,
+    /\bbe careful with links\b[^\n.]{0,140}\.?/gi,
+    // Russian gateway banner and the corporate "report phishing" advisory that follows it.
+    /ВНИМАНИЕ\s*[:!]?\s*ВНЕШНИЙ\s+ОТПРАВИТЕЛЬ\s*[!.]?/gi,
+    /В случае подозрения на фишинг[\s\S]{0,200}?[\w.+-]+@[\w.-]+\.\w+/gi,
+    /В случае подозрения на фишинг[^\n]{0,200}/gi,
+    /Данное (?:письмо|сообщение) (?:пришло|получено)[^\n.]{0,160}\.?/gi
+];
+
+// Corporate confidentiality / legal footers, in the shapes that actually arrive. They always sit
+// at the END of a message, so the heading forms are cut to the end of the body.
+const LEGAL_FOOTER_RES = [
+    /(?:^|\n)[ \t]*(?:CONFIDENTIALITY|PRIVACY|LEGAL)\s+NOTICE\s*:[\s\S]*$/i,
+    /(?:^|\n)[ \t]*УВЕДОМЛЕНИЕ\s+О\s+КОНФИДЕНЦИАЛЬНОСТИ[\s\S]*$/i,
+    /(?:This|The)\s+(?:e-?mail|message)\s+and\s+any\s+(?:files|attachments|documents)[\s\S]{0,700}?(?:delete it\.?|delete (?:this|the) (?:e-?mail|message)[^.\n]{0,80}\.?|notify the sender[^.\n]{0,90}\.?)/gi,
+    /Это электронное сообщение[\s\S]{0,900}?(?:удалите сообщение\.?|уничтожьте (?:его|сообщение)\.?)/gi
+];
+
+// Does this RAW chain carry gateway boilerplate the model could mistake for case content? Used to
+// arm the answer-side repair: a summary may only be scrubbed of "phishing/spam" talk when the
+// chain's phishing talk provably came from a banner rather than from a person.
+function chainHasGatewayBoilerplate(raw) {
+    const s = String(raw || '');
+    if (!s) return false;
+    return MAIL_GATEWAY_BANNER_RES.some(re => { re.lastIndex = 0; return re.test(s); });
+}
 
 // Support-authored template phrases — customers never write these. Used to tell a SOTI
 // engineer's message from the customer's (lifecycle detection AND the chain digest's role
@@ -4354,7 +4471,7 @@ const SUPPORT_TITLE_RE = /(?:senior\s+)?technical support specialist|support spe
 function stripAddresseeMentions(text) {
     return String(text || '')
         .replace(/@[^\n]{0,60}?\bSOTI\b[^\n]{0,20}/gi, ' ')
-        .replace(/^[ \t]*(?:To|Cc|Bcc|From|Subject|Sent|Date):[^\n]*$/gim, ' ');
+        .replace(new RegExp(`^[ \\t]*(?:${MAIL_TO_LABEL_SRC}|Cc|Bcc|${REPLY_FROM_LABEL_SRC}|${MAIL_SUBJECT_LABEL_SRC}|${REPLY_SENT_LABEL_ANY_SRC}):[^\\n]*$`, 'gim'), ' ');
 }
 
 function looksSupportAuthored(body) {
@@ -4390,7 +4507,22 @@ function sameSenderName(a, b) {
     if (!x || !y) return false;
     if (x === y) return true;
     const [shortName, longName] = x.length <= y.length ? [x, y] : [y, x];
-    return shortName.length >= 4 && longName.startsWith(shortName + ' ');
+    if (shortName.length >= 4 && longName.startsWith(shortName + ' ')) return true;
+    // Same human, different NAME ORDER. The Salesforce contact record and the mail feed disagree
+    // constantly on this: one case carried the customer as "Konstantin Uzorin (JSC AMT Group)" on
+    // the Case-created row and as "Uzorin Konstantin Evgenevich" on every email he wrote. Compared
+    // as strings those are two people — so the contact was named "the customer", his own emails
+    // belonged to somebody else, and that somebody was then free to be classified as SOTI staff.
+    // Requiring the SHORTER name's tokens to be FULLY contained in the longer one keeps this from
+    // merging colleagues who merely share a surname ("Konstantin Uzorin" vs "Anna Uzorina" share
+    // nothing after tokenisation; "John Smith" vs "Jane Smith" share one token, which is not
+    // enough).
+    const tok = (s) => [...new Set(s.split(/[^\p{L}\p{N}]+/u).filter(w => w.length >= 3))];
+    const ta = tok(x), tb = tok(y);
+    if (ta.length < 2 || tb.length < 2) return false;
+    const [small, big] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+    const shared = small.filter(t => big.includes(t)).length;
+    return shared >= 2 && shared === small.length;
 }
 
 // Everyone in this chain who is provably SOTI-side. Two signals, both deterministic:
@@ -4612,15 +4744,23 @@ function cleanEmailBody(body, sender, cutReplyTail) {
     // only when it is unmistakably one: a From: line followed by header-keyword lines that
     // include BOTH Sent: and Subject: (so a body that merely opens with the word "From:" is
     // never truncated). The message text is whatever follows the Subject: line.
-    const leadHdr = t.match(/^[ \t]*From:[^\n]*(?:\r?\n[ \t]*(?:Sent|To|Cc|Bcc|Subject|Importance|Sensitivity|Reply-To|Date):[^\n]*)+\r?\n?/i);
-    if (leadHdr && /\r?\n[ \t]*Sent:/i.test(leadHdr[0]) && /\r?\n?[ \t]*Subject:/i.test(leadHdr[0])) {
+    const leadHdr = t.match(new RegExp(
+        `^[ \\t]*(?:${REPLY_FROM_LABEL_SRC}):[^\\n]*(?:\\r?\\n[ \\t]*(?:${REPLY_SENT_LABEL_ANY_SRC}|${MAIL_TO_LABEL_SRC}|${MAIL_SUBJECT_LABEL_SRC}|Cc|Bcc|Importance|Sensitivity|Reply-To):[^\\n]*)+\\r?\\n?`, 'i'));
+    if (leadHdr
+        && new RegExp(`\\r?\\n[ \\t]*(?:${REPLY_SENT_LABEL_ANY_SRC}):`, 'i').test(leadHdr[0])
+        && new RegExp(`\\r?\\n?[ \\t]*(?:${MAIL_SUBJECT_LABEL_SRC}):`, 'i').test(leadHdr[0])) {
         t = t.slice(leadHdr[0].length);
     }
+    // Mail-gateway banners go BEFORE the tail cut: a scanner stamps its banner at the very top of
+    // the message, so leaving it in place makes the first 10 characters of the body boilerplate —
+    // and the tail cut deliberately refuses to fire when less than that precedes the quote.
+    for (const re of MAIL_GATEWAY_BANNER_RES) { re.lastIndex = 0; t = t.replace(re, ' '); }
     if (cutReplyTail) {
-        // "Date:" as well as "Sent:" — Outlook web / Apple Mail / Gmail label the quoted
-        // timestamp that way, and an unrecognised tail drags a whole duplicate email (with its
-        // signature) into this message's gist.
-        const tail = t.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_ANY_SRC + ')', 'i'));
+        // Every shape that opens a quoted copy of an earlier email — the localised routing header
+        // as well as the English one, and the "On <date>, <person> wrote:" attribution. An
+        // unrecognised tail drags a whole duplicate email (with its signature) into this message's
+        // gist, and that signature is then read as belonging to THIS sender.
+        const tail = t.search(new RegExp(QUOTED_TAIL_RE_SRC, 'i'));
         if (tail > 10) t = t.slice(0, tail); // only cut when a real body precedes the tail
     }
     // Proofpoint / mail-scanner banners and external-sender warnings
@@ -4659,6 +4799,11 @@ function cleanEmailBody(body, sender, cutReplyTail) {
     t = t.replace(/The information contained in (?:this|the) e-?mail and any attachments may be confidential[\s\S]*$/i, ' ');
     t = t.replace(/This e-?mail and any files transmitted with it are confidential[\s\S]*?delete this e-?mail\.?/gi, ' ');
     t = t.replace(/No responsibility is accepted for any virus[\s\S]*?anti-?virus software\.?/gi, ' ');
+    // The heading-led footers (EN + RU) and the "…and any files transmitted with it" family whose
+    // closing sentence is "please notify the sender and delete it." — the ending the patterns above
+    // do not reach, which left ~450 characters of legalese in every message of a Russian customer's
+    // chain and put "confidential information" into the case symptom text and the research query.
+    for (const re of LEGAL_FOOTER_RES) { re.lastIndex = 0; t = t.replace(re, ' '); }
     t = t.replace(/\bBook\s+a\s+meeting\s+with\s+\w+\b/gi, ' ');
     // (SOTI.net needs the lookbehind so it never matches inside a real URL like pulse.soti.net)
     t = t.replace(/\bCall\s+Us\b|(?<![./\w-])SOTI\.\s?net\b|\bDiscussion\s+Forum\b|\bLog\s+a\s+Case\s+Online\b|\bGet\s+Outlook\s+for\s+iOS\b/gi, ' ');
@@ -4907,8 +5052,12 @@ function getCleanChainEntries(raw) {
     // below their own text. sigBody keeps the sender's signature yet drops the quoted tail,
     // so the marker means "this sender is support", not "this sender quoted support".
     const cutTail = (body) => {
-        const s = String(body || '');
-        const idx = s.search(new RegExp('(?:^|[\\n\\s])(?:-{3,}\\s*Original Message\\s*-{3,}|' + REPLY_HEADER_ANY_SRC + ')', 'i'));
+        // The gateway banner is stripped FIRST for the same reason as in cleanEmailBody: it sits
+        // above the quote, and the "a real body must precede the tail" guard would otherwise count
+        // the banner as that body and keep the whole quoted email — signature included.
+        let s = String(body || '');
+        for (const re of MAIL_GATEWAY_BANNER_RES) { re.lastIndex = 0; s = s.replace(re, ' '); }
+        const idx = s.search(new RegExp(QUOTED_TAIL_RE_SRC, 'i'));
         return idx > 10 ? s.slice(0, idx) : s;
     };
     return parseEmailChainEntries(raw)
@@ -5051,6 +5200,49 @@ function quoteAround(text, idx, len, max = 240) {
     return s.slice(start, Math.min(end + 1, start + max)).replace(/\s+/g, ' ').trim();
 }
 
+// A Salesforce lifecycle ROW ("Case created", "Case closed") is a record the portal wrote, not a
+// message anybody sent. It must never be read as the newest thing that happened on the case.
+function isChainLifecycleRow(e) {
+    return /^case (?:created|closed|reopened|escalated)\b/i.test(String((e && e.body) || '').trim());
+}
+
+// Split a message into sentences. Scraped email bodies routinely lose the space after a full stop
+// ("Thank you for contacting SOTI.We are following up on…"), so a split on whitespace alone
+// returns the whole email as one "sentence" and every quote below becomes the entire message. A
+// capital letter (Latin or Cyrillic) is therefore also a boundary — but a digit never is, so
+// version strings like "v2026.1.1.1453" stay in one piece.
+function chainSentences(text) {
+    return String(text || '')
+        .split(/\n+|(?<=[.!?])(?=\s|[A-ZА-ЯЁ])/)
+        .map(s => s.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+}
+
+// A question the customer actually asked, as opposed to a pleasantry. "How are you?" and "Hope
+// all is well?" are not case content; everything else that ends in a question mark is.
+// The greeting is allowed to lead ("Hi, how are you?") — a scraped body keeps it attached to the
+// pleasantry, and an anchored test that ignores that keeps "how are you?" as a case question.
+const PLEASANTRY_QUESTION_RE = /^(?:(?:hi|hello|hey|dear|good (?:morning|afternoon|day))\b[^,?]{0,20},?\s*)?(?:how are you|hope you are|hope all is|how have you been|how(?:'s| is) it going|are you well)\b/i;
+function questionsIn(text) {
+    return chainSentences(text)
+        .filter(s => s.includes('?') && s.length >= 8 && s.length <= 240 && !PLEASANTRY_QUESTION_RE.test(s));
+}
+
+// What SOTI asked the customer to do or supply. Anchored on the ASK, not on the artefact, so it
+// works the same for logs, a screenshot, a version number or a meeting slot.
+const SUPPORT_REQUEST_RE = /\b(?:please\s+(?:provide|send|share|upload|attach|collect|confirm|check|run|try|reproduce|enable|raise|book|schedule)|could you\s|can you\s|would you\s|kindly\s+(?:provide|send|share|confirm|book)|we\s+(?:will\s+)?(?:need|require)\b|we would need\b|let (?:me|us) know\b)/i;
+// The customer saying they have SUPPLIED it. Deliberately generous (EN + RU): the cost of missing
+// one of these is telling the engineer to chase something that already arrived.
+const REQUEST_FULFILLED_RE = /\b(?:attach(?:ed|ing|ment)s?|enclosed|uploaded|please find|here (?:is|are|you go)|as requested|i have sent|i've sent|we have sent|we've sent|sent (?:you|it|them|the|over))\b|прил(?:агаю|ожен|оженн)|вложени|(?:от|на)правил|высла(?:л|ла)/i;
+
+// SOTI offering a live working session (with or without a booking link). Once that offer is on
+// the table, "arrange a remote session" is no longer a next step — CONFIRMING it is. A plan that
+// re-proposes the meeting the customer is at that moment trying to book reads as though nobody
+// had read their reply, which is exactly what happened on case C01720260.
+const MEETING_PROPOSED_RE = /\b(?:remote session|screen[- ]?shar\w*|web ?ex|teams (?:call|meeting|session)|zoom (?:call|meeting)|book time with|book(?:ing)? (?:a )?(?:time|slot|meeting|session)|schedule (?:a )?(?:call|meeting|session)|arrange (?:a )?(?:\d+[- ]minute )?(?:call|meeting|session)|my availability|availability link)\b/i;
+// The session actually HAPPENED — after this, the offer is history, not an outstanding action.
+const MEETING_HELD_RE = /\b(?:thank you for (?:your|the) time|following (?:up on )?(?:our|the|today'?s) (?:call|session|meeting)|during (?:our|the|today'?s) (?:call|session|meeting)|as discussed (?:on|during) (?:the|our) (?:call|session|meeting)|we had (?:a|our) (?:call|session|meeting)|after (?:our|the) (?:call|session|meeting))\b/i;
+
 // Scan the cleaned chain for those signals. `entries` is newest-first (getCleanChainEntries),
 // `lc` supplies the customer/agent role split so a customer's urgency is not confused with a
 // support template. Returns { recurrence, urgency, impact, unverified, blocker, commitments } —
@@ -5061,7 +5253,8 @@ function detectChainSignals(entries, lc) {
         recurrence: null, urgency: null, impact: null, unverified: null, blocker: null,
         commitments: [], commitmentSource: null, commitmentsSuperseded: false,
         recordedActions: [], recordedActionSource: null,
-        promises: [], promiseSource: null, staleStatements: []
+        promises: [], promiseSource: null, staleStatements: [],
+        openQuestion: null, pendingRequest: null, meetingProposed: null
     };
     if (!entries || !entries.length) return out;
     const custName = ((lc && lc.customerSender) || '').trim();
@@ -5238,7 +5431,13 @@ function detectChainSignals(entries, lc) {
             if (capped) t = t.replace(/\s+\S*$/, '') + '…';
             // "we will be happy to help" / "we will get back to you" / "we will keep you
             // informed" are pleasantries, not commitments to a specific action.
-            if (/^(?:be (?:happy|glad|pleased|assisting|helping|available|unavailable|out of|away|off|on leave)|get back|revert|await|wait|need|require|appreciate|keep you (?:informed|updated|posted|in the loop)|let you know|be in touch|reach out to you)\b/i.test(t)) continue;
+            // "we will need to arrange a 30-minute remote session to raise the log level on the
+            // MobiControl server … and collect Profile Execution Status logs together" is a
+            // COMMITMENT, and a bare `need` in this list threw it away — so the one already-agreed
+            // action on the case never reached the prompt, and the generated plan invented its own
+            // artefacts instead. "we will need the logs" (a request, not an action SOTI performs)
+            // is still dropped: the lookahead only spares "need/require TO <do something>".
+            if (/^(?:be (?:happy|glad|pleased|assisting|helping|available|unavailable|out of|away|off|on leave)|get back|revert|await|wait|need(?!\s+to\s+\S)|require(?!\s+to\s+\S)|appreciate|keep you (?:informed|updated|posted|in the loop)|let you know|be in touch|reach out to you)\b/i.test(t)) continue;
             // "I will be assisting you as my colleague is out of office" is a staffing note, not
             // a commitment to do anything about the fault.
             if (/\bout of (?:the )?office\b|\bon (?:annual |sick )?leave\b/i.test(t)) continue;
@@ -5254,6 +5453,83 @@ function detectChainSignals(entries, lc) {
         if (!found.length) continue;
         out.promises = found.slice(0, 3);
         out.promiseSource = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim() };
+        break;
+    }
+
+    // THE UNANSWERED QUESTION. If the newest thing that happened on this case is the CUSTOMER
+    // asking something, then by construction nobody has answered it — and answering it is the
+    // whole of "what happens next", whatever else the case is about. Nothing extracted this
+    // before, and on case C01720260 the result was a summary whose "current state" was a mail
+    // gateway's spam banner while the customer's actual question — could the 30-minute session be
+    // booked earlier than the 12th? — appeared nowhere in the summary OR the next steps.
+    // Restricted to the NEWEST substantive entry on purpose: a question further back may well have
+    // been answered by the messages that follow it, and claiming otherwise would be a fabrication.
+    const newestSubstantive = entries.find(e => !isOooAutoReply(e) && !isChainLifecycleRow(e) && String(e.body || '').trim());
+    if (newestSubstantive && isCustomer(newestSubstantive)) {
+        const qs = questionsIn(newestSubstantive.body);
+        if (qs.length) {
+            out.openQuestion = {
+                sender: (newestSubstantive.sender || 'the customer').trim(),
+                time: (newestSubstantive.time || '').trim(),
+                quote: qs.slice(0, 2).join(' ').slice(0, 300)
+            };
+        }
+    }
+
+    // WHAT SOTI IS STILL WAITING FOR. The newest support email's explicit ask, kept VERBATIM with
+    // the artefacts it names. Two failures this prevents, both seen on real cases:
+    //   • the plan re-derives an evidence request that was already sent, so the customer is asked
+    //     twice for the same thing;
+    //   • worse, the model substitutes its own artefacts — "raise the log level on the device and
+    //     collect Device.log" replacing the "Profile Execution Status logs from the MobiControl
+    //     server" support had actually asked for, on a case where the customer was mid-way through
+    //     booking the session to collect exactly those.
+    // Only claimed as outstanding when no later customer message says it was supplied.
+    for (const e of entries) {
+        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
+        if (!isSupport(e)) continue;
+        const asks = chainSentences(e.body)
+            .filter(s => SUPPORT_REQUEST_RE.test(s) && s.length >= 15)
+            .map(s => s.slice(0, 260));
+        if (!asks.length) break; // the newest support email asked for nothing — nothing is pending
+        const i = entries.indexOf(e);
+        const laterCustomer = entries.slice(0, i).filter(x => isCustomer(x) && !isOooAutoReply(x) && !isChainLifecycleRow(x));
+        const fulfilled = laterCustomer.some(x => REQUEST_FULFILLED_RE.test(x.body || ''));
+        if (!fulfilled) {
+            out.pendingRequest = {
+                sender: (e.sender || 'SOTI Support').trim(),
+                time: (e.time || '').trim(),
+                quote: asks.slice(0, 3).join(' ').slice(0, 420),
+                // A customer who has written since may well have answered the question IN PROSE
+                // ("it's on 15.5.2") rather than by attaching anything, and REQUEST_FULFILLED_RE
+                // only recognises deliveries. Asserting "not provided" in that situation would be
+                // the same kind of unverified claim this whole block exists to prevent, so the
+                // strength of the statement is set by what is actually knowable.
+                customerRepliedSince: laterCustomer.length > 0
+            };
+        }
+        break;
+    }
+
+    // A LIVE SESSION ALREADY OFFERED, and not yet held. Kept separate from the promise/commitment
+    // machinery because it changes the SHAPE of the next step rather than adding one: with the
+    // offer already sent and the customer replying about slots, the action is to give them
+    // concrete availability and confirm the booking — not to "arrange a 30-minute remote session",
+    // which is what both the log-access directive and the model's own instincts otherwise produce.
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
+        if (!isSupport(e)) continue;
+        const m = String(e.body || '').match(MEETING_PROPOSED_RE);
+        if (!m) continue;
+        const held = entries.slice(0, i).some(x => MEETING_HELD_RE.test(x.body || ''));
+        if (!held) {
+            out.meetingProposed = {
+                sender: (e.sender || 'SOTI Support').trim(),
+                time: (e.time || '').trim(),
+                quote: quoteAround(e.body, m.index, m[0].length)
+            };
+        }
         break;
     }
     return out;
@@ -5282,12 +5558,29 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     const closing = !!(lc && lc.state === 'closure');
     const has = sig.recurrence || sig.urgency || sig.impact || sig.unverified || sig.blocker
         || (sig.commitments && sig.commitments.length) || (sig.promises && sig.promises.length)
-        || (sig.recordedActions && sig.recordedActions.length);
+        || (sig.recordedActions && sig.recordedActions.length)
+        || sig.openQuestion || sig.pendingRequest || sig.meetingProposed;
     if (!has) return '';
     const q = (s) => `${s.sender}${s.time ? ` (${s.time})` : ''}: "${s.quote}"`;
     const lines = [closing
         ? '[DECISIVE CASE SIGNALS — extracted verbatim from the chain by exact text match. THESE ARE FACTS, and each is dated. This case is CLOSING (see the CASE STATE directive): anything below that predates the closure is case HISTORY — report it as something that happened earlier in the case, never as an open demand or an outstanding action.]'
         : '[DECISIVE CASE SIGNALS — extracted verbatim from the chain by exact text match. THESE ARE FACTS. Every one listed here MUST appear in your answer; omitting one is an error, and no other content may displace them.]'];
+    // Placed FIRST, ahead of every other signal: when the newest message on the case is the
+    // customer asking something, that question IS the current state and answering it IS the next
+    // step — no amount of correct troubleshooting detail makes up for a summary that misses it.
+    if (sig.openQuestion) {
+        lines.push(`- UNANSWERED QUESTION FROM THE CUSTOMER — this is the NEWEST message on the case, so nobody has replied to it yet. ${q(sig.openQuestion)}`);
+    }
+    // On a case that is CLOSING, an evidence request from earlier is history: chasing it would
+    // contradict the CASE STATE directive, which allows closure actions and nothing else.
+    if (sig.pendingRequest && !closing) {
+        lines.push(sig.pendingRequest.customerRepliedSince
+            ? `- ALREADY REQUESTED FROM THE CUSTOMER — SOTI Support asked for this; the customer has written since, but nothing in the chain shows these artefacts arriving. Treat it as still owed unless a later message answers it. ${q(sig.pendingRequest)}`
+            : `- OUTSTANDING REQUEST TO THE CUSTOMER — SOTI Support asked for this and the customer has not replied since. ${q(sig.pendingRequest)}`);
+    }
+    if (sig.meetingProposed && !closing) {
+        lines.push(`- A LIVE SESSION HAS ALREADY BEEN OFFERED and the chain does not show it has been held yet. ${q(sig.meetingProposed)}`);
+    }
     if (sig.recurrence) {
         lines.push(`- RECURRENCE — the customer reported the SAME issue happening AGAIN after it had previously been treated as fixed. ${q(sig.recurrence)}`);
     }
@@ -5327,7 +5620,16 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         const src = sig.recordedActionSource;
         lines.push(`- ACTIONS/FINDINGS ALREADY RECORDED${src ? ` by ${src.sender} in ${srcArticle(src.type)}${src.time ? ` (${src.time})` : ''}` : ''} — these are things ALREADY done or ALREADY established, NOT things to do: ${sig.recordedActions.map(c => `"${c}"`).join('; ')}.`);
     }
-    if (sig.promises && sig.promises.length) {
+    // A promise quoted out of the SAME sentence the outstanding request already quotes is the same
+    // fact three times over — three near-identical paragraphs, on a budget where the case history
+    // is what gets trimmed to pay for them. The mandates below still apply; only the duplicate
+    // quote is dropped.
+    const promisesEchoRequest = !!(sig.pendingRequest && sig.promises && sig.promises.length
+        && sig.promises.every(p => {
+            const head = String(p).replace(/…$/, '').slice(0, 60).toLowerCase();
+            return head.length > 20 && sig.pendingRequest.quote.toLowerCase().includes(head);
+        }));
+    if (sig.promises && sig.promises.length && !promisesEchoRequest) {
         const src = sig.promiseSource;
         const who = src ? ` by ${src.sender}${src.time ? ` (${src.time})` : ''}` : '';
         const what = sig.promises.map(c => `"we will ${c}"`).join('; ');
@@ -5341,6 +5643,9 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     }
     if (kind === 'email') {
         const asks = [];
+        if (sig.openQuestion) asks.push("ANSWER the customer's unanswered question above directly, in its first paragraph — it is the reason they are waiting, and a reply that does not answer it reads as if their email was never opened");
+        if (sig.pendingRequest) asks.push('restate what SOTI is still waiting for using EXACTLY the artefacts already named in the outstanding request above — never substitute different logs, files or steps');
+        if (sig.meetingProposed) asks.push('treat the live session as already OFFERED — give concrete availability and get it booked, rather than proposing a session again as though it were a new idea');
         if (sig.recurrence) asks.push('acknowledge explicitly that the issue RECURRED (do not write as though the first fix held)');
         if (sig.impact || sig.urgency) asks.push('acknowledge the operational impact the customer described, in their terms');
         if (sig.unverified) asks.push('never write as though a test/upgrade the customer said they could NOT confirm has been confirmed — treat that outcome as still open');
@@ -5349,6 +5654,7 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         lines.push(`Because of this, the email MUST ${asks.join('; ')}. Never send a reply that reads as if the case were quietly resolved.`);
     } else if (small) {
         const asks = [];
+        if (sig.openQuestion) asks.push("that the case is waiting on SOTI to answer the customer's question quoted above (say what they asked, in English)");
         if (sig.recurrence) asks.push('the recurrence (the problem came back after being treated as fixed)');
         // On a closing case the escalation is history and belongs in the narrative of how the case
         // went, not in the statement of where it stands. Requiring it here is what put "The
@@ -5360,10 +5666,29 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         if (sig.unverified) asks.push('that this is NOT yet confirmed — you are FORBIDDEN from stating any outcome the chain does not state');
         if (sig.blocker) asks.push('the separate fault blocking progress, with its case/ticket number');
         if (asks.length) lines.push(`MANDATORY FOR "Summary:" — state ${asks.join('; ')}. Use the customer's own terms and do not soften or drop any of them.`);
+        if (sig.openQuestion) lines.push(closing
+            ? 'The customer\'s question above is still unanswered — state it in "Summary:". What "Next steps:" may contain is decided by the CASE STATE directive, not by this signal.'
+            : 'MANDATORY FOR "Next steps:" — step 1 MUST be replying to the customer with the answer to that question. Nothing may come before it.');
+        if (sig.pendingRequest && !closing) lines.push('MANDATORY — the outstanding request above has ALREADY been sent: put it under "Troubleshoots done" as the request that was made, and in "Next steps:" chase EXACTLY the artefacts it names. Naming a different log file or a different collection method than the one already asked for is FORBIDDEN.');
+        if (sig.meetingProposed && !closing) lines.push('MANDATORY — the live session above was ALREADY offered. Do NOT write "arrange a session" as a next step; write CONFIRMING it — give concrete availability, get it booked, and say which log level is raised on which server role and which named artefacts are captured on the call.');
         if (sig.commitments && sig.commitments.length && !commitmentsStale) lines.push('MANDATORY FOR "Next steps:" — every ALREADY-COMMITTED next step above must be a numbered step, made executable (name the artefact + server role + what result decides it), BEFORE any newly proposed investigation.');
         if (sig.recordedActions && sig.recordedActions.length) lines.push('MANDATORY FOR "Troubleshoots done:" — every ACTIONS/FINDINGS ALREADY RECORDED line above belongs there. Never turn one into a next step. Keep them in the THIRD PERSON as written above (they name who did it) — never write "I" or "we" anywhere in your answer.');
-        if (sig.promises && sig.promises.length && !closing) lines.push('MANDATORY — never contradict or walk back anything already PROMISED to the customer above.');
+        if (sig.promises && sig.promises.length && !closing && !promisesEchoRequest) lines.push('MANDATORY — never contradict or walk back anything already PROMISED to the customer above.');
     } else {
+        if (sig.openQuestion && closing) {
+            // A question the customer asked is a fact the summary owes them either way, but on a
+            // closing case the CASE STATE directive owns "Next steps:" outright — two MANDATORY
+            // instructions demanding different first steps is worse than one softened one.
+            lines.push('MANDATORY FOR "Summary:" — the customer\'s question quoted above has not been answered; say so, and say what they asked in plain English. "Next steps:" is governed by the CASE STATE directive: do NOT add a reply step that contradicts it.');
+        } else if (sig.openQuestion) {
+            lines.push('MANDATORY — the unanswered question above is WHERE THIS CASE STANDS RIGHT NOW. "Summary:" MUST end by stating that the case is waiting on SOTI to answer it, naming who asked and when, and saying what they asked in plain English (translate it if it was not written in English). "Next steps:" MUST open with replying to them with that answer, spelling out what the reply has to contain to actually settle the question — nothing may be listed before it. Writing a plan that leaves the customer\'s newest question unanswered is the worst error you can make on this case.');
+        }
+        if (sig.pendingRequest && !closing) {
+            lines.push('MANDATORY — the outstanding request above was ALREADY SENT to the customer. Record it under "Troubleshoots done" as the request that was made (with what was asked for), and in "Next steps:" chase EXACTLY the artefacts, server role and collection method it names. You are FORBIDDEN from replacing them with your own choice of log file, tool or procedure, and from asking the customer for the same thing twice under a different name.');
+        }
+        if (sig.meetingProposed && !closing) {
+            lines.push('MANDATORY — the live session above has ALREADY been offered, so proposing one is NOT a next step and belongs under "Troubleshoots done" as an offer already made. The step is to CONFIRM it: give the customer concrete availability (honouring any constraint they stated about timing), get it booked, and state what will be done ON the session — which log level is raised, on which server role, what is reproduced, and which named artefacts are captured. Any step that reads as arranging the session from scratch is wrong.');
+        }
         if (sig.recurrence) {
             lines.push('MANDATORY FOR "Summary:" — the recurrence is the single most decisive fact on this case and MUST be stated there, with who reported it and when. A newer message saying the issue was fixed does NOT cancel it: report BOTH, and say plainly that the problem has now returned once after an earlier fix, so any current "resolved" status is provisional.');
         }
@@ -5395,7 +5720,7 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         if (sig.recordedActions && sig.recordedActions.length) {
             lines.push('MANDATORY FOR "Troubleshoots done:" — every line listed under "ACTIONS/FINDINGS ALREADY RECORDED" is part of this case\'s history and MUST be reflected there (merge it with an equivalent bullet rather than repeating it). It is FORBIDDEN to turn any of them into a "Next step": they have already happened. Each one already names the engineer who did it: keep that THIRD-PERSON attribution and never write "I" or "we" anywhere in your answer — this is a case record, not a personal note.');
         }
-        if (sig.promises && sig.promises.length && !closing) {
+        if (sig.promises && sig.promises.length && !closing && !promisesEchoRequest) {
             lines.push('MANDATORY — SOTI has already promised the actions listed under "ALREADY PROMISED TO THE CUSTOMER IN WRITING". You are FORBIDDEN from writing a step, or any wording, that contradicts, walks back, or refuses one of them. If a cheaper or faster route exists, present it as the first thing to TRY, and keep the promised action as the step that follows if it does not resolve the issue — never as a replacement for it, and never phrased as telling the customer they were wrong to ask.');
         }
     }
@@ -5722,6 +6047,77 @@ function buildCaseStateDirective(lc, kind, small) {
 }
 
 // ---------------------------------------------------------------------------
+// CHAIN LANGUAGE — the correspondence is not always in English
+// ---------------------------------------------------------------------------
+// SOTI Support is global and half of a chain routinely arrives in the customer's own language.
+// Left unremarked, a model does one of two things with it, and both were observed on the same
+// Russian case: it skips the message entirely (so the customer's only question never reached the
+// summary), or it describes the message instead of reading it — "the customer received a
+// suspicious email", written about two perfectly ordinary Russian sentences asking whether an
+// earlier meeting slot was available. Naming the language as a FACT and demanding a translated
+// answer costs about 400 characters and removes both failures.
+const CHAIN_SCRIPTS = [
+    { re: /[Ѐ-ӿ]/g, name: 'Cyrillic script (Russian/Ukrainian and related languages)' },
+    { re: /[Ͱ-Ͽ]/g, name: 'Greek' },
+    { re: /[֐-׿]/g, name: 'Hebrew' },
+    { re: /[؀-ۿݐ-ݿ]/g, name: 'Arabic script' },
+    { re: /[฀-๿]/g, name: 'Thai' },
+    { re: /[぀-ヿ]/g, name: 'Japanese' },
+    { re: /[가-힯]/g, name: 'Korean' },
+    { re: /[一-鿿]/g, name: 'Chinese' }
+];
+// Latin-script languages need words rather than code points. Two DISTINCT hits are required so a
+// single loan word ("merci", "danke") in an English email proves nothing.
+const CHAIN_LATIN_LANGUAGES = [
+    { name: 'French', words: [/\bbonjour\b/i, /\bcordialement\b/i, /\bmerci\b/i, /\bnous avons\b/i, /\bs'il vous pla[iî]t\b/i, /\bveuillez\b/i] },
+    { name: 'German', words: [/\bsehr geehrte[rn]?\b/i, /\bmit freundlichen gr[üu]ßen\b/i, /\bbitte\b/i, /\bwir haben\b/i, /\bvielen dank\b/i, /\bnicht\b/i] },
+    { name: 'Spanish', words: [/\bhola\b/i, /\bgracias\b/i, /\bsaludos\b/i, /\bhemos\b/i, /\bpor favor\b/i, /\bel dispositivo\b/i] },
+    { name: 'Portuguese', words: [/\bol[áa]\b/i, /\bobrigad[oa]\b/i, /\bcumprimentos\b/i, /\bn[ãa]o\b/i, /\bpor favor\b/i, /\bdispositivos?\b/i] },
+    { name: 'Italian', words: [/\bbuongiorno\b/i, /\bgrazie\b/i, /\bcordiali saluti\b/i, /\babbiamo\b/i, /\bper favore\b/i] },
+    { name: 'Dutch', words: [/\bmet vriendelijke groet\b/i, /\bbedankt\b/i, /\balvast\b/i, /\bwij hebben\b/i, /\bgraag\b/i] }
+];
+
+// Which languages other than English this chain actually contains. `entries` are CLEANED, so a
+// legal footer in another language can no longer be what triggers this.
+function detectChainLanguages(entries) {
+    const text = (entries || []).map(e => String((e && e.body) || '')).join('\n');
+    if (!text.trim()) return [];
+    const found = [];
+    for (const s of CHAIN_SCRIPTS) {
+        s.re.lastIndex = 0;
+        const hits = (text.match(s.re) || []).length;
+        if (hits >= 12) found.push(s.name);   // a dozen characters — not a stray symbol
+    }
+    // Japanese is written WITH kanji, so a Japanese chain trips the Chinese test too. Kana are
+    // unique to Japanese, so when they are present the CJK ideographs belong to it — reporting
+    // both would put a language the customer does not write into a block labelled FACT.
+    if (found.includes('Japanese')) {
+        const i = found.indexOf('Chinese');
+        if (i !== -1) found.splice(i, 1);
+    }
+    for (const l of CHAIN_LATIN_LANGUAGES) {
+        if (l.words.filter(w => w.test(text)).length >= 2) found.push(l.name);
+    }
+    return [...new Set(found)].slice(0, 3);
+}
+
+// kind: 'summary' | 'email' | 'fix'. `entries` = getCleanChainEntries output.
+function buildChainLanguageDirective(entries, kind = 'summary') {
+    const langs = detectChainLanguages(entries);
+    if (!langs.length) return '';
+    const list = langs.length === 1 ? langs[0] : `${langs.slice(0, -1).join(', ')} and ${langs[langs.length - 1]}`;
+    const lines = [
+        `[CHAIN LANGUAGE — FACT, measured from the message text itself: part of this correspondence is written in ${list}.]`,
+        '- Those messages are ordinary case content written by the people on this case. READ them and use what they actually say — they carry the same weight as the English ones, and on a chain like this the newest one is very often where the case now stands.',
+        '- You are FORBIDDEN from describing a message as unreadable, unclear, foreign, suspicious or untrustworthy because of the language it is written in, and from treating the language itself as an event on the case.'
+    ];
+    lines.push(kind === 'email'
+        ? `- Write the email in the language SOTI Support has been using with this customer in the chain. Anything you take from a ${list} message must be understood and answered on its substance, never echoed back untranslated.`
+        : `- Write your ENTIRE answer in English. Translate anything you take from a ${list} message into English — never quote a sentence in the original language without stating what it means.`);
+    return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // MC HOSTED — who is actually able to collect the server-side evidence
 // ---------------------------------------------------------------------------
 // The "MC Hosted" field in the Case Info panel decides HALF of every next-steps list, and
@@ -5776,7 +6172,7 @@ function buildLogAccessDirective(kind = 'summary', small = false) {
             'The customer hosts and administers this server themselves, so SOTI Support has NO backend access. Every piece of server-side evidence must come FROM THE CUSTOMER.',
             '- Each request MUST be specific enough to action without a follow-up: name the exact log file and the server role it lives on (e.g. MS.log on the Management Server, DS.log on the Deployment Server), the log level to raise BEFORE reproducing, and the exact time window with time zone to capture.',
             '- Logs collected unattended routinely come back at the wrong log level, from the wrong server, or with no coverage of the failure.',
-            '- MANDATORY: because the server is the customer\'s, arranging a working session with them is itself a next step and MUST appear as its OWN numbered step in "Next steps:" — never folded into another step, never left implied, and never reduced to "request the logs". Write it as a bookable action: "Arrange a 30-minute remote session (Teams/WebEx) with <the customer contact> to raise the log level on <server role>, reproduce the issue live, note the exact timestamp, and collect <named log files> together on the call." Name who needs to attend from the customer side when it requires server access they alone hold.',
+            '- MANDATORY: because the server is the customer\'s, a working session with them is itself a next step and MUST appear as its OWN numbered step in "Next steps:" — never folded into another step, never left implied, and never reduced to "request the logs". Write it as a bookable action: "Arrange a 30-minute remote session (Teams/WebEx) with <the customer contact> to raise the log level on <server role>, reproduce the issue live, note the exact timestamp, and collect <named log files> together on the call." Name who needs to attend from the customer side when it requires server access they alone hold. If the DECISIVE CASE SIGNALS say a session has ALREADY been offered, this step is to CONFIRM and BOOK that session (with concrete availability) instead of proposing it again.',
             '- Do NOT write steps that assume SOTI can read the server, restart its services, or query its database directly — the agent cannot.'
         ];
         if (kind === 'email') {
@@ -6233,6 +6629,13 @@ const CONCRETE_ANCHOR_RE = new RegExp([
     '\\b(?:MS|DS|DSE)\\.log\\b',
     '\\b(?:SqlException|Login failed for user|Return value 3|1603|HTTP\\s*\\d{3})\\b',
     '\\bDevice Debug Report\\b|\\bDDR\\b',
+    // A NAMED product artefact that is not a file on disk. "Check the Profile Execution Status
+    // logs for the removal result at that timestamp" is exactly as actionable as naming MS.log —
+    // it says which view the engineer opens — yet with only "*.log" in this list the vague-step
+    // filter deleted it as "check … logs", on the very case whose agreed next action was to
+    // collect those logs. Title Case is what distinguishes the product's own name for a thing
+    // ("Profile Execution Status") from the generic noun the filter exists to catch ("the logs").
+    '\\b(?:[A-Z][\\w-]+\\s+){1,4}(?:logs?|report|status|console|service|profile|policy|package|queue|job)\\b',
     '\\bEvent Viewer\\b|\\bApplication event log\\b|\\bWindows Event\\b',
     '"[^"\\n]{4,}"',                                                    // an exact quoted string
     '\\b\\w+\\s*(?:>|→|->)\\s*\\w+',                                    // a console path
@@ -6435,6 +6838,11 @@ function coverageHit(answer, quote) {
 // a summary carries "the customer could not confirm the fix" if it says so in ANY words, and the
 // vocabulary for each of these is small and specific.
 const COVERAGE_SEMANTICS = {
+    // An unanswered question is carried however the summary phrases it — "is waiting on a reply",
+    // "asked whether…", "has not been answered". Requiring the customer's own words would fail on
+    // a chain whose question was asked in another language and correctly translated.
+    openQuestion: /\bask(?:ed|ing|s)?\b|\bquestion\b|\bquer(?:y|ied|ies)\b|\bawait\w*|\bwaiting (?:on|for)\b|\bunanswered\b|\bhas not (?:been )?(?:answered|replied)\b|\brequested (?:an?|earlier|more)\b|\bwants? to know\b|\benquir\w*/i,
+    pendingRequest: /\brequest(?:ed|ing|s)?\b|\bask(?:ed|ing)\b|\bprovide\b|\bawait\w*|\byet to (?:provide|send|share)\b|\bnot (?:yet )?(?:provided|sent|supplied|received)\b|\boutstanding\b|\bstill needs?\b/i,
     recurrence: /\bagain\b|\brecurr\w*|\bre-?appear\w*|\bre-?occur\w*|\bcame? back\b|\bhas returned\b|\bstill (?:not|un)\w*|\bpersist\w*|\bnot (?:fully )?(?:resolved|fixed)\b/i,
     urgency: /\burgen\w*|\bpriorit\w*|\bescalat\w*|\bexpedite\w*|\basap\b|\bcritical\b|\bimmediate\w*|\bimportance\b|\bas soon as\b|\bquickly\b/i,
     impact: /\bproduction\b|\bbusiness[- ](?:impact|critical)\b|\bimpact\w*|\baffect\w*|\boutage\b|\bwidespread\b|\ball (?:their |the )?(?:windows |enrolled )?(?:machines|devices)\b|\bcannot (?:assist|serve|work|support)\b/i,
@@ -6473,6 +6881,17 @@ function splitSentences(body) {
 function repairSentenceFor(key, s) {
     const q = String((s && s.quote) || '');
     switch (key) {
+        case 'openQuestion': {
+            const who = String((s && s.sender) || '').trim();
+            const when = String((s && s.time) || '').trim();
+            // The question itself is quoted rather than paraphrased: it may be in any language,
+            // and a deterministic repair must not attempt a translation it cannot verify.
+            return `The case is currently waiting on SOTI to answer ${who ? who + "'s" : "the customer's"} latest message${when ? ` of ${when}` : ''}, which asks: "${q}".`;
+        }
+        case 'pendingRequest': {
+            const when = String((s && s.time) || '').trim();
+            return `SOTI Support has already asked the customer for the evidence described${when ? ` on ${when}` : ''}, and nothing in the chain shows it arriving.`;
+        }
         case 'recurrence':
             return 'The customer has reported that the issue returned after previously being treated as fixed.';
         case 'urgency':
@@ -6516,6 +6935,18 @@ function checkCaseSummaryCoverage(text, info) {
             re: /\b(?:confirmed|verified|validated)\b[^.\n]{0,40}\b(?:no change|no difference|did not (?:fix|resolve|help)|does not (?:fix|resolve|help)|unchanged|persists?)\b/i
         });
     }
+    // A spam/phishing banner is stamped on by a mail GATEWAY, and a confidentiality footer by the
+    // sender's mail system. Neither is a case event, and a summary that reports one is describing
+    // the plumbing: "the customer received a suspicious email", "the current state is that the
+    // customer has the SOTI documentation regarding a suspected phishing attempt". Armed ONLY when
+    // the chain provably carries such a banner — if a human on this case genuinely raised phishing,
+    // there is no banner to blame and the sentence stands.
+    if (info.gatewayBoilerplate) {
+        falseClaims.push({
+            why: 'reported a mail-gateway spam/phishing banner as a case event',
+            re: /\b(?:phishing|suspected spam|spam (?:banner|warning|filter)|suspicious (?:e-?mail|message|sender)|external[- ]sender warning|confidentiality (?:notice|footer))\b/i
+        });
+    }
     if (falseClaims.length) {
         src = editSummarySection(src, (body) => {
             const sentences = splitSentences(body);
@@ -6529,6 +6960,14 @@ function checkCaseSummaryCoverage(text, info) {
             return kept.join('').replace(/[^\S\n]{2,}/g, ' ');
         });
     }
+
+    // 1b. DELETE any BULLET OR STEP built out of that same boilerplate. Pass 1 only edits the
+    //    "Summary:" section, and the damage does not stop there: the observed answer also carried
+    //    "- Uzorin Konstantin Evgenevich provided a suspicious email as an attachment" under
+    //    Troubleshoots done and "2. Request the customer to provide the contents of the email
+    //    received from EU - Support … as an attachment for further analysis" under Next steps —
+    //    an instruction to ask the customer to send back SOTI's own reply.
+    src = stripBoilerplateLines(src, applied, lc, info.gatewayBoilerplate);
 
     // 2. STRIKE OUT any point-in-time status the case has moved past. detectChainSignals keeps
     //    these out of the prompt, but the model reads the raw chain too, so the claim can still
@@ -6552,6 +6991,10 @@ function checkCaseSummaryCoverage(text, info) {
     const closing = lc.state === 'closure';
     const missing = [];
     const wants = [
+        // An unanswered question IS the current state, so it is restored first and on every state:
+        // a case whose customer has just asked something is not finished, whatever else was said.
+        ['openQuestion', sig.openQuestion],
+        ['pendingRequest', closing ? null : sig.pendingRequest],
         ['recurrence', sig.recurrence],
         ['urgency', closing ? null : sig.urgency],
         ['impact', closing ? null : sig.impact],
@@ -6561,7 +7004,13 @@ function checkCaseSummaryCoverage(text, info) {
     for (const [key, s] of wants) {
         if (!s || !s.quote) continue;
         const semantic = COVERAGE_SEMANTICS[key];
-        const covered = (semantic && semantic.test(src)) || coverageHit(src, s.quote);
+        // A quote with no Latin content words — the customer wrote in Russian, Greek, Chinese —
+        // tokenises to nothing, and coverageHit's "no tokens means nothing to look for" shortcut
+        // then declares EVERY such fact already covered. That is the exact opposite of the truth:
+        // a summary is far more likely to drop a message it could not read. When word overlap
+        // cannot decide, the MEANING test decides alone, and a fact with neither is restored.
+        const wordCheckable = coverageTokens(s.quote).length > 0;
+        const covered = (semantic && semantic.test(src)) || (wordCheckable && coverageHit(src, s.quote));
         if (covered) continue;
         const sentence = repairSentenceFor(key, s);
         if (sentence) { missing.push(sentence); applied.push(`restored: ${key}`); }
@@ -6570,7 +7019,7 @@ function checkCaseSummaryCoverage(text, info) {
     // referencedCaseNumbers already excludes this case's own number (including when the
     // case-number field is empty and the only number in the chain is its own).
     try {
-        const refs = referencedCaseNumbers(info.chain, info.caseNumber).filter(n => !src.includes(n));
+        const refs = referencedCaseNumbers(info.refText || info.chain, info.caseNumber).filter(n => !src.includes(n));
         if (refs.length) {
             missing.push(`The chain also references case ${refs.join(' and ')}.`);
             applied.push(`restored: referenced case ${refs.join(', ')}`);
@@ -6580,6 +7029,54 @@ function checkCaseSummaryCoverage(text, info) {
     if (missing.length) src = appendToSummarySection(src, missing.join(' '));
     if (applied.length) console.info('[Case summary] repaired —', applied.join('; '));
     return src;
+}
+
+// A bullet or numbered step that exists only because the model read mail-system boilerplate as
+// case content. Both halves must be present for a line to go:
+//   • it is ABOUT the boilerplate — a spam/phishing/external-sender banner, a confidentiality
+//     footer, or the quoted copy of an email already in this chain;
+//   • and it is phrased as an EVENT or an ACTION (someone sent/received/attached it, or the
+//     engineer is told to ask for it).
+// A line that merely mentions the word "email" survives, and so does a line about a genuine
+// security topic that is not one of these artefacts.
+const BOILERPLATE_SUBJECT_RE = /\b(?:phishing|suspected spam|spam (?:banner|warning|filter)|suspicious (?:e-?mail|message|sender|link)|external[- ]sender (?:warning|banner)|confidentiality (?:notice|footer|disclaimer)|legal disclaimer)\b/i;
+const BOILERPLATE_ACTION_RE = /\b(?:provided|sent|forward\w*|attach\w*|received|request(?:ing|ed)?|ask(?:ing|ed)?|obtain|share[ds]?|analyse|analyze|review|investigat\w*|escalat\w*|report(?:ing|ed)?|verify|confirm)\b/i;
+
+// A step telling the engineer to ask the customer for an email SOTI ITSELF sent. It reaches the
+// answer by a different route from the banner (the model saw a quoted SOTI reply inside the
+// customer's message and read it as an artefact the customer holds), it names no banner word at
+// all, and it is the single most embarrassing line the summary produced:
+//   "2. Request Konstantin Uzorin to provide the contents of the email received from EU - Support
+//    <support.eu@> dated 31 июля 2026 г. in 18:48 as an attachment for further analysis."
+// Deleted whenever the email is attributed to a sender this chain proves is SOTI-side — asking a
+// customer to send SOTI's own correspondence back is never a valid action.
+function asksCustomerForSotiOwnEmail(line, sotiNames) {
+    if (!/\b(?:provide|send|forward|share|obtain|request|supply)\b/i.test(line)) return false;
+    const m = line.match(/\b(?:e-?mail|message|correspondence)\b[^.\n]{0,80}?\bfrom\s+([^,<(\n]{2,40})/i);
+    if (!m) return false;
+    const who = m[1].trim();
+    if (/\bsoti\b|\bsupport\b/i.test(who)) return true;
+    return (sotiNames || []).some(n => n && sameSenderName(n, who));
+}
+
+// gatewayBoilerplate — whether the chain provably carries a mail-gateway banner. Only THAT half of
+// the pass is gated on it: on a case where a human genuinely reported a phishing email, the
+// bullets about phishing are the case and must stay. Asking the customer to send SOTI's own email
+// back is wrong on every case, so it is deleted unconditionally.
+function stripBoilerplateLines(text, applied, lc, gatewayBoilerplate) {
+    const src = String(text || '');
+    const sotiNames = [(lc && lc.agentSender) || '', ...((lc && lc.sotiStaff) || [])].filter(Boolean);
+    const kept = [];
+    let removed = 0;
+    for (const line of src.split('\n')) {
+        const isListItem = /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(line);
+        if (isListItem && ((gatewayBoilerplate && BOILERPLATE_SUBJECT_RE.test(line) && BOILERPLATE_ACTION_RE.test(line))
+            || asksCustomerForSotiOwnEmail(line, sotiNames))) { removed++; continue; }
+        kept.push(line);
+    }
+    if (!removed) return src;
+    if (applied) applied.push(`removed ${removed} line${removed === 1 ? '' : 's'} written about mail-system boilerplate`);
+    return renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
 }
 
 // Add sentences to the end of the "Summary:" paragraph (or to the end of the answer when it has
@@ -6781,7 +7278,15 @@ function buildChainChronology(ci, purpose, opts = {}) {
         const when = compact
             ? (formatChainDate(e, { shortMonth: true, noTime: true }) || e.time || 'undated')
             : (formatChainDate(e) || e.time || 'undated');
-        const who = compact ? (bareSenderName(e.sender) || 'unknown') : ((e.sender || 'unknown').trim());
+        // ONE PERSON, ONE NAME. The Salesforce contact record and the mail feed write the same
+        // human differently ("Konstantin Uzorin (JSC AMT Group)" on the Case-created row,
+        // "Uzorin Konstantin Evgenevich" on his emails), and a scaffold that prints both forms
+        // invites the summary to report them as two participants. Whoever a line's author
+        // provably IS, they are named the way the verified PEOPLE line names them.
+        const rawWho = compact ? (bareSenderName(e.sender) || 'unknown') : ((e.sender || 'unknown').trim());
+        const who = (lc && lc.customerSender && e.sender && sameSenderName(e.sender, lc.customerSender)) ? lc.customerSender
+            : (lc && lc.agentSender && e.sender && sameSenderName(e.sender, lc.agentSender)) ? lc.agentSender
+                : rawWho;
         return `- ${when} — ${who}${tags.length ? ` [${tags.join(', ')}]` : ''}: "${g.text}${g.truncated ? '…' : ''}"`;
     });
     const totalBudget = Math.max(1200, opts.budget || (isSmallLocalModel() ? 4600 : 9000));
@@ -6810,15 +7315,19 @@ function buildChainChronology(ci, purpose, opts = {}) {
     // so they can never be lost to gisting/truncation. The case's OWN number is excluded.
     let refCasesLine = '';
     try {
-        const refs = referencedCaseNumbers(raw, (ci && ci.case_number) || '');
+        // The Issue Summary is scanned alongside the emails: the customer very often names the
+        // earlier case they are comparing this one to in the case description they filed
+        // ("a similar issue to the one described in macOS case C01698144") and never mentions it
+        // again in an email, so a chain-only scan loses the single most useful pointer on the case.
+        const refs = referencedCaseNumbers(`${raw}\n${(ci && ci.issue_summary) || ''}`, (ci && ci.case_number) || '');
         if (refs.length) {
             // NOT only "an earlier case that fixed this": on the case that prompted this change
             // the referenced case was an ACTIVE, unrelated fault blocking the test the customer
             // was asked to run — and the summary mentioned neither the case number nor the block.
             const use = 'An email may reference another case because it RESOLVED a similar issue before, or because ITS problem is currently BLOCKING this case. Either way it is decisive:';
             refCasesLine = grounding
-                ? `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. ${use} name the number in the Summary and make reviewing/clearing that case a numbered Next step.]`
-                : `\n[REFERENCED SOTI CASES — other case numbers mentioned INSIDE the emails (NOT this case): ${refs.join(', ')}. ${use} name the number in Key Details and Current Status, and make reviewing/clearing that case a numbered Next Step.]`;
+                ? `\n[REFERENCED SOTI CASES — other case numbers named in this case's description or emails (NOT this case): ${refs.join(', ')}. ${use} name the number in the Summary and make reviewing/clearing that case a numbered Next step.]`
+                : `\n[REFERENCED SOTI CASES — other case numbers named in this case's description or emails (NOT this case): ${refs.join(', ')}. ${use} name the number in Key Details and Current Status, and make reviewing/clearing that case a numbered Next Step.]`;
         }
     } catch (e) { }
     const n = all.length;
@@ -7607,7 +8116,19 @@ function buildCaseHeadline(maxChars = 160) {
 }
 
 function buildCaseResearchQuery() {
-    const symptom = buildCaseSymptomText(600);
+    // Non-Latin text is dropped from the QUERY only (never from the symptom text the playbook
+    // scores): SOTI Pulse, the release notes and the offline knowledge base are all written in
+    // English, so a Russian sentence in the query spends the character budget on tokens that
+    // cannot match anything — while pushing the English symptom words out of the 700-character cap.
+    // Dropped by SENTENCE, not by character: deleting the letters of "Есть слоты пораньше, чем 12
+    // число?" leaves ", 12 ?" behind, and that debris is what the search engine then weighs.
+    const symptom = buildCaseSymptomText(900)
+        .split(/(?<=[.!?])\s+|\n+/)
+        .filter(seg => !/[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(seg))
+        .join(' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+        .slice(0, 600);
     if (!symptom) return '';
     return ('troubleshoot issue: ' + symptom).slice(0, 700);
 }
@@ -13786,7 +14307,7 @@ async function generateCaseSummary() {
     // get online research (release notes / Pulse docs) so the troubleshooting next steps
     // can cite real fixes; closure cases skip research entirely (irrelevant + slow).
     const chainRaw = $('emailChain').value || '';
-    const ciForChain = { email_chain: chainRaw, case_number: $('caseNum').value || '' };
+    const ciForChain = { email_chain: chainRaw, case_number: $('caseNum').value || '', issue_summary: $('issueSummary').value || '' };
     const lc = detectCaseLifecycleState({ email_chain: chainRaw });
     const stateDirective = buildCaseStateDirective(lc, 'summary');
     // Decisive signals (recurrence / urgency / business impact / unverified outcomes / blockers /
@@ -13794,9 +14315,18 @@ async function generateCaseSummary() {
     // summary that drops the customer's "same error again" is wrong no matter how well it reads.
     // Applies to closure cases too: a recurrence is exactly the thing that must stop a case being
     // summarised as done.
+    const cleanEntries = (() => {
+        try { return getCleanChainEntries(chainRaw); } catch (e) { return []; }
+    })();
     const signals = (() => {
-        try { return detectChainSignals(getCleanChainEntries(chainRaw), lc); }
+        try { return detectChainSignals(cleanEntries, lc); }
         catch (e) { return null; }
+    })();
+    // Half of a chain routinely arrives in the customer's own language. Naming it as fact is what
+    // turns "the customer received a suspicious email" back into "the customer asked whether an
+    // earlier slot than the 12th is available".
+    const langDirective = (() => {
+        try { return buildChainLanguageDirective(cleanEntries, 'summary'); } catch (e) { return ''; }
     })();
     const signalsBlock = (() => {
         try { return signals ? buildCaseSignalsBlock(signals, 'summary', undefined, lc) : ''; }
@@ -13891,16 +14421,18 @@ ${historyRule}
 - Never state or imply that the case is closed, closing, resolved or in closure unless the CASE STATE directive below says so.
 - Refer to people by name (e.g. "Ayodeji"), never by internal message numbers. Do NOT output a dated timeline.${peopleLine}
 - CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as SOTI Support, or with a SOTI support job title (e.g. "Technical Support, SOTI", "Senior Technical Support Specialist", "Technical Account Manager"), or who writes [INTERNAL] notes / [CALL LOG] entries, is SOTI-side — NEVER write that they are experiencing the issue or that they reported it. If no customer name is given, say "the customer".
+- ONE PERSON, ONE NAME: the same human appears in the case record under different forms of their name (a contact record, a mail display name, a surname-first form, with or without their company). Never present two forms of one name as two different people, and never give them different roles.
 ${NO_SCAFFOLD_PROMPT_RULE}
+${NO_BOILERPLATE_PROMPT_RULE}
 - Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
 
-Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported, how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
+Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported (including the exact symptom in their words, any EARLIER case they compared it to by number, and how they said this one DIFFERS from it), how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
 
 Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
 
 Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
 
-${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
+${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
     };
 
     await runQuickAIAction('Building case summary...', 'Case summary ready', buildPrompt, {
@@ -13916,7 +14448,17 @@ ${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${chronology ? '\n\
         // Deterministic repair of the finished answer: the decisive facts were extracted from the
         // chain by exact text match, so whether the summary carries them is checkable rather than
         // a matter of trust — and a gap is closed rather than reported.
-        verifySummary: { signals, lc, chain: chainRaw, caseNumber: $('caseNum').value || '' }
+        verifySummary: {
+            signals, lc, chain: chainRaw, caseNumber: $('caseNum').value || '',
+            // The OTHER case the customer says this one resembles is very often written only in
+            // the Issue Summary ("a similar issue to the one described in macOS case C01698144"),
+            // never in an email — so a reference scan over the chain alone missed it and the
+            // summary dropped the one pointer to a case that may already carry the answer.
+            refText: `${chainRaw}\n${($('issueSummary').value || '')}`,
+            // Arms the boilerplate repair: a summary may only be scrubbed of spam/phishing talk
+            // when the chain's spam/phishing talk provably came from a mail-gateway banner.
+            gatewayBoilerplate: (() => { try { return chainHasGatewayBoilerplate(chainRaw); } catch (e) { return false; } })()
+        }
     });
 }
 
@@ -13944,9 +14486,17 @@ async function draftCustomerEmail() {
     const stateDirective = buildCaseStateDirective(lc, 'email');
     // A reply that ignores the customer's "same error again" / stated business impact reads as
     // if support had not read their email — the most damaging kind of reply to send.
+    const emailEntries = (() => {
+        try { return getCleanChainEntries($('emailChain').value || ''); } catch (e) { return []; }
+    })();
     const signalsBlock = (() => {
-        try { return buildCaseSignalsBlock(detectChainSignals(getCleanChainEntries($('emailChain').value || ''), lc), 'email', undefined, lc); }
+        try { return buildCaseSignalsBlock(detectChainSignals(emailEntries, lc), 'email', undefined, lc); }
         catch (e) { return ''; }
+    })();
+    // A reply that answers a question the customer asked in their own language — instead of
+    // treating that message as noise — is the whole difference on a non-English chain.
+    const langDirective = (() => {
+        try { return buildChainLanguageDirective(emailEntries, 'email'); } catch (e) { return ''; }
     })();
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
     // What the email may ask the customer for depends entirely on who can reach the server:
@@ -13965,6 +14515,7 @@ STRICT RULES:
 - The email chain is ordered NEWEST FIRST — continue the conversation from the MOST RECENT messages; never re-answer something the chain shows is already settled.
 - Professional, warm SOTI support tone. Keep it concise — short paragraphs, no filler.
 ${NO_SCAFFOLD_PROMPT_RULE}
+${NO_BOILERPLATE_PROMPT_RULE}
 - Output ONLY the email in PLAIN TEXT — no markdown symbols like ** or ##, no emojis, no preamble such as "Here is the draft", and no commentary after it. Ready to paste into the email client.
 - Use exactly this layout:
 Subject: <short subject${caseNum ? ` referencing Case ${caseNum}` : ''} and the topic>
@@ -13977,7 +14528,7 @@ Warm regards,
 ${lc.agentSender || '<my name — the SOTI support engineer from the chain>'}
 Technical Support, SOTI
 
-${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${logAccess ? '\n\n' + logAccess : ''}`;
+${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${logAccess ? '\n\n' + logAccess : ''}`;
 
     await runQuickAIAction('Drafting email to customer...', 'Email draft ready', prompt, {
         forceConversational: true,
