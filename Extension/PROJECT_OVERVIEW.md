@@ -59,7 +59,7 @@ File	Size	What it does
 `knowledge/*.md`	—	Product knowledge in two layers. (1) Small "log signature" cheat-sheets injected during analysis: `MobiControl.md`, `Connect.md`, `XSight.md`. (2) The RAG corpus searched by `PulseKB`: `PulseKnowledge.md` (a 24 MB MobiControl scrape, ~10,000 articles) plus the curated, source-referenced `Connect_Knowledge.md` and `XSight_Knowledge.md`. Extend a product by appending `# Title` / `Source:` / body articles to its corpus file, or add a file to `PulseKB.KB_FILES`.
 `setup_local_ai.ps1` / `.bat`	—	One-click installer: installs Ollama, pulls the model, and sets Ollama's environment variables (CORS + speed). The `.bat` just launches the `.ps1`.
 `power.js`	~830 lines	The Power & Resource Governor. Profiles the machine, derives a memory budget for it, measures heap and main-thread lag, hands out throttle settings, reclaims memory under pressure, and keeps the internal AI performance log. Loaded **before** `sidepanel.js`. Section 9.
-`tests/`	—	`power.test.js` (51 unit tests, `node tests/power.test.js`) and `browser.e2e.js` (55 checks driving the real panel in Chromium). No test framework — plain Node, no `npm install` for the unit tests.
+`tests/`	—	`power.test.js` (51 unit tests, `node tests/power.test.js`), `run.js` (112 case-answer and multilingual checks, `node tests/run.js`, loading the real `sidepanel.js` through `harness.js`; fixtures in `tests/fixtures/`) and `browser.e2e.js` (55 checks driving the real panel in Chromium). No test framework — plain Node, no `npm install` for the unit tests. Sections 5.11 and 9.
 `lib/`	—	Tesseract.js OCR engine and its WASM/model data.
 ---
 5. The core subsystems (deep dives)
@@ -361,6 +361,46 @@ On-Prem	The customer	Name each log, server role, log level and time window; incl
 the wrong side. This one flags rather than edits: "request further details, including any
 log files or reproduction details" is half wrong on a Cloud case and half right, and no regex
 can safely split that sentence.
+---
+5.10 Multilingual signal detection — the same facts in any language
+SOTI Support is global, and roughly half of a chain routinely arrives in the customer's own
+language. Every deterministic signal therefore exists twice: the original English pattern, and
+a multilingual twin ending `_ML_RE` covering Russian, German, French, Spanish, Portuguese,
+Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean. They are tried together by
+`matchEarliest` (returns the earliest hit, so the quote lands where the signal really occurs)
+or `testAny` (boolean tests that need no quote).
+> **Why two regexes instead of one union?** The twins need the `u` flag for `\p{L}` and
+> Unicode-aware boundaries. Splicing a `\p{L}` source into a non-`u` regex makes it match a
+> literal `p` instead — a failure that is completely silent. Keeping them separate also means
+> the English behaviour, which the suite pins down, cannot shift because a Turkish cue was added.
+Two traps the cue tables exist to avoid, both of which had silently disabled whole languages:
+`\b` is ASCII-only, so `\bвстреча` never matches at any position; and `\w` is ASCII-only even
+under `u`, so a stem written `срочн\w*` fails its closing boundary the moment a Cyrillic letter
+follows. Every cue uses `\p{L}` and the lookaround boundaries in `mlCue` instead.
+The layer covers the decisive signals (`SIG_*`), what SOTI asked for and what the customer
+delivered (`SUPPORT_REQUEST`, `REQUEST_FULFILLED`), the three states of a live session
+(`MEETING_PROPOSED` → `MEETING_BOOKED` → `MEETING_HELD` — booked is a state of its own, so a
+plan can never open by arranging a meeting that is already in the diary), the customer's
+contrast with an earlier case (`ISSUE_CONTRAST`), and the lifecycle scan that decides open vs
+closing (`REOPEN_SIGNAL`, `CUSTOMER_CONSENT`, `SUPPORT_CLOSING`) — that last one matters most,
+because the case state governs what "Next steps:" is even allowed to contain.
+`detectChainSignals(entries, lc, issueText)` also reads the **issue summary**, not just the
+chain. On a case opened through the portal that is the only place the customer states the
+problem in full, and it is where a recurrence and the "unlike the previous case…" contrast
+normally live. An issue-summary recurrence is flagged `fromIssueSummary` and rendered with
+weaker wording than a chain one, because "I hit this again" in an opening report usually means
+the customer has met the fault before — not that a fix on *this* case regressed.
+---
+5.11 The test suite — `node tests/run.js`
+`tests/harness.js` evaluates the real `sidepanel.js` inside a Node `vm` context with the
+browser surface stubbed by a self-returning Proxy, then exposes the top level (including
+`const` bindings, read back through `vm.runInContext`). Nothing is copied out of the source:
+the checks run the shipping code, so a red test means the extension is wrong.
+112 checks in four groups — chain parsing, multilingual signals, case C01720260 end to end, and
+English regressions. Two are structural rather than behavioural and guard the trap above: no
+`_ML_RE` may contain `\w`, and every one must carry the `u` flag. Note that a regex built inside
+the vm has the vm's `RegExp` as its prototype, so `instanceof RegExp` is false in the suite —
+duck-type with `typeof re.test === 'function'` instead.
 ---
 6. Key design decisions & trade-offs (the "why X not Y" summary)
 Decision	Chosen	Rejected alternative	Why
@@ -699,8 +739,15 @@ that moves any machine class shows up as a named failing test rather than silent
 Change what gets sacrificed under pressure → the `Power.registerReclaimer({...})` blocks
 near the bottom of `sidepanel.js`. Lower `priority` = given up first. Never register
 anything whose loss would destroy the user's work.
-Golden rule: after any edit to `sidepanel.js`, run a syntax check before reloading:
-`node --check sidepanel.js`. It catches typos that would otherwise break the whole panel.
+Add a language, or a phrase in one already covered → the `_ML_RE` cue tables in
+`sidepanel.js` (section 5.10), then `node tests/run.js`. Use `\p{L}`, never `\w`, and never a
+leading `\b` before non-Latin text — both are ASCII-only and fail silently.
+Golden rule: after any edit to `sidepanel.js`, run a syntax check and the suites before
+reloading: `node --check sidepanel.js`, then `node tests/run.js` and `node tests/power.test.js`.
+The syntax check catches typos that would otherwise break the whole panel; the suites catch the
+ones it cannot see, because a regex assembled at runtime (`new RegExp(...)`) parses fine and
+throws on load — an unbalanced bracket in one multilingual cue takes the whole side panel down,
+and only loading the file finds it.
 Reload the extension at `chrome://extensions` → Reload, then open the side panel and press
 F12 (choose the side-panel document) to see the console — the `[Ollama Request]` line
 shows the exact `num_ctx` / sizes for each call.

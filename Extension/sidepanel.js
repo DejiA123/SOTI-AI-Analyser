@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.6.0 — the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks (node tests/run.js) pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.7.0 — a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks (node tests/run.js) run the shipping code and pin all of it down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks (node tests/run.js) pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -5480,9 +5480,19 @@ function toImperativeStep(line) {
 // That fallback used to require two DISTINCT numbers to be present, so a chain mentioning only
 // its own number reported that number as a case to go and review — a next step pointing the
 // engineer back at the case they are already reading.
+// A trailing \b was wrong on BOTH sides of a scraped case number. The feed routinely glues the
+// next word straight onto it — the customer wrote "аналогичной случаю, описанной в кейсе
+// C01698144macOS", where "macOS" is the platform, not part of the number — and `\bC0\d{6,8}\b`
+// requires a non-word character after the digits, so that reference matched NOTHING. The one
+// pointer to the earlier case that may already carry the answer was dropped, and the summary
+// could only say the customer "compared it to a previous case by number" without ever giving
+// the number. A letter after the digits is therefore allowed; another DIGIT is not, since that
+// would mean the real number is longer than what was captured.
+const CASE_NUMBER_RE = /(?<![A-Za-z0-9])C0\d{6,8}(?!\d)/g;
+
 function referencedCaseNumbers(rawChain, ownFromField) {
     const counts = new Map();
-    for (const m of String(rawChain || '').match(/\bC0\d{6,8}\b/g) || []) counts.set(m, (counts.get(m) || 0) + 1);
+    for (const m of String(rawChain || '').match(CASE_NUMBER_RE) || []) counts.set(m, (counts.get(m) || 0) + 1);
     if (!counts.size) return [];
     let own = String(ownFromField || '').trim().toUpperCase();
     if (!own) own = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
@@ -5528,9 +5538,12 @@ function isChainLifecycleRow(e) {
 // returns the whole email as one "sentence" and every quote below becomes the entire message. A
 // capital letter (Latin or Cyrillic) is therefore also a boundary — but a digit never is, so
 // version strings like "v2026.1.1.1453" stay in one piece.
+// CJK writes its terminators full-width (。！？) and never spaces them, and Spanish opens a
+// question with ¿ — split on all of them, or a Japanese message is one 400-character "sentence"
+// and every quote taken from it becomes the whole email.
 function chainSentences(text) {
     return String(text || '')
-        .split(/\n+|(?<=[.!?])(?=\s|[A-ZА-ЯЁ])/)
+        .split(/\n+|(?<=[.!?])(?=\s|[A-ZА-ЯЁ])|(?<=[。！？])|(?=¿)/u)
         .map(s => s.replace(/\s+/g, ' ').trim())
         .filter(Boolean);
 }
@@ -5540,9 +5553,14 @@ function chainSentences(text) {
 // The greeting is allowed to lead ("Hi, how are you?") — a scraped body keeps it attached to the
 // pleasantry, and an anchored test that ignores that keeps "how are you?" as a case question.
 const PLEASANTRY_QUESTION_RE = /^(?:(?:hi|hello|hey|dear|good (?:morning|afternoon|day))\b[^,?]{0,20},?\s*)?(?:how are you|hope you are|hope all is|how have you been|how(?:'s| is) it going|are you well)\b/i;
+// "?" is not the only question mark a support chain carries: CJK uses the full-width ？ and
+// Spanish opens with ¿. A question asked in any of them is still the thing the customer is
+// waiting on, and missing it means missing the current state of the case.
+const QUESTION_MARK_RE = /[?？]/;
 function questionsIn(text) {
     return chainSentences(text)
-        .filter(s => s.includes('?') && s.length >= 8 && s.length <= 240 && !PLEASANTRY_QUESTION_RE.test(s));
+        .filter(s => (QUESTION_MARK_RE.test(s) || s.startsWith('¿')) && s.length >= 8 && s.length <= 240
+            && !PLEASANTRY_QUESTION_RE.test(s) && !PLEASANTRY_QUESTION_ML_RE.test(s));
 }
 
 // What SOTI asked the customer to do or supply. Anchored on the ASK, not on the artefact, so it
@@ -5552,6 +5570,27 @@ const SUPPORT_REQUEST_RE = /\b(?:please\s+(?:provide|send|share|upload|attach|co
 // one of these is telling the engineer to chase something that already arrived.
 const REQUEST_FULFILLED_RE = /\b(?:attach(?:ed|ing|ment)s?|enclosed|uploaded|please find|here (?:is|are|you go)|as requested|i have sent|i've sent|we have sent|we've sent|sent (?:you|it|them|the|over))\b|прил(?:агаю|ожен|оженн)|вложени|(?:от|на)правил|высла(?:л|ла)/i;
 
+// Where a SOTI email stops saying what SOTI will do and starts being template furniture: the
+// booking widget, the agenda block, the signature and the legal notice. A promise that runs into
+// any of these has already finished — the words after the marker were never a commitment.
+const PROMISE_TEMPLATE_TAIL_RE = /\s*[:—–-]?\s*\b(?:book time with|book a time|booking link|agenda\s*:|warm regards|kind regards|best regards|thanks and regards|call us\b|soti\.net|discussion forum|log a case online|important notice|email disclaimer|https?:\/\/)/i;
+
+// A promise still over budget after the template tail is gone is cut back to a CLAUSE boundary,
+// never mid-phrase, and never left ending on a bare transitive verb whose object was amputated —
+// "…and collect Profile…" is precisely the failure this exists to prevent. Each pass drops one
+// more clause until the text ends on something that can stand alone.
+const PROMISE_DANGLING_VERB_RE = /\b(?:collect|gather|raise|reproduce|note|provide|send|share|check|review|run|capture|enable|disable|install|upgrade|apply|test|verify|confirm|arrange|schedule|book|create|open|escalate|attach|export)$/i;
+function truncatePromiseAtClause(t) {
+    let s = String(t || '').trim();
+    for (let i = 0; i < 4; i++) {
+        const cut = Math.max(s.lastIndexOf(', '), s.lastIndexOf(' and '), s.lastIndexOf('; '));
+        if (cut <= 20) break;
+        s = s.slice(0, cut).replace(/[\s,;:–-]+$/, '').trim();
+        if (!PROMISE_DANGLING_VERB_RE.test(s)) break;
+    }
+    return s.replace(/[\s,;:–-]+$/, '') + '…';
+}
+
 // SOTI offering a live working session (with or without a booking link). Once that offer is on
 // the table, "arrange a remote session" is no longer a next step — CONFIRMING it is. A plan that
 // re-proposes the meeting the customer is at that moment trying to book reads as though nobody
@@ -5559,20 +5598,310 @@ const REQUEST_FULFILLED_RE = /\b(?:attach(?:ed|ing|ment)s?|enclosed|uploaded|ple
 const MEETING_PROPOSED_RE = /\b(?:remote session|screen[- ]?shar\w*|web ?ex|teams (?:call|meeting|session)|zoom (?:call|meeting)|book time with|book(?:ing)? (?:a )?(?:time|slot|meeting|session)|schedule (?:a )?(?:call|meeting|session)|arrange (?:a )?(?:\d+[- ]minute )?(?:call|meeting|session)|my availability|availability link)\b/i;
 // The session actually HAPPENED — after this, the offer is history, not an outstanding action.
 const MEETING_HELD_RE = /\b(?:thank you for (?:your|the) time|following (?:up on )?(?:our|the|today'?s) (?:call|session|meeting)|during (?:our|the|today'?s) (?:call|session|meeting)|as discussed (?:on|during) (?:the|our) (?:call|session|meeting)|we had (?:a|our) (?:call|session|meeting)|after (?:our|the) (?:call|session|meeting))\b/i;
+// The session is BOOKED — agreed, in the diary, and still ahead. This is a THIRD state, and its
+// absence is what produced the worst line in the C01720260 summary. SOTI's newest email said "We
+// have a meeting scheduled with you at 3 PM GMT+1 today", which matches neither of the two
+// patterns above: not "proposed" (the offer stage was over) and not "held" (it had not happened
+// yet). So the older offer still won, the signals block asked for the session to be CONFIRMED and
+// "got booked", and the generated plan opened with "1. Book a 30-minute remote session with
+// Узорин Константин Евгеньевич" — telling the engineer to arrange a meeting that started in two
+// hours. Once a booking is on record the next step is to HOLD it and to be ready for it.
+// English only, like its two siblings — the other languages live in MEETING_BOOKED_ML_RE below,
+// because \b is ASCII-only and so never matches before a Cyrillic letter: "\bвстреча" can not
+// fire at all, at any position, in any string.
+const MEETING_BOOKED_RE = /\b(?:(?:meeting|session|call|invite|invitation)\s+(?:is\s+|has\s+been\s+|was\s+|now\s+)?(?:scheduled|booked|confirmed|arranged|set(?: up)?|accepted)|(?:have|has)\s+(?:a|our|the)\s+(?:meeting|session|call)\s+(?:scheduled|booked|confirmed|arranged|set up)|(?:scheduled|booked|confirmed|arranged)\s+(?:a|our|the)\s+(?:meeting|session|call)\b|see you (?:on|at|then)\b|look(?:ing)? forward to (?:our|the|speaking|meeting|connecting)\b|(?:meeting|session|call)\s+(?:invite|invitation)\s+(?:sent|shared)|slot (?:is )?(?:booked|confirmed|reserved))\b/i;
+
+// ---------------------------------------------------------------------------
+// THE SAME SIGNALS, IN THE LANGUAGE THE CUSTOMER ACTUALLY WROTE
+// ---------------------------------------------------------------------------
+// Every pattern above is English-only, and SOTI Support is not. On case C01720260 the customer
+// wrote, in Russian, "Ссылка для календаря не открывается – я не могу авторизоваться по ней,
+// чтобы забронировать слот" — the calendar link does not open and they cannot authenticate to
+// book a slot. That is a BLOCKER by any reading: it is the reason the session had to be arranged
+// by hand. Not one English pattern could see it, so the signal was null, the summary never
+// mentioned it, and the plan carried on as though booking were a solved problem. The issue
+// summary's own "Я опять столкнулся в проблемой" — I have hit this problem AGAIN — was invisible
+// for the same reason, and the summary reported a first-time fault.
+//
+// The English patterns are left exactly as they are; this is a PARALLEL layer, tried alongside
+// them by matchEarliest. Keeping them separate is deliberate — the English behaviour is pinned
+// down by tests and must not shift because a Turkish cue was added — and it also lets this layer
+// use the `u` flag, which it needs: JavaScript's \b is ASCII-only, so it never fires between two
+// Cyrillic letters, and every boundary here has to be written with Unicode-aware lookarounds.
+//
+// Latin-script cues carry those boundaries. CJK is written without spaces, so its cues are plain
+// substrings — they are long and distinctive enough that this costs nothing.
+// NOTE — every stem below ends in \p{L}*, never \w*. JavaScript's \w is ASCII-only even under the
+// `u` flag, so "срочн\w*" matches "срочн", then \w* matches nothing because "о" is not an ASCII
+// word character, and the closing boundary then FAILS because a letter follows. The cue silently
+// never fires. That single mistake had taken out the Russian, Turkish and Polish stems.
+const ML_EDGE = '(?<![\\p{L}\\p{N}])(?:', ML_EDGE_END = ')(?![\\p{L}\\p{N}])';
+// `bounded` — cues that must not match inside a longer word (Turkish "acil" sits inside the
+// English "facility"). `loose` — CJK and cues that are already unambiguous substrings.
+const mlCue = (bounded, loose) => new RegExp(
+    [bounded && ML_EDGE + bounded + ML_EDGE_END, loose && `(?:${loose})`].filter(Boolean).join('|'), 'iu');
+
+// The fault has happened AGAIN. Cyrillic "опять"/"снова", German "wieder"/"erneut", and so on.
+const SIG_RECURRENCE_ML_RE = mlCue(
+    'опять|снова|вновь|повтор(?:но|яется|илась|ился|ная)|та же (?:ошибка|проблема)|верну(?:лась|лся)|появи(?:лась|лся) снова' +
+    '|wieder|erneut|wiederholt|nochmal|zur[üu]ck' +
+    '|(?:[àa] |de )nouveau|encore une fois|r[ée]appar\\p{L}*|se reproduit|revenu' +
+    '|de nuevo|otra vez|nuevamente|ha vuelto|reaparec\\p{L}*' +
+    '|novamente|de novo|outra vez|voltou|reapareceu' +
+    '|di nuovo|nuovamente|ancora una volta|[èe] tornato|si ripresenta' +
+    '|opnieuw|alweer|teruggekeerd' +
+    '|ponownie|znowu|zn[óo]w|powt[óo]rnie|wr[óo]ci[łl]\\p{L}*' +
+    '|tekrar|yine|yeniden',
+    '再発|再度発生|また発生|再び発生|再次出现|又出现|重现|다시 발생|재발');
+// The customer is asking for priority.
+const SIG_URGENCY_ML_RE = mlCue(
+    'срочн\\p{L}*|как можно скорее|критичн\\p{L}*|приоритет\\p{L}*|эскалац\\p{L}*|безотлагательно' +
+    '|dringend|dringlich|so schnell wie m[öo]glich|schnellstm[öo]glich|kritisch|priorit[äa]t|eskalier\\p{L}*' +
+    '|urgen(?:t|ce)|d[èe]s que possible|critique|priorit[ée]|escalad\\p{L}*' +
+    '|urgente|urgencia|lo antes posible|cr[íi]tico|prioridad|escalar' +
+    '|urg[êe]ncia|o mais r[áa]pido poss[íi]vel|prioridade' +
+    '|urgenza|il prima possibile|critico|priorit[àa]' +
+    '|spoed\\p{L}*|zo snel mogelijk|kritiek|prioriteit' +
+    '|piln[ay]?e?|jak najszybciej|krytyczn\\p{L}*|priorytet\\p{L}*' +
+    '|acil(?:en)?|en k[ıi]sa s[üu]rede|kritik|[öo]ncelik',
+    '至急|緊急|早急|大至急|紧急|尽快|긴급|시급');
+// Production, users or the business are affected.
+const SIG_IMPACT_ML_RE = mlCue(
+    'продакшн\\p{L}*|на проде|промышленн\\p{L}+ (?:сред|систем|контур)\\p{L}*|боево[ймй] (?:сервер|контур|систем\\p{L}*)|пользовател\\p{L}+ не (?:могут|может)|не работает у (?:пользовател|клиент)\\p{L}*|влияет на работу|простой систем\\p{L}*|остановил\\p{L}* работ\\p{L}*' +
+    '|produktivsystem|produktivumgebung|benutzer k[öo]nnen nicht|ausfall|betroffen' +
+    '|(?:en |de )production|utilisateurs? ne peu(?:t|vent)|panne|impact[ée]s?' +
+    '|(?:en )?producci[óo]n|usuarios no pueden|ca[íi]da del servicio|afectad\\p{L}*' +
+    '|(?:em )?produ[çc][ãa]o|usu[áa]rios n[ãa]o conseguem|afetad\\p{L}*' +
+    '|(?:in )?produzione|utenti non possono|interruzione del servizio' +
+    '|productieomgeving|gebruikers kunnen niet|storing' +
+    '|[śs]rodowisk\\p{L}* produkcyjn\\p{L}*|u[żz]ytkownicy nie mog[ąa]|awaria' +
+    '|canl[ıi] ortam|kullan[ıi]c[ıi]lar (?:eri[şs]emiyor|yapam[ıi]yor)|kesinti',
+    '本番環境|本番稼働|業務に影響|生产环境|影响业务|서비스 중단|운영 환경');
+// The thing SOTI is waiting on could NOT be established.
+const SIG_UNVERIFIED_ML_RE = mlCue(
+    'не (?:удалось|получилось|смог\\p{L}*|мог\\p{L}*|мож\\p{L}*) (?:пока )?(?:проверить|подтвердить|воспроизвести|проверять)|не подтвержд\\p{L}*|пока не (?:ясно|понятно|проверял\\p{L}*)|не провер\\p{L}+ (?:пока|ещ[её])' +
+    // German, Dutch and French put the object between the verb and its negation ("wir konnten ES
+    // nicht bestätigen"), so these cannot be written as adjacent words.
+    '|konnten?[^.\\n]{0,25}nicht (?:best[äa]tigen|verifizieren|reproduzieren)|nicht best[äa]tigt|noch nicht klar' +
+    '|n\'(?:ai|avons) pas pu[^.\\n]{0,25}(?:confirmer|v[ée]rifier|reproduire)|pas (?:encore )?confirm[ée]' +
+    '|no (?:he |hemos |se )?(?:pod(?:ido|emos)|puedo) (?:confirmar|verificar|reproducir)|no confirmado' +
+    '|n[ãa]o consegui(?:mos)? (?:confirmar|verificar|reproduzir)|n[ãa]o confirmado' +
+    '|non (?:ho|abbiamo) potuto (?:confermare|verificare)|non confermato' +
+    '|kon(?:den)?[^.\\n]{0,25}niet (?:bevestigen|verifi[ëe]ren)|niet bevestigd' +
+    '|nie (?:uda[łl]o si[ęe]|mog[ęe]|mogli[śs]my)[^.\\n]{0,25}(?:potwierdzi[ćc]|zweryfikowa[ćc])|niepotwierdzon\\p{L}*' +
+    '|do[ğg]rulayamad\\p{L}*|teyit edemedik|do[ğg]rulanmad\\p{L}*',
+    '確認できません|確認できていません|未確認|无法确认|尚未确认|확인할 수 없|미확인');
+// A DIFFERENT fault is blocking the work — including, on this case, the booking link itself.
+const SIG_BLOCKER_ML_RE = mlCue(
+    'не открывается|не могу (?:войти|авторизоваться|зайти|получить доступ|открыть|забронировать)|не получается (?:войти|открыть|заброниров\\p{L}*)|блокиру\\p{L}*|заблокирован\\p{L}*|мешает|недоступ(?:ен|на|но|ны)|ссылка не работает' +
+    '|blockiert|l[äa]sst sich nicht [öo]ffnen|kann nicht [öo]ffnen|nicht erreichbar|funktioniert nicht' +
+    '|bloqu[ée]e?s?|ne s\'ouvre pas|ne fonctionne pas|impossible de (?:se connecter|ouvrir|r[ée]server)|inaccessible' +
+    '|bloquead\\p{L}*|no se abre|no funciona|no puedo (?:acceder|abrir|reservar)|inaccesible' +
+    '|bloquead[oa]s?|n[ãa]o abre|n[ãa]o funciona|n[ãa]o consigo (?:acessar|abrir|reservar)|inacess[íi]vel' +
+    '|bloccat\\p{L}*|non si apre|non funziona|non riesco ad? (?:accedere|aprire|prenotare)|inaccessibile' +
+    '|geblokkeerd|opent niet|werkt niet|kan niet (?:inloggen|openen)|niet bereikbaar' +
+    '|zablokowan\\p{L}*|nie otwiera si[ęe]|nie dzia[łl]a|nie mog[ęe] (?:si[ęe] zalogowa[ćc]|otworzy[ćc])|niedost[ęe]pn\\p{L}*' +
+    '|engelleniyor|a[çc][ıi]lm[ıi]yor|[çc]al[ıi][şs]m[ıi]yor|eri[şs]emiyorum',
+    '開けません|開きません|動作しません|アクセスできません|无法打开|无法访问|不工作|열리지 않|작동하지 않|접근할 수 없');
+// What SOTI asked the customer for, when the reply was written in the customer's language.
+const SUPPORT_REQUEST_ML_RE = mlCue(
+    'пожалуйста,? (?:предоставьте|пришлите|отправьте|поделитесь|проверьте|соберите)|не могли бы вы|просим (?:предоставить|прислать)|нам (?:потребуется|нужно|нужны|понадобится)' +
+    '|bitte (?:senden|schicken|teilen|stellen|[üu]bermitteln|pr[üu]fen)|k[öo]nnten sie|wir ben[öo]tigen|wir brauchen' +
+    '|pourriez-vous|veuillez (?:fournir|envoyer|partager|v[ée]rifier)|nous aurons besoin|nous avons besoin' +
+    '|por favor,? (?:proporcione|env[íi]e|comparta|verifique)|podr[íi]a usted|necesitaremos|necesitamos' +
+    '|por favor,? (?:forne[çc]a|envie|compartilhe)|voc[êe] poderia|precisaremos|precisamos' +
+    '|potrebbe (?:fornire|inviare)|per favore (?:fornisca|invii)|abbiamo bisogno' +
+    '|kunt u|gelieve|wij hebben .{0,20}nodig' +
+    // Polish takes the verbal noun as readily as the infinitive ("proszę o przesłanie logów"), and
+    // Turkish puts the object before the verb ("lütfen günlükleri gönderin") — neither is adjacent.
+    '|prosz[ęe] (?:o )?(?:przes[łl]a(?:[ćc]|nie)|poda(?:[ćc]|nie)|udost[ęe]pni(?:[ćc]|enie))|czy m[óo]g[łl]by pan|b[ęe]dziemy potrzebowa[ćc]' +
+    '|l[üu]tfen[^.\\n]{0,30}(?:g[öo]nderin|payla[şs][ıi]n|sa[ğg]lay[ıi]n)|ihtiyac[ıi]m[ıi]z var',
+    'ご提供ください|お送りください|ご確認ください|が必要です|请提供|请发送|请确认|我们需要|제공해 주세|보내주세|필요합니다');
+// SOTI offering a live working session.
+const MEETING_PROPOSED_ML_RE = mlCue(
+    'удал[ёе]нн(?:ую|ая|ой) сесси\\p{L}*|созвон\\p{L}*|демонстраци\\p{L}+ экрана|заброниров\\p{L}+ (?:слот|время)|назначить (?:встречу|звонок)|подключиться удал[ёе]нно' +
+    '|remote-?sitzung|bildschirm(?:freigabe|[üu]bertragung)|termin (?:vereinbaren|buchen)|besprechung vereinbaren' +
+    '|session [àa] distance|partage d\'[ée]cran|planifier (?:une r[ée]union|un appel)|prendre rendez-vous' +
+    '|sesi[óo]n remota|compartir pantalla|programar una (?:reuni[óo]n|llamada)|agendar una reuni[óo]n' +
+    '|sess[ãa]o remota|compartilhamento de tela|agendar (?:uma reuni[ãa]o|uma chamada)' +
+    '|sessione remota|condivisione (?:dello )?schermo|fissare (?:una riunione|una chiamata)' +
+    '|sessie op afstand|scherm delen|afspraak (?:plannen|inplannen)' +
+    '|sesj[ai] zdaln\\p{L}*|udost[ęe]pnianie ekranu|um[óo]wi[ćc] spotkanie' +
+    '|uzak(?:tan)? oturum|ekran payla[şs][ıi]m[ıi]|toplant[ıi] (?:ayarla|planla|d[üu]zenle)\\p{L}*',
+    'リモートセッション|画面共有|遠程会话|屏幕共享|원격 세션|화면 공유');
+// The session actually happened.
+const MEETING_HELD_ML_RE = mlCue(
+    'спасибо за (?:уд(?:е|ё)л[ёе]нное )?время|по итогам (?:звонка|встречи|сесси\\p{L}*)|во время (?:звонка|встречи|сесси\\p{L}*)|после (?:звонка|встречи|сесси\\p{L}*)|как обсуждали на (?:звонке|встрече)' +
+    '|vielen dank f[üu]r ihre zeit|nach (?:unserem|dem) (?:gespr[äa]ch|termin)|w[äa]hrend (?:der sitzung|des termins)' +
+    '|merci pour votre temps|suite [àa] (?:notre|l\')(?:appel|[ée]change|r[ée]union)|pendant (?:la session|notre appel)' +
+    '|gracias por su tiempo|tras (?:nuestra llamada|la sesi[óo]n)|durante (?:la sesi[óo]n|la llamada)' +
+    '|obrigad[oa] pelo seu tempo|ap[óo]s (?:nossa chamada|a sess[ãa]o)|durante a (?:sess[ãa]o|chamada)' +
+    '|grazie per il suo tempo|dopo (?:la nostra chiamata|la sessione)|durante la (?:sessione|chiamata)' +
+    '|bedankt voor uw tijd|na (?:ons gesprek|de sessie)' +
+    '|dzi[ęe]kuj[ęe] za (?:po[śs]wi[ęe]cony )?czas|po (?:naszej rozmowie|sesji)' +
+    '|zaman ay[ıi]rd[ıi][ğg][ıi]n[ıi]z i[çc]in te[şs]ekk[üu]r|g[öo]r[üu][şs meden] sonra',
+    'お時間をいただきありがとう|セッション後|感谢您的时间|会话之后|시간 내주셔서 감사');
+// The customer saying they have SUPPLIED what was asked for. REQUEST_FULFILLED_RE already
+// carries the Russian forms; these are the rest.
+const REQUEST_FULFILLED_ML_RE = mlCue(
+    'anbei|im anhang|beigef[üu]gt|habe .{0,20}gesendet' +
+    '|ci-joint|en pi[èe]ce jointe|je vous ai envoy[ée]' +
+    '|adjunto|en el archivo adjunto|le he enviado' +
+    '|em anexo|segue anexo|enviei' +
+    '|in allegato|allegato alla presente|ho inviato' +
+    '|bijgevoegd|in de bijlage|heb .{0,20}verstuurd' +
+    '|w za[łl][ąa]czeniu|za[łl][ąa]czam|przes[łl]a[łl]em' +
+    '|ekte|ekte bulabilirsiniz|g[öo]nderdim',
+    '添付します|添付しました|添付ファイル|附件|已发送|첨부|보내드렸');
+// The session is agreed and in the diary — MEETING_BOOKED_RE's twin.
+const MEETING_BOOKED_ML_RE = mlCue(
+    '(?:встреч[аиу]|созвон|сесси[яию])\\s+(?:назначен|заброниров|подтвержден|запланирован)\\p{L}*|(?:назначен|запланирован|подтвержден)\\p{L}*\\s+(?:встреч|созвон|сесси)\\p{L}*|до (?:встречи|связи)' +
+    '|termin (?:ist |wurde )?(?:vereinbart|best[äa]tigt|gebucht|angesetzt)|wir haben einen termin' +
+    '|(?:r[ée]union|session|appel)\\s+(?:est\\s+)?(?:programm[ée]e?|confirm[ée]e?|planifi[ée]e?|r[ée]serv[ée]e?)|rendez-vous (?:est )?(?:fix[ée]|confirm[ée])' +
+    '|(?:reuni[óo]n|sesi[óo]n|llamada)\\s+(?:est[áa]\\s+|ha sido\\s+)?(?:programad|agendad|confirmad|reservad)\\p{L}*' +
+    '|(?:reuni[ãa]o|sess[ãa]o|chamada)\\s+(?:est[áa]\\s+|foi\\s+)?(?:agendad|marcad|confirmad)\\p{L}*' +
+    '|(?:riunione|sessione|chiamata)\\s+(?:[èe]\\s+)?(?:programmat|fissat|confermat|prenotat)\\p{L}*' +
+    '|(?:afspraak|sessie)\\s+(?:is\\s+)?(?:gepland|bevestigd|ingepland)' +
+    '|(?:spotkanie|sesja)\\s+(?:jest\\s+|zosta[łl]o\\s+)?(?:zaplanowan|um[óo]wion|potwierdzon)\\p{L}*' +
+    '|toplant[ıi]\\s+(?:ayarland[ıi]|planland[ıi]|onayland[ıi])',
+    '会議が予定|ミーティングが予定|予約されています|会议已安排|已预约|미팅이 예정|회의가 예약');
+
+// ---- THE LIFECYCLE STATE, IN THE CUSTOMER'S LANGUAGE ----------------------
+// detectCaseLifecycleState decides whether a case is open or closing, and it decides it from
+// English phrases alone. That is the highest-consequence gap of all: a Russian customer writing
+// "проблема снова появилась" after a closure email would not reopen the case, and one writing
+// "можете закрывать" would not close it — so the CASE STATE directive, which governs what "Next
+// steps:" is even allowed to contain, would be wrong in both directions.
+// The customer says it is NOT over.
+const REOPEN_SIGNAL_ML_RE = mlCue(
+    'всё ещё не работает|все ещё не работает|по-прежнему не работает|проблема (?:оста[её]тся|сохраняется|повторяется|не решена)|не помогло|не исправлено|ошибка оста[её]тся|та же проблема' +
+    '|funktioniert immer noch nicht|problem besteht weiterhin|hat nicht geholfen|nicht behoben' +
+    '|ne fonctionne toujours pas|le probl[èe]me persiste|n\'a pas r[ée]solu|toujours pas r[ée]solu' +
+    '|sigue sin funcionar|el problema persiste|no (?:se )?ha resuelto|no funcion[óo]' +
+    '|continua sem funcionar|o problema persiste|n[ãa]o resolveu|n[ãa]o foi resolvido' +
+    '|non funziona ancora|il problema persiste|non ha risolto|non risolto' +
+    '|werkt nog steeds niet|probleem blijft bestaan|heeft niet geholpen' +
+    '|nadal nie dzia[łl]a|problem nadal wyst[ęe]puje|nie pomog[łl]o|nie zosta[łl]o rozwi[ąa]zane' +
+    '|h[âa]l[âa] [çc]al[ıi][şs]m[ıi]yor|sorun devam ediyor|[çc][öo]z[üu]lmedi',
+    'まだ解決していません|問題が続いています|直っていません|仍然无法|问题依旧|未解决|아직 해결되지|문제가 계속');
+// The customer agreeing the case can be closed.
+const CUSTOMER_CONSENT_ML_RE = mlCue(
+    'можете (?:закрывать|закрыть)|можно закрывать|проблема решена|вопрос (?:решён|решен|закрыт)|всё работает|все работает|больше нет вопросов' +
+    '|sie k[öo]nnen (?:den fall |das ticket )?schlie[ßs]en|problem (?:ist )?gel[öo]st|funktioniert (?:jetzt|nun)|keine weiteren fragen' +
+    '|vous pouvez (?:clore|fermer)|le probl[èe]me est r[ée]solu|[çc]a fonctionne maintenant|plus de questions' +
+    '|pueden? cerrar(?: el caso)?|el problema (?:est[áa]|ha sido) resuelto|ya funciona|no tengo m[áa]s preguntas' +
+    '|pode(?:m)? fechar(?: o caso)?|o problema (?:foi|est[áa]) resolvido|j[áa] funciona' +
+    '|potete chiudere(?: il caso)?|il problema [èe] (?:stato )?risolto|ora funziona' +
+    '|u kunt (?:de zaak |het ticket )?sluiten|probleem is opgelost|werkt nu' +
+    '|mo[żz]ecie zamkn[ąa][ćc]|problem (?:zosta[łl] )?rozwi[ąa]zany|ju[żz] dzia[łl]a' +
+    '|kapatabilirsiniz|sorun [çc][öo]z[üu]ld[üu]|art[ıi]k [çc]al[ıi][şs][ıi]yor',
+    'クローズしてください|解決しました|問題ありません|可以关闭|问题已解决|종료해도|해결되었습니다');
+// SOTI announcing closure.
+const SUPPORT_CLOSING_ML_RE = mlCue(
+    'закрываем (?:кейс|обращение|заявку)|кейс (?:будет )?закрыт|переводим в закрытые' +
+    '|wir schlie[ßs]en (?:den fall|das ticket)|der fall wird geschlossen' +
+    '|nous (?:allons )?cl[oô]tur\\p{L}*|le dossier sera (?:clos|ferm[ée])' +
+    '|vamos a cerrar el caso|el caso ser[áa] cerrado' +
+    '|vamos fechar o caso|o caso ser[áa] fechado' +
+    '|chiuderemo il caso|il caso verr[àa] chiuso' +
+    '|wij sluiten (?:de zaak|het ticket)' +
+    '|zamykamy (?:spraw[ęe]|zg[łl]oszenie)' +
+    '|vakay[ıi] kapat[ıi]yoruz|talep kapat[ıi]lacak',
+    'クローズいたします|本件をクローズ|我们将关闭|案例将关闭|케이스를 종료');
+
+// A greeting, not case content. PLEASANTRY_QUESTION_RE's English equivalent.
+const PLEASANTRY_QUESTION_ML_RE = mlCue(
+    'как (?:дела|вы|поживаете)|wie geht es (?:ihnen|dir)|comment allez-vous|[çc]a va' +
+    '|c[óo]mo est[áa](?:s)?|como (?:vai|est[áa])|come sta|hoe gaat het|jak si[ęe] masz|nas[ıi]ls[ıi]n[ıi]z',
+    'お元気ですか|你好吗|잘 지내');
+
+// "UNLIKE the previous case…" — the customer telling SOTI why the case they just referenced does
+// NOT settle this one. It is the highest-value sentence in an issue summary and the easiest to
+// lose: it is usually the last clause, it is often the only sentence in the customer's own
+// language, and a model that cannot read that language drops it and reports the comparison
+// without the contrast — which is worse than saying nothing, because it points the engineer at
+// a case whose resolution is now known not to apply.
+const ISSUE_CONTRAST_RE = /\b(?:unlike|in contrast to|contrary to|different(?:ly)? from|as opposed to|whereas)\b|\b(?:but|however|although|though)\b[^.\n]{0,80}\b(?:this time|in this case|now|differs?|different)\b|\bthis time\b[^.\n]{0,60}\b(?:is|does|needs?|must|should)\b/i;
+// Every one of these languages CONTRACTS the preposition that follows the phrase — German zu +
+// dem = "zum", French à + le = "au", Spanish de + el = "del", Portuguese de + o = "do", Italian
+// di + il = "del". Written as the bare dictionary form ("a diferencia de", "contrairement à")
+// the cue misses the way people actually write the sentence, which is exactly how five of these
+// eleven languages were silently unsupported.
+const ISSUE_CONTRAST_ML_RE = mlCue(
+    'в отличие от|в противоположность|в этот раз|на этот раз|но в данном случае|однако (?:сейчас|в этом случае)' +
+    '|im gegensatz zu\\p{L}*|anders als|diesmal|in diesem fall jedoch' +
+    '|contrairement (?:[àa]u?x?|au)|[àa] la diff[ée]rence d\\p{L}*|cette fois(?:-ci)?' +
+    '|a diferencia de\\p{L}*|al contrario de\\p{L}*|esta vez|en este caso sin embargo' +
+    '|(?:ao|em) contr[áa]rio d\\p{L}*|diferentemente d\\p{L}*|desta vez' +
+    '|a differenza d\\p{L}*|diversamente d\\p{L}*|questa volta' +
+    '|in tegenstelling tot|anders dan|deze keer' +
+    '|w przeciwie[ńn]stwie do|inaczej ni[żz]|tym razem' +
+    '|bu (?:sefer|kez)|aksine',
+    '前回とは異なり|今回は|与之前不同|这次|이번에는|이전과 달리');
+
+// Pull the signals that live in the ISSUE SUMMARY rather than the email chain. Only the two that
+// belong to the customer's original statement of the problem are taken: a recurrence, and the
+// contrast they drew with an earlier case. Urgency, impact and the rest stay chain-only — those
+// are things a customer escalates over time, and the portal's own template wording would false-
+// positive on them.
+function scanIssueSummarySignals(out, issueText) {
+    const raw = String(issueText || '').trim();
+    if (!raw) return;
+    let text = raw;
+    try { text = stripCaseTemplateLabels(raw); } catch (e) { /* labels are cosmetic here */ }
+    if (!text.trim()) return;
+    const src = { sender: 'the customer', time: 'in the issue summary' };
+    // Flagged, because it does NOT mean the same thing as a recurrence found in the chain. A
+    // chain recurrence says THIS case's fix failed; an issue-summary "again" usually says the
+    // customer has met this class of fault before, on another case. Asserting the first when the
+    // evidence is the second would invent an earlier fix on a case that never had one, so the
+    // two are rendered with different wording and a chain hit always supersedes this.
+    const rec = matchEarliest(text, SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE);
+    if (rec) out.recurrence = { ...src, quote: quoteAround(text, rec.index, rec[0].length), fromIssueSummary: true };
+    const con = matchEarliest(text, ISSUE_CONTRAST_RE, ISSUE_CONTRAST_ML_RE);
+    if (con) out.issueContrast = { ...src, quote: quoteAround(text, con.index, con[0].length) };
+}
+
+// Try the English pattern and its multilingual twin, and take whichever matches EARLIEST — the
+// quote must land on the first place the signal actually occurs, not on whichever pattern was
+// listed first. Returns a match object (with .index, as quoteAround needs) or null.
+function matchEarliest(text, ...res) {
+    const s = String(text || '');
+    let best = null;
+    for (const re of res) {
+        if (!re) continue;
+        const m = s.match(re);
+        if (m && (!best || m.index < best.index)) best = m;
+    }
+    return best;
+}
+// The English pattern OR its multilingual twin fired — for the boolean tests that do not need
+// a quote (a pending request, a session offer, a delivery confirmation).
+const testAny = (text, ...res) => res.some(re => re && re.test(String(text || '')));
 
 // Scan the cleaned chain for those signals. `entries` is newest-first (getCleanChainEntries),
 // `lc` supplies the customer/agent role split so a customer's urgency is not confused with a
 // support template. Returns { recurrence, urgency, impact, unverified, blocker, commitments } —
 // each either null or { sender, time, quote }, except commitments / recordedActions / promises /
 // staleStatements, which are string[].
-function detectChainSignals(entries, lc) {
+function detectChainSignals(entries, lc, issueText) {
     const out = {
         recurrence: null, urgency: null, impact: null, unverified: null, blocker: null,
         commitments: [], commitmentSource: null, commitmentsSuperseded: false,
         recordedActions: [], recordedActionSource: null,
         promises: [], promiseSource: null, staleStatements: [],
-        openQuestion: null, pendingRequest: null, meetingProposed: null
+        openQuestion: null, pendingRequest: null, meetingProposed: null, meetingBooked: null,
+        issueContrast: null
     };
+    // THE ISSUE SUMMARY IS THE CUSTOMER SPEAKING TOO, and on a case opened through the portal it
+    // is the ONLY place they state the problem in full — the emails after it are all logistics.
+    // Scanning the chain alone missed both decisive facts on C01720260: "Я опять столкнулся в
+    // проблемой" (I have hit this problem AGAIN — a recurrence, reported as a first-time fault)
+    // and "В отличие от предыдущего кейса, сейчас профиль нужен и должен быть установлен" (unlike
+    // the earlier case, THIS profile is needed and must stay installed — the one sentence that
+    // says why the previous case's fix does not apply). The summary said only that the customer
+    // "reported a problem that differs from a previous case they compared it to by number".
+    scanIssueSummarySignals(out, issueText);
     if (!entries || !entries.length) return out;
     const custName = ((lc && lc.customerSender) || '').trim();
     // Provably SOTI-side senders (internal notes, call logs, support-signed emails). Needed
@@ -5608,12 +5937,15 @@ function detectChainSignals(entries, lc) {
         // auto-replies outright means a footer variant it does not know cannot resurrect the bug.
         if (isOooAutoReply(e)) continue;
         const body = e.body || '';
-        if (!out.recurrence) { const m = body.match(SIG_RECURRENCE_RE); if (m) out.recurrence = mk(e, m); }
-        if (!out.urgency) { const m = body.match(SIG_URGENCY_RE); if (m) out.urgency = mk(e, m); }
-        if (!out.impact) { const m = body.match(SIG_IMPACT_RE); if (m) out.impact = mk(e, m); }
-        if (!out.unverified) { const m = body.match(SIG_UNVERIFIED_RE); if (m) out.unverified = mk(e, m); }
-        if (!out.blocker) { const m = body.match(SIG_BLOCKER_RE); if (m) out.blocker = mk(e, m); }
-        if (out.recurrence && out.urgency && out.impact && out.unverified && out.blocker) break;
+        // A dated recurrence from the chain supersedes the issue summary's undated one.
+        if (!out.recurrence || out.recurrence.fromIssueSummary) { const m = matchEarliest(body, SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE); if (m) out.recurrence = mk(e, m); }
+        if (!out.urgency) { const m = matchEarliest(body, SIG_URGENCY_RE, SIG_URGENCY_ML_RE); if (m) out.urgency = mk(e, m); }
+        if (!out.impact) { const m = matchEarliest(body, SIG_IMPACT_RE, SIG_IMPACT_ML_RE); if (m) out.impact = mk(e, m); }
+        if (!out.unverified) { const m = matchEarliest(body, SIG_UNVERIFIED_RE, SIG_UNVERIFIED_ML_RE); if (m) out.unverified = mk(e, m); }
+        if (!out.blocker) { const m = matchEarliest(body, SIG_BLOCKER_RE, SIG_BLOCKER_ML_RE); if (m) out.blocker = mk(e, m); }
+        // An issue-summary recurrence does not count as "found" here: the loop must keep going in
+        // case a later entry carries the stronger, dated chain form.
+        if (out.recurrence && !out.recurrence.fromIssueSummary && out.urgency && out.impact && out.unverified && out.blocker) break;
     }
 
     // Engineers dump three different kinds of line under one "Next steps" header in a note, and
@@ -5731,7 +6063,16 @@ function detectChainSignals(entries, lc) {
     // related checks … to cancel/reset the pending upgrade state", then truncated mid-phrase at
     // "backend related" — losing the one clause that actually mattered.
     const PROMISE_LEAD = "\\b(?:we|i)\\s*(?:will|shall|'ll|’ll)\\b";
-    const PROMISE_RE = new RegExp(`${PROMISE_LEAD}\\s+((?:(?!${PROMISE_LEAD})[^.\\n]){8,170})`, 'gi');
+    // 170 was too short for a real multi-clause commitment and truncated mid-noun-phrase. On case
+    // C01720260 SOTI had written "we will need to arrange a 30-minute remote session to raise the
+    // log level on the MobiControl server, reproduce the issue, note the exact timestamp, and
+    // collect Profile Execution Status logs together" — 189 characters. The cap fell at "collect
+    // Profile Execution ", the last partial word was dropped, and the promise reached the prompt
+    // as "…and collect Profile…". Both the summary and its next step then told the engineer to
+    // "collect Profile." — naming no log that exists. The budget is now PROMISE_MAX, and what
+    // ends the promise is a clause boundary rather than wherever the counter happened to land.
+    const PROMISE_MAX = 260;
+    const PROMISE_RE = new RegExp(`${PROMISE_LEAD}\\s+((?:(?!${PROMISE_LEAD})[^.\\n]){8,${PROMISE_MAX}})`, 'gi');
     for (const e of entries) {
         if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
         // POSITIVE support identification, not merely "not the customer": on a chain where the
@@ -5741,11 +6082,19 @@ function detectChainSignals(entries, lc) {
         if (!isSupport(e)) continue;
         const found = [];
         for (const m of String(e.body || '').matchAll(PROMISE_RE)) {
-            const capped = m[1].length >= 170;
+            let capped = m[1].length >= PROMISE_MAX;
             let t = m[1].replace(/\s+/g, ' ').trim();
+            // The commitment ends where the email's TEMPLATE begins. A SOTI reply pastes the
+            // booking widget and the signature furniture straight onto the sentence — "… collect
+            // Profile Execution Status logs together: Book time with Ayodeji Augustine: Ayodeji's
+            // Availability Agenda:Issue reproductionLogs collection" — and none of that is
+            // something SOTI undertook to DO. Cutting there ends the promise on its own last
+            // word, so it is complete rather than truncated: the ellipsis is dropped with it.
+            const stop = t.search(PROMISE_TEMPLATE_TAIL_RE);
+            if (stop > 20) { t = t.slice(0, stop).trim(); capped = false; }
             // Drop the dangling connective a tempered capture leaves behind ("… investigation,").
             t = t.replace(/[\s,;:–-]+(?:and|but|so|then|also|as part of the investigation)?[\s,;:–-]*$/i, '').trim();
-            if (capped) t = t.replace(/\s+\S*$/, '') + '…';
+            if (capped) t = truncatePromiseAtClause(t);
             // "we will be happy to help" / "we will get back to you" / "we will keep you
             // informed" are pleasantries, not commitments to a specific action.
             // "we will need to arrange a 30-minute remote session to raise the log level on the
@@ -5806,12 +6155,12 @@ function detectChainSignals(entries, lc) {
         if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
         if (!isSupport(e)) continue;
         const asks = chainSentences(e.body)
-            .filter(s => SUPPORT_REQUEST_RE.test(s) && s.length >= 15)
+            .filter(s => testAny(s, SUPPORT_REQUEST_RE, SUPPORT_REQUEST_ML_RE) && s.length >= 15)
             .map(s => s.slice(0, 260));
         if (!asks.length) break; // the newest support email asked for nothing — nothing is pending
         const i = entries.indexOf(e);
         const laterCustomer = entries.slice(0, i).filter(x => isCustomer(x) && !isOooAutoReply(x) && !isChainLifecycleRow(x));
-        const fulfilled = laterCustomer.some(x => REQUEST_FULFILLED_RE.test(x.body || ''));
+        const fulfilled = laterCustomer.some(x => testAny(x.body || '', REQUEST_FULFILLED_RE, REQUEST_FULFILLED_ML_RE));
         if (!fulfilled) {
             out.pendingRequest = {
                 sender: (e.sender || 'SOTI Support').trim(),
@@ -5833,13 +6182,33 @@ function detectChainSignals(entries, lc) {
     // offer already sent and the customer replying about slots, the action is to give them
     // concrete availability and confirm the booking — not to "arrange a 30-minute remote session",
     // which is what both the log-access directive and the model's own instincts otherwise produce.
+    //
+    // A session moves through THREE states and each one demands a different next step: offered →
+    // booked → held. The booked state is checked FIRST and across the whole chain (either side may
+    // be the one to confirm it), because a booking supersedes the offer that produced it: once
+    // "we have a meeting scheduled with you at 3 PM GMT+1 today" is on the record, re-proposing
+    // the session is the wrong instruction no matter how many offers precede it.
     for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (isOooAutoReply(e) || isChainLifecycleRow(e)) continue;
+        const m = matchEarliest(e.body || '', MEETING_BOOKED_RE, MEETING_BOOKED_ML_RE);
+        if (!m) continue;
+        // A booking made before the session already happened is history, not a live appointment.
+        if (entries.slice(0, i).some(x => testAny(x.body || '', MEETING_HELD_RE, MEETING_HELD_ML_RE))) break;
+        out.meetingBooked = {
+            sender: (e.sender || 'unknown').trim(),
+            time: (e.time || '').trim(),
+            quote: quoteAround(e.body, m.index, m[0].length)
+        };
+        break;
+    }
+    for (let i = 0; i < entries.length && !out.meetingBooked; i++) {
         const e = entries[i];
         if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
         if (!isSupport(e)) continue;
-        const m = String(e.body || '').match(MEETING_PROPOSED_RE);
+        const m = matchEarliest(e.body || '', MEETING_PROPOSED_RE, MEETING_PROPOSED_ML_RE);
         if (!m) continue;
-        const held = entries.slice(0, i).some(x => MEETING_HELD_RE.test(x.body || ''));
+        const held = entries.slice(0, i).some(x => testAny(x.body || '', MEETING_HELD_RE, MEETING_HELD_ML_RE));
         if (!held) {
             out.meetingProposed = {
                 sender: (e.sender || 'SOTI Support').trim(),
@@ -5876,7 +6245,8 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     const has = sig.recurrence || sig.urgency || sig.impact || sig.unverified || sig.blocker
         || (sig.commitments && sig.commitments.length) || (sig.promises && sig.promises.length)
         || (sig.recordedActions && sig.recordedActions.length)
-        || sig.openQuestion || sig.pendingRequest || sig.meetingProposed;
+        || sig.openQuestion || sig.pendingRequest || sig.meetingProposed || sig.meetingBooked
+        || sig.issueContrast;
     if (!has) return '';
     const q = (s) => `${s.sender}${s.time ? ` (${s.time})` : ''}: "${s.quote}"`;
     const lines = [closing
@@ -5895,11 +6265,24 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
             ? `- ALREADY REQUESTED FROM THE CUSTOMER — SOTI Support asked for this; the customer has written since, but nothing in the chain shows these artefacts arriving. Treat it as still owed unless a later message answers it. ${q(sig.pendingRequest)}`
             : `- OUTSTANDING REQUEST TO THE CUSTOMER — SOTI Support asked for this and the customer has not replied since. ${q(sig.pendingRequest)}`);
     }
-    if (sig.meetingProposed && !closing) {
+    // BOOKED beats OFFERED, and detectChainSignals guarantees only one of the two is ever set.
+    if (sig.meetingBooked && !closing) {
+        lines.push(`- THE LIVE SESSION IS ALREADY BOOKED — it is agreed and in the diary, and the chain does not show it has been held yet. State the appointment (including the time exactly as the chain gives it) as where the case stands. It is FORBIDDEN to write "book", "arrange", "schedule" or "set up" a session as a next step: that work is DONE. ${q(sig.meetingBooked)}`);
+    } else if (sig.meetingProposed && !closing) {
         lines.push(`- A LIVE SESSION HAS ALREADY BEEN OFFERED and the chain does not show it has been held yet. ${q(sig.meetingProposed)}`);
     }
-    if (sig.recurrence) {
+    if (sig.recurrence && sig.recurrence.fromIssueSummary) {
+        // Deliberately weaker than the chain form below: "again" in an opening report usually
+        // means the customer has met this fault before — often on the case they go on to name —
+        // not that a fix on THIS case failed. Claiming the latter would invent a fix that never
+        // happened, in the section an engineer trusts most.
+        lines.push(`- THE CUSTOMER OPENED THIS CASE SAYING THEY HAVE HIT THIS PROBLEM AGAIN. State that in the Summary, in their terms. Do NOT write that a fix on THIS case failed or regressed unless the chain says so separately. ${q(sig.recurrence)}`);
+    } else if (sig.recurrence) {
         lines.push(`- RECURRENCE — the customer reported the SAME issue happening AGAIN after it had previously been treated as fixed. ${q(sig.recurrence)}`);
+    }
+    // The customer's own reason why the case they referenced does NOT settle this one.
+    if (sig.issueContrast) {
+        lines.push(`- HOW THIS CASE DIFFERS FROM THE ONE THE CUSTOMER COMPARED IT TO — this is the customer's own statement and it is the reason the earlier case's outcome does not simply apply here. "Summary:" MUST carry what it actually says, translated into English, not merely the fact that a comparison was drawn. ${q(sig.issueContrast)}`);
     }
     // Urgency and impact are usually the SAME sentence ("look into this urgently, we have
     // customers calling and cannot assist them"). Quoting it twice under two headings wastes
@@ -5962,7 +6345,8 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         const asks = [];
         if (sig.openQuestion) asks.push("ANSWER the customer's unanswered question above directly, in its first paragraph — it is the reason they are waiting, and a reply that does not answer it reads as if their email was never opened");
         if (sig.pendingRequest) asks.push('restate what SOTI is still waiting for using EXACTLY the artefacts already named in the outstanding request above — never substitute different logs, files or steps');
-        if (sig.meetingProposed) asks.push('treat the live session as already OFFERED — give concrete availability and get it booked, rather than proposing a session again as though it were a new idea');
+        if (sig.meetingBooked) asks.push('treat the live session as already BOOKED — confirm the appointment and the time exactly as the chain states it, say what will be done on the call, and NEVER ask the customer to book or schedule a session that is already in the diary');
+        else if (sig.meetingProposed) asks.push('treat the live session as already OFFERED — give concrete availability and get it booked, rather than proposing a session again as though it were a new idea');
         if (sig.recurrence) asks.push('acknowledge explicitly that the issue RECURRED (do not write as though the first fix held)');
         if (sig.impact || sig.urgency) asks.push('acknowledge the operational impact the customer described, in their terms');
         if (sig.unverified) asks.push('never write as though a test/upgrade the customer said they could NOT confirm has been confirmed — treat that outcome as still open');
@@ -5987,7 +6371,8 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
             ? 'The customer\'s question above is still unanswered — state it in "Summary:". What "Next steps:" may contain is decided by the CASE STATE directive, not by this signal.'
             : 'MANDATORY FOR "Next steps:" — step 1 MUST be replying to the customer with the answer to that question. Nothing may come before it.');
         if (sig.pendingRequest && !closing) lines.push('MANDATORY — the outstanding request above has ALREADY been sent: put it under "Troubleshoots done" as the request that was made, and in "Next steps:" chase EXACTLY the artefacts it names. Naming a different log file or a different collection method than the one already asked for is FORBIDDEN.');
-        if (sig.meetingProposed && !closing) lines.push('MANDATORY — the live session above was ALREADY offered. Do NOT write "arrange a session" as a next step; write CONFIRMING it — give concrete availability, get it booked, and say which log level is raised on which server role and which named artefacts are captured on the call.');
+        if (sig.meetingBooked && !closing) lines.push('MANDATORY — the live session above is already BOOKED. Booking it is FORBIDDEN as a next step; the steps are to HOLD it at the stated time and to be ready for it — which log level is raised on which server role beforehand, what is reproduced on the call, and which named artefacts are captured.');
+        else if (sig.meetingProposed && !closing) lines.push('MANDATORY — the live session above was ALREADY offered. Do NOT write "arrange a session" as a next step; write CONFIRMING it — give concrete availability, get it booked, and say which log level is raised on which server role and which named artefacts are captured on the call.');
         if (sig.commitments && sig.commitments.length && !commitmentsStale) lines.push('MANDATORY FOR "Next steps:" — every ALREADY-COMMITTED next step above must be a numbered step, made executable (name the artefact + server role + what result decides it), BEFORE any newly proposed investigation.');
         if (sig.recordedActions && sig.recordedActions.length) lines.push('MANDATORY FOR "Troubleshoots done:" — every ACTIONS/FINDINGS ALREADY RECORDED line above belongs there. Never turn one into a next step. Keep them in the THIRD PERSON as written above (they name who did it) — never write "I" or "we" anywhere in your answer.');
         if (sig.promises && sig.promises.length && !closing && !promisesEchoRequest) lines.push('MANDATORY — never contradict or walk back anything already PROMISED to the customer above.');
@@ -6003,10 +6388,14 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         if (sig.pendingRequest && !closing) {
             lines.push('MANDATORY — the outstanding request above was ALREADY SENT to the customer. Record it under "Troubleshoots done" as the request that was made (with what was asked for), and in "Next steps:" chase EXACTLY the artefacts, server role and collection method it names. You are FORBIDDEN from replacing them with your own choice of log file, tool or procedure, and from asking the customer for the same thing twice under a different name.');
         }
-        if (sig.meetingProposed && !closing) {
+        if (sig.meetingBooked && !closing) {
+            lines.push('MANDATORY — the live session above is BOOKED. "Summary:" MUST say so as part of where the case stands, giving the appointment time exactly as the chain states it (do not convert, reinterpret or drop the time zone). Offering and booking the session both belong under "Troubleshoots done" as work already completed. You are FORBIDDEN from writing any next step that books, arranges, schedules, sets up or proposes a session — that is finished, and a plan that opens by arranging an appointment already in the diary is the worst error you can make on this case. The steps are what makes the booked session productive: raise the log level on the named server role beforehand, reproduce the issue live, note the exact timestamp, and capture the named artefacts on the call.');
+        } else if (sig.meetingProposed && !closing) {
             lines.push('MANDATORY — the live session above has ALREADY been offered, so proposing one is NOT a next step and belongs under "Troubleshoots done" as an offer already made. The step is to CONFIRM it: give the customer concrete availability (honouring any constraint they stated about timing), get it booked, and state what will be done ON the session — which log level is raised, on which server role, what is reproduced, and which named artefacts are captured. Any step that reads as arranging the session from scratch is wrong.');
         }
-        if (sig.recurrence) {
+        if (sig.recurrence && sig.recurrence.fromIssueSummary) {
+            lines.push('MANDATORY FOR "Summary:" — state that the customer opened this case reporting they had hit this problem AGAIN, and say what they compared it to. You are FORBIDDEN from turning that into a claim that a fix delivered on THIS case failed or regressed: nothing in the record says so.');
+        } else if (sig.recurrence) {
             lines.push('MANDATORY FOR "Summary:" — the recurrence is the single most decisive fact on this case and MUST be stated there, with who reported it and when. A newer message saying the issue was fixed does NOT cancel it: report BOTH, and say plainly that the problem has now returned once after an earlier fix, so any current "resolved" status is provisional.');
         }
         if ((sig.impact || sig.urgency) && !closing) {
@@ -6224,9 +6613,13 @@ function detectCaseLifecycleState(ci) {
         // the same rule detectChainSignals already uses for the customer's decisive signals.
         const isCust = (res.customerSender && e.sender && sameSenderName(e.sender, res.customerSender))
             || !isStaffEntry(e);
-        let reopenM = isCust ? scan.match(REOPEN_SIGNAL) : null;
-        let consentM = isCust ? scan.match(CUSTOMER_CONSENT) : null;
-        let closingM = !isCust ? scan.match(SUPPORT_CLOSING) : null;
+        // Each pattern is paired with its multilingual twin. They stay separate regexes rather
+        // than one union because the twins need the `u` flag for \p{L} and Unicode boundaries,
+        // and splicing a \p{L} source into a non-`u` regex makes it match a literal "p" instead
+        // — a failure that is completely silent.
+        let reopenM = isCust ? matchEarliest(scan, REOPEN_SIGNAL, REOPEN_SIGNAL_ML_RE, SIG_RECURRENCE_ML_RE, SIG_UNVERIFIED_ML_RE) : null;
+        let consentM = isCust ? matchEarliest(scan, CUSTOMER_CONSENT, CUSTOMER_CONSENT_ML_RE) : null;
+        let closingM = !isCust ? matchEarliest(scan, SUPPORT_CLOSING, SUPPORT_CLOSING_ML_RE) : null;
         // "close it if we don't hear back" is a plan, not a verdict — see CONDITIONAL_CLOSURE_RE.
         if (consentM && conditionalAt(e, consentM)) consentM = null;
         if (closingM && conditionalAt(e, closingM)) closingM = null;
@@ -7164,7 +7557,11 @@ const COVERAGE_SEMANTICS = {
     urgency: /\burgen\w*|\bpriorit\w*|\bescalat\w*|\bexpedite\w*|\basap\b|\bcritical\b|\bimmediate\w*|\bimportance\b|\bas soon as\b|\bquickly\b/i,
     impact: /\bproduction\b|\bbusiness[- ](?:impact|critical)\b|\bimpact\w*|\baffect\w*|\boutage\b|\bwidespread\b|\ball (?:their |the )?(?:windows |enrolled )?(?:machines|devices)\b|\bcannot (?:assist|serve|work|support)\b/i,
     unverified: /\b(?:not|n'?t|never|unable|cannot|can'?t|yet to|awaiting|pending|still)\b[^.\n]{0,45}\b(?:confirm\w*|verif\w*|test\w*|validat\w*|establish\w*|know\w*|report\w*)\b|\bunconfirmed\b|\bunverified\b|\bnot (?:yet )?(?:known|confirmed|verified|established|reported)\b|\boutcome not reported\b/i,
-    blocker: /\bblock\w*|\bprevent\w*|\bheld up\b|\bstuck\b|\bcannot proceed\b|\bderail\w*|\bgetting in the way\b|\bbefore (?:the |any )?(?:CPU |high[- ]CPU )?(?:issue|test\w*|verification)\b/i
+    blocker: /\bblock\w*|\bprevent\w*|\bheld up\b|\bstuck\b|\bcannot proceed\b|\bderail\w*|\bgetting in the way\b|\bbefore (?:the |any )?(?:CPU |high[- ]CPU )?(?:issue|test\w*|verification)\b/i,
+    // A summary that merely says the customer "compared it to a previous case" has NOT carried the
+    // contrast — it has carried the comparison and dropped the point of it. The test therefore
+    // looks for difference language, not for the mention of another case.
+    issueContrast: /\bunlike\b|\bdiffer\w*|\bin contrast\b|\bcontrary to\b|\bwhereas\b|\bthis time\b|\bopposite\b|\bnot the same as\b|\bas opposed to\b/i
 };
 
 // Where the "Summary:" section's prose starts and ends. Group 1 = the header, group 3 = the body.
@@ -7210,7 +7607,13 @@ function repairSentenceFor(key, s) {
             return `SOTI Support has already asked the customer for the evidence described${when ? ` on ${when}` : ''}, and nothing in the chain shows it arriving.`;
         }
         case 'recurrence':
-            return 'The customer has reported that the issue returned after previously being treated as fixed.';
+            // An "again" in the opening report is not evidence that a fix on THIS case failed —
+            // it usually means the customer has met this fault before, on the case they go on to
+            // name. Restoring the chain wording here would assert an earlier fix that never
+            // happened, so the two sources get two different sentences.
+            return s && s.fromIssueSummary
+                ? 'In their original report the customer stated they have encountered this problem again, having seen it before.'
+                : 'The customer has reported that the issue returned after previously being treated as fixed.';
         case 'urgency':
             return 'The customer has explicitly asked for this to be picked up with urgency.';
         case 'impact':
@@ -7220,9 +7623,22 @@ function repairSentenceFor(key, s) {
         case 'unverified':
             return 'The customer has not been able to confirm that outcome yet, so it remains unverified.';
         case 'blocker': {
-            const ref = (q.match(/\bC0\d{6,8}\b/) || [])[0];
+            const ref = (q.match(CASE_NUMBER_RE) || [])[0];
+            // "A separate fault is blocking progress" tells the engineer nothing they can act on.
+            // When the blocker was described in a script this code cannot summarise, the
+            // customer's own sentence is carried instead — on C01720260 that is the difference
+            // between "a separate fault" and "the calendar link will not open and I cannot sign
+            // in to book a slot", which is the thing someone actually has to fix.
+            if (q && !coverageTokens(q).length) {
+                return `A separate problem is holding this case up — the customer described it as: "${q}".`;
+            }
             return `A separate fault${ref ? ` (${ref})` : ''} is blocking progress on this case.`;
         }
+        case 'issueContrast':
+            // Quoted, not paraphrased, for the same reason as openQuestion: it is very often the
+            // one sentence written in the customer's own language, and a deterministic repair
+            // must never attempt a translation it cannot verify.
+            return `In their own report the customer set this case apart from the earlier one they referenced: "${q}".`;
         default:
             return '';
     }
@@ -7286,6 +7702,9 @@ function checkCaseSummaryCoverage(text, info) {
     //    an instruction to ask the customer to send back SOTI's own reply.
     src = stripBoilerplateLines(src, applied, lc, info.gatewayBoilerplate);
 
+    // 1c. REWRITE any step that books a session the chain shows is already in the diary.
+    if (lc.state !== 'closure') src = rewriteBookedMeetingSteps(src, sig.meetingBooked, applied);
+
     // 2. STRIKE OUT any point-in-time status the case has moved past. detectChainSignals keeps
     //    these out of the prompt, but the model reads the raw chain too, so the claim can still
     //    reach the answer on its own — most often as a "Troubleshoots done" bullet, which is why
@@ -7313,6 +7732,9 @@ function checkCaseSummaryCoverage(text, info) {
         ['openQuestion', sig.openQuestion],
         ['pendingRequest', closing ? null : sig.pendingRequest],
         ['recurrence', sig.recurrence],
+        // Restored on a closing case too: "the earlier case does not apply here" is a reason a
+        // closure may have been reached against the wrong precedent.
+        ['issueContrast', sig.issueContrast],
         ['urgency', closing ? null : sig.urgency],
         ['impact', closing ? null : sig.impact],
         ['unverified', closing ? null : sig.unverified],
@@ -7327,7 +7749,22 @@ function checkCaseSummaryCoverage(text, info) {
         // a summary is far more likely to drop a message it could not read. When word overlap
         // cannot decide, the MEANING test decides alone, and a fact with neither is restored.
         const wordCheckable = coverageTokens(s.quote).length > 0;
-        const covered = (semantic && semantic.test(src)) || (wordCheckable && coverageHit(src, s.quote));
+        // For most signals the MEANING test alone is enough: however the summary phrases "the
+        // customer is waiting on an answer", the fact is there. The CONTRAST is different, because
+        // its meaning test can be satisfied by a sentence that carries no meaning — "the customer
+        // reported a problem that differs from a previous case they compared it to by number"
+        // matches /differs?/ while saying nothing whatsoever about the difference, and that
+        // sentence is the exact failure this signal exists to replace. So when the contrast was
+        // written in a script this code cannot verify a translation of, the customer's own words
+        // are restored rather than assumed to have survived.
+        const semanticEnough = semantic && (key !== 'issueContrast' || wordCheckable);
+        // A quote the answer already carries VERBATIM is covered, in any script. Without this the
+        // repair is not idempotent: the sentences it appends quote the customer directly, and on
+        // a second pass neither the word overlap (no Latin tokens) nor the meaning test (the
+        // restored wording need not contain the English keyword) recognises its own work, so it
+        // appends the same sentence again. Re-running a repair must be a no-op.
+        const quoted = String(s.quote).length >= 12 && src.includes(s.quote);
+        const covered = quoted || (semanticEnough && semantic.test(src)) || (wordCheckable && coverageHit(src, s.quote));
         if (covered) continue;
         const sentence = repairSentenceFor(key, s);
         if (sentence) { missing.push(sentence); applied.push(`restored: ${key}`); }
@@ -7394,6 +7831,43 @@ function stripBoilerplateLines(text, applied, lc, gatewayBoilerplate) {
     if (!removed) return src;
     if (applied) applied.push(`removed ${removed} line${removed === 1 ? '' : 's'} written about mail-system boilerplate`);
     return renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
+}
+
+// A next step that books a session the chain shows is ALREADY BOOKED. The signals block forbids
+// it, but the instinct is strong enough to survive the instruction on a small model — on case
+// C01720260 the plan's only step was "1. Book a 30-minute remote session with Узорин Константин
+// Евгеньевич to raise the log level on the MobiControl server, reproduce the issue, note the
+// exact timestamp, and collect Profile…", written two hours before that very meeting was due.
+//
+// The step is REWRITTEN rather than deleted, because everything after the "to" is the genuinely
+// useful part — the log level, the server role, the artefacts. Only the booking verb is wrong,
+// so only the booking verb goes. A step with no such tail is nothing but the booking, and is
+// dropped outright.
+const BOOKED_MEETING_STEP_RE = /^(\s*(?:[-*•]|\d+[.)])\s*)(?:please\s+)?(?:book|re-?book|arrange|schedule|re-?schedule|set\s+up|organi[sz]e|propose|offer|coordinate)\s+(?:a|an|the|another)?\s*((?:\d+[-\s]?minutes?\s+)?(?:remote\s+|live\s+|online\s+|screen[-\s]?sharing\s+|screen[-\s]?share\s+|teams\s+|zoom\s+|webex\s+)*(?:session|meeting|call))\b([^]*)$/i;
+function rewriteBookedMeetingSteps(text, booked, applied) {
+    if (!booked) return text;
+    const lines = String(text || '').split('\n');
+    const out = [];
+    let inNextSteps = false, changed = 0, dropped = 0;
+    for (const line of lines) {
+        if (FORWARD_SECTION_RE.test(line)) { inNextSteps = true; out.push(line); continue; }
+        if (HISTORICAL_SECTION_RE.test(line)) { inNextSteps = false; out.push(line); continue; }
+        const m = inNextSteps && line.match(BOOKED_MEETING_STEP_RE);
+        if (!m) { out.push(line); continue; }
+        // Everything the step said to DO on the session, past the "with <person>" and the "to".
+        const tail = m[3].replace(/^\s*with\s+[^,]{2,60}?(?=\s+(?:to|and|in order to)\b|,|$)/i, '')
+            .replace(/^\s*[,:]?\s*(?:in order to|so as to|and then|and|to)\s+/i, '')
+            .trim();
+        if (tail.length < 12) { dropped++; continue; }
+        out.push(`${m[1]}On the already-booked ${m[2].toLowerCase()}, ${tail.charAt(0).toLowerCase() + tail.slice(1)}`);
+        changed++;
+    }
+    if (!changed && !dropped) return text;
+    const rebuilt = renumberOrderedSteps(out.join('\n')).replace(/\n{3,}/g, '\n\n');
+    // Never hand back a plan with no steps left at all.
+    if (!(rebuilt.match(/^\s*(?:[-*•]|\d+[.)])\s+\S/gm) || []).length) return text;
+    if (applied) applied.push(`rewrote ${changed + dropped} step${changed + dropped === 1 ? '' : 's'} that booked an already-booked session`);
+    return rebuilt;
 }
 
 // Add sentences to the end of the "Summary:" paragraph (or to the end of the answer when it has
@@ -14894,7 +15368,7 @@ async function generateCaseSummary() {
         try { return getCleanChainEntries(chainRaw); } catch (e) { return []; }
     })();
     const signals = (() => {
-        try { return detectChainSignals(cleanEntries, lc); }
+        try { return detectChainSignals(cleanEntries, lc, $('issueSummary').value || ''); }
         catch (e) { return null; }
     })();
     // Half of a chain routinely arrives in the customer's own language. Naming it as fact is what
@@ -15065,7 +15539,7 @@ async function draftCustomerEmail() {
         try { return getCleanChainEntries($('emailChain').value || ''); } catch (e) { return []; }
     })();
     const signalsBlock = (() => {
-        try { return buildCaseSignalsBlock(detectChainSignals(emailEntries, lc), 'email', undefined, lc); }
+        try { return buildCaseSignalsBlock(detectChainSignals(emailEntries, lc, $('issueSummary').value || ''), 'email', undefined, lc); }
         catch (e) { return ''; }
     })();
     // A reply that answers a question the customer asked in their own language — instead of
