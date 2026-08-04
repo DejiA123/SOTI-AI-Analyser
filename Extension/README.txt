@@ -54,7 +54,9 @@ FILE INVENTORY
 Core extension files (required):
   manifest.json           Extension configuration and permissions
   SOTI_AI_Analyser.html   Main UI (side panel)
-  sidepanel.js            All application logic (~5900 lines)
+  sidepanel.js            All application logic (~17,900 lines)
+  power.js                Power & resource governor — caps this app's memory and
+                          CPU use per machine (must load before sidepanel.js)
   styles.css              UI styling
   background.js           Service worker (opens side panel on click)
   content.js              Injected into Salesforce to sync case data
@@ -84,11 +86,35 @@ Local AI installer (optional — for first-time Ollama setup):
   setup_local_ai.bat      Automated Ollama + model installer for Windows
   setup_local_ai.ps1      PowerShell implementation of the above installer
 
+Tests (optional — developers only, not needed to run the extension):
+  tests/power.test.js     51 unit tests for the governor:  node tests/power.test.js
+  tests/browser.e2e.js    55 checks driving the real panel in Chromium (needs Playwright)
+
 Repo files:
   README.txt              This file
   SECURITY.md             Security & data-protection assessment
   UNINSTALL.md            Rollback/uninstall steps for the local AI setup
   .gitignore              Git ignore rules
+
+
+RESOURCE USE (why the app doesn't slow your machine down)
+---------------------------------------------------------
+
+The app measures itself and works out how much memory it may use on YOUR machine
+— roughly 1.8 GB on a 16 GB laptop, less on a smaller one. When it approaches that
+limit it automatically shrinks its workload and hands back caches it can rebuild,
+rather than letting the browser run out of memory.
+
+The live pill in the top bar shows what it is currently using. Click it for:
+  - what this app has budgeted for your machine, and why
+  - live memory and responsiveness
+  - how fast recent AI runs were (time to first token, tokens/sec)
+  - "Free memory now" and "Copy report" (for bug reports)
+
+IMPORTANT: this covers the browser panel only. The AI model itself runs inside
+Ollama as a separate program holding its own 3-4 GB, which the panel cannot see or
+control. If the whole machine is short of memory, lower Context Size in Settings
+(or use a smaller model) — that is the setting that moves Ollama's usage.
 
 
 FEATURES
@@ -100,4 +126,7 @@ FEATURES
   Salesforce Sync     Auto-pull case number, account, platform, and email chain from SF
   OCR                 Extract text from screenshots using on-device Tesseract v5
   JIRA Reports        Generate formatted JIRA tickets from AI conversation + case data
+  Power Monitor       The app measures itself and stays inside a memory budget it
+                      works out for your machine, so it never freezes the laptop.
+                      Click the live MB pill in the top bar for the full report.
   Privacy             All processing is local — no data leaves your machine
