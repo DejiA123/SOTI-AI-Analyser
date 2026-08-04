@@ -75,6 +75,86 @@ const streamingElements = new Map(); // caseId -> live aib DOM element currently
         }
     });
 })();
+/* ---------------------------------------------------------------------------
+ * POWER & RESOURCE GOVERNOR BRIDGE
+ * ---------------------------------------------------------------------------
+ * The governor itself lives in power.js and is loaded BEFORE this file. Every
+ * call site below goes through this bridge rather than touching window.SotiPower
+ * directly, for one reason: the app must still work if power.js is missing,
+ * blocked, or fails to construct. The fallback knobs are exactly the constants
+ * this file used before the governor existed, so a missing power.js costs
+ * adaptivity — not correctness.
+ *
+ * Read `Power.knobs` FRESH at each decision point. It is a live computation of
+ * the current pressure level; caching it is how you end up running an idle
+ * throttle through an analysis that has already gone critical.
+ * ------------------------------------------------------------------------- */
+const Power = (function () {
+    const G = (typeof window !== 'undefined' && window.SotiPower) ? window.SotiPower : null;
+
+    // Pre-governor behaviour, preserved verbatim as the fallback.
+    const STATIC_KNOBS = Object.freeze({
+        yieldEveryMs: 20,
+        chunkLines: 2000,
+        promptScale: 1,
+        answerScale: 1,
+        maxOcrWorkers: 2,
+        maxResidentLogBytes: Infinity,
+        maxHydratedCases: Infinity,
+        prewarmKb: true,
+        level: 'ok',
+        tier: 'unknown'
+    });
+
+    const noop = () => {};
+    const noopHandle = {
+        entry: {},
+        firstToken: noop,
+        touch: noop,
+        end: () => ({})
+    };
+
+    return {
+        available: !!G,
+        governor: G,
+        get knobs() {
+            if (!G) return STATIC_KNOBS;
+            try { return G.knobs; } catch (e) { return STATIC_KNOBS; }
+        },
+        get level() { return G ? G.level : 'ok'; },
+        get tier() { return G ? G.tier : 'unknown'; },
+        get budgetMB() { return G ? G.budgetMB : 0; },
+        snapshot() { return G ? G.snapshot() : null; },
+        profile() { return G ? G.profile : null; },
+        markActive(ms) { if (G) { try { G.markActive(ms); } catch (e) {} } },
+        canAllocate(bytes) {
+            if (!G) return { ok: true, reason: 'no-governor' };
+            try { return G.canAllocate(bytes); } catch (e) { return { ok: true, reason: 'error' }; }
+        },
+        registerReclaimer(spec) {
+            if (!G) return noop;
+            try { return G.registerReclaimer(spec); } catch (e) { return noop; }
+        },
+        onChange(fn) {
+            if (!G) return noop;
+            try { return G.onChange(fn); } catch (e) { return noop; }
+        },
+        perf: {
+            start(kind, meta) {
+                if (!G) return noopHandle;
+                try { return G.perf.start(kind, meta); } catch (e) { return noopHandle; }
+            },
+            mark(kind, data) {
+                if (!G) return null;
+                try { return G.perf.mark(kind, data); } catch (e) { return null; }
+            },
+            entries() { return G ? G.perf.entries() : []; },
+            summary() { return G ? G.perf.summary() : []; },
+            clear() { if (G) { try { G.perf.clear(); } catch (e) {} } }
+        }
+    };
+})();
+
 let RELEASE_NOTES_CONTENT = "";
 let PULSE_SEARCH_RESULTS = "";
 let DOCS_SEARCH_RESULTS = "";
@@ -691,6 +771,167 @@ function sanitizeCasesForStorage(list, inlineLogContent = false) {
     return (list || []).map(c => ({ ...c, logs: (c.logs || []).map(l => sanitizeLogForStorage(l, inlineLogContent)) }));
 }
 
+/* ---------------------------------------------------------------------------
+ * ON-DEMAND LOG HYDRATION  (the single biggest resident-memory saving)
+ * ---------------------------------------------------------------------------
+ * Startup used to read the log TEXT of EVERY stored case into memory at once —
+ * chrome.storage.local.get(cases.map(...)) — and then keep it all there for the
+ * whole session, even though only one case is ever on screen. Five cases with a
+ * few unzipped bundles between them meant ~100MB of resident strings before the
+ * user had done anything, and every one of those strings later grew a lines[]
+ * array (a second full copy) plus per-line intel caches.
+ *
+ * Log text is now HYDRATED PER CASE. The always-loaded part is metadata (name,
+ * size, sourceZip) — enough to render the Logs panel and the file manifest.
+ * Content arrives when a case is opened and can be handed back under memory
+ * pressure, because it is durable on disk and re-readable at any time.
+ *
+ * INVARIANT the rest of the file relies on: THE ACTIVE CASE IS ALWAYS HYDRATED.
+ * switchCase() and send() both await ensureCaseHydrated(), so every analysis
+ * path continues to see log.content exactly as before.
+ * ------------------------------------------------------------------------- */
+const _hydratedCases = new Set();      // case ids whose log text is resident
+const _hydrating = new Map();          // case id -> in-flight hydration promise
+
+function _logsAreHydrated(c) {
+    if (!c) return true;
+    const logs = c.logs || [];
+    if (logs.length === 0) return true;
+    // A stub carries a size but no content. If any log still looks like a stub,
+    // the case needs a hydration pass.
+    return !logs.some(l => l && !l.content && l.size > 0);
+}
+
+// Pull one case's log text from its per-case storage key and merge it onto the
+// metadata stubs already in memory. Safe to call repeatedly and concurrently.
+async function ensureCaseHydrated(caseId) {
+    const c = cases.find(x => x.id === caseId);
+    if (!c) return false;
+    if (_logsAreHydrated(c)) { _hydratedCases.add(caseId); return true; }
+    if (_hydrating.has(caseId)) return _hydrating.get(caseId);
+
+    const job = (async () => {
+        const t0 = performance.now();
+        try {
+            if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return false;
+            const key = LOGS_KEY_PREFIX + caseId;
+            const got = await chrome.storage.local.get(key);
+            const stored = got[key];
+            if (!Array.isArray(stored)) return false;
+
+            // Match stored text back onto the in-memory stubs by name (+ source
+            // zip), not by index: a removeLog() between save and hydrate would
+            // otherwise attach one file's text to another file's row.
+            const byName = new Map();
+            stored.forEach(s => byName.set((s.sourceZip || '') + ' ' + (s.name || ''), s));
+            (c.logs || []).forEach(l => {
+                const s = byName.get((l.sourceZip || '') + ' ' + (l.name || ''));
+                if (s && typeof s.content === 'string') {
+                    l.content = s.content;
+                    l.size = s.content.length;
+                }
+            });
+            _hydratedCases.add(caseId);
+            Power.perf.mark('case-hydrate', {
+                caseId,
+                files: stored.length,
+                bytes: stored.reduce((a, s) => a + (s.content ? s.content.length : 0), 0),
+                ms: Math.round(performance.now() - t0)
+            });
+            return true;
+        } catch (e) {
+            console.warn('[Power] Log hydration failed for', caseId, e);
+            return false;
+        } finally {
+            _hydrating.delete(caseId);
+        }
+    })();
+
+    _hydrating.set(caseId, job);
+    return job;
+}
+
+// Hand a case's log text (and everything derived from it) back to the browser.
+// Only ever applied to cases that are NOT active and whose text is safely on
+// disk — never to unsaved work. Returns the approximate bytes released.
+function dehydrateCaseLogs(caseId) {
+    const c = cases.find(x => x.id === caseId);
+    if (!c || caseId === activeCaseId) return 0;
+    // Standalone mode has no per-case storage key to read the text back from, so
+    // releasing it there is data loss, not reclaim.
+    if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return 0;
+    // Text not yet flushed to storage would be genuinely lost, so leave it.
+    if (_dirtyLogCases.has(caseId)) return 0;
+
+    let freed = 0;
+    (c.logs || []).forEach(l => {
+        if (!l) return;
+        if (typeof l.content === 'string' && l.content.length) {
+            l.size = l.content.length;          // keep the panel's size column truthful
+            freed += l.content.length * 2;      // JS strings are UTF-16
+            l.content = '';
+        }
+        freed += dropDerivedLogCaches(l);
+    });
+    _hydratedCases.delete(caseId);
+    return freed;
+}
+
+// Keep the number of hydrated cases — and the total resident log text — inside
+// what the governor says this machine can carry. Cases are released
+// least-recently-touched first; the active case is never a candidate.
+function trimHydratedCases() {
+    const knobs = Power.knobs;
+    const candidates = cases
+        .filter(c => c.id !== activeCaseId && _hydratedCases.has(c.id))
+        .sort((a, b) => (a.updatedAt || a.lastSentAt || a.createdAt || 0) - (b.updatedAt || b.lastSentAt || b.createdAt || 0));
+
+    let residentBytes = 0;
+    cases.forEach(c => (c.logs || []).forEach(l => { if (l && l.content) residentBytes += l.content.length * 2; }));
+
+    let freed = 0;
+    // 1 for the active case itself — maxHydratedCases counts total, not extras.
+    let overflow = candidates.length - Math.max(0, (knobs.maxHydratedCases === Infinity ? Infinity : knobs.maxHydratedCases - 1));
+    for (const c of candidates) {
+        const overCount = overflow > 0;
+        const overBytes = residentBytes > knobs.maxResidentLogBytes;
+        if (!overCount && !overBytes) break;
+        const got = dehydrateCaseLogs(c.id);
+        freed += got;
+        residentBytes -= got;
+        overflow--;
+    }
+    if (freed > 0) {
+        Power.perf.mark('case-dehydrate', { freedMB: +(freed / 1048576).toFixed(1), reason: 'hydration-budget' });
+    }
+    return freed;
+}
+
+// Drop the DERIVED per-log caches: lines[] (a full second copy of the text) and
+// the per-line classification arrays. All of it is pure function of `content`
+// and is rebuilt on demand by precomputeLogIntel/getLogPanelIntel, so this is
+// the cheapest memory in the app to give back — and the first thing sacrificed.
+function dropDerivedLogCaches(l) {
+    if (!l) return 0;
+    let freed = 0;
+    if (Array.isArray(l.lines) && l.lines.length) {
+        // Each line is a separate string object; ~ the text again plus per-string
+        // overhead. The estimate only feeds the monitor's "reclaimed" figure.
+        freed += (l.content ? l.content.length * 2 : l.lines.length * 40);
+        l.lines = null;
+    }
+    if (l.precomputedIntel) {
+        const n = (l.precomputedIntel.intelCache || []).length;
+        freed += n * 24;   // parallel typed-ish arrays: ~24 bytes/line of slots
+        l.precomputedIntel = null;
+    }
+    if (l.panelIntel) {
+        freed += 4096;
+        l.panelIntel = null;
+    }
+    return freed;
+}
+
 function buildCaseCiFromForm() {
     return {
         caseNum: $('caseNum').value,
@@ -852,34 +1093,69 @@ async function loadState() {
         } if (data.cases && data.cases.length > 0) {
             cases = data.cases;
 
-            // Rehydrate log text from the per-case 'caseLogs:<id>' keys (kept OUT of the
-            // main state so routine saves stay small). LEGACY states stored full log
-            // objects inline — content plus lines[]/panelIntel/precomputedIntel caches:
-            // keep only the raw fields and move the text to its per-case key; the derived
-            // caches are rebuilt on demand and never touch storage again.
-            let storedLogs = {};
-            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-                try { storedLogs = await chrome.storage.local.get(cases.map(c => LOGS_KEY_PREFIX + c.id)); } catch (e) { storedLogs = {}; }
-            }
+            const targetId = data.activeCaseId || cases[0].id;
+
+            // ---- LOG TEXT: METADATA NOW, CONTENT ON DEMAND ----
+            // Previously every case's log text was read here in one
+            // chrome.storage.local.get(all keys) and kept resident for the whole
+            // session. That is what made the panel start at ~100MB with nothing
+            // open. Now only the case being OPENED is hydrated; the rest stay as
+            // metadata stubs (name/size/sourceZip) until switchCase() opens them.
+            //
+            // LEGACY states stored full log objects inline in the main key —
+            // content plus lines[]/panelIntel/precomputedIntel caches. Those are
+            // still migrated to their per-case key on sight, because leaving them
+            // inline means re-serializing megabytes on every routine save.
+            // Lazy hydration is only SAFE where the text can be read back. In
+            // standalone mode there is no chrome.storage — log text lives inline in
+            // the localStorage state — so stubbing it out there would simply delete
+            // it. Standalone therefore keeps the old eager behaviour; the extension,
+            // which is where the big multi-case sessions actually happen, gets the
+            // lazy path.
+            const canRehydrate = typeof chrome !== 'undefined' && !!(chrome.storage && chrome.storage.local);
             const migrateLegacy = {};
+            const stubLog = l => ({
+                name: l.name || '',
+                content: '',
+                size: typeof l.size === 'number' ? l.size : (l.content ? l.content.length : 0),
+                sourceZip: l.sourceZip || '',
+                uploadedAt: l.uploadedAt || 0
+            });
+            const keepLog = l => ({
+                name: l.name || '',
+                content: l.content || '',
+                size: l.content ? l.content.length : (l.size || 0),
+                sourceZip: l.sourceZip || '',
+                uploadedAt: l.uploadedAt || 0
+            });
             cases.forEach(c => {
-                const stored = storedLogs[LOGS_KEY_PREFIX + c.id];
                 const inline = Array.isArray(c.logs) ? c.logs : [];
-                const rawLog = l => ({ name: l.name || '', content: l.content || '', sourceZip: l.sourceZip || '', uploadedAt: l.uploadedAt || 0 });
-                if (Array.isArray(stored) && stored.length > 0) {
-                    c.logs = stored.map(rawLog);
-                } else if (inline.some(l => l && typeof l.content === 'string' && l.content)) {
-                    c.logs = inline.filter(l => l && typeof l.content === 'string' && l.content).map(rawLog);
-                    migrateLegacy[LOGS_KEY_PREFIX + c.id] = c.logs.map(l => sanitizeLogForStorage(l, true));
+                const withText = inline.filter(l => l && typeof l.content === 'string' && l.content);
+                if (!canRehydrate) {
+                    // Standalone: whatever text we have is the only copy — keep it.
+                    c.logs = (withText.length ? withText : inline).map(keepLog);
+                    if (withText.length) _hydratedCases.add(c.id);
+                    return;
+                }
+                if (withText.length) {
+                    // LEGACY inline state: move the text to its per-case key so routine
+                    // saves stop re-serializing it, then drop to a stub like everyone else.
+                    migrateLegacy[LOGS_KEY_PREFIX + c.id] = withText.map(l => sanitizeLogForStorage(l, true));
+                    c.logs = withText.map(stubLog);
                 } else {
-                    c.logs = []; // metadata-only stubs with no stored text can't be analysed
+                    c.logs = inline.map(stubLog);
                 }
             });
             if (Object.keys(migrateLegacy).length > 0 && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
                 chrome.storage.local.set({ ...migrateLegacy, _stateWriteToken: _newWriteToken() }).catch(e => console.warn('Legacy log migration write failed', e));
             }
+            _hydratedCases.clear();
 
-            const targetId = data.activeCaseId || cases[0].id;
+            // Hydrate ONLY the case about to be shown. switchCase() below re-checks
+            // and awaits this, so nothing downstream can observe a half-loaded case.
+            if (cases.find(c => c.id === targetId)) {
+                try { await ensureCaseHydrated(targetId); } catch (e) { /* stubs still render */ }
+            }
             
             // Patch existing cases for missing properties
             const template = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
@@ -1080,6 +1356,17 @@ function switchCase(id) {
             t.classList.toggle('active', t.dataset.id === id)
         );
 
+        // Bring this case's log TEXT back into memory (it may be a metadata-only
+        // stub after startup or after a reclaim), and let go of the cases that are
+        // now over the governor's hydration budget. Deliberately NOT awaited — the
+        // panel is already painted from metadata and stays interactive while the
+        // read completes. Every consumer of log.content (send(), Analyse Now) awaits
+        // ensureCaseHydrated() itself, so nothing can race ahead of this.
+        ensureCaseHydrated(id).then(hydrated => {
+            if (hydrated && activeCaseId === id) renderLogs();
+            trimHydratedCases();
+        }).catch(() => {});
+
         // Deferred storage write — token-tagged so our own onChanged is ignored (no reload loop)
         _suppressStorageReload = true;
         requestAnimationFrame(() => {
@@ -1106,8 +1393,15 @@ function closeCase(id, e) {
             chrome.storage.local.remove(LOGS_KEY_PREFIX + caseId).catch(() => {});
         }
     };
+    // Releasing a case is the one moment we can hand back everything it held, so
+    // do it explicitly rather than leaving it to whenever the collector notices.
+    const releaseLogs = caseObj => {
+        (caseObj && caseObj.logs || []).forEach(l => { if (l) { dropDerivedLogCaches(l); l.content = ''; } });
+        if (caseObj) _hydratedCases.delete(caseObj.id);
+    };
     if (cases.length <= 1) {
         const c = cases[0];
+        releaseLogs(c);
         c.name = 'Case 1';
         c.msgs = [];
         c.logs = [];
@@ -1125,8 +1419,10 @@ function closeCase(id, e) {
     if (idx === -1) return;
 
     const wasActive = (activeCaseId === id);
+    releaseLogs(cases[idx]);
     cases.splice(idx, 1);
     removeStoredLogs(id);
+    _dirtyLogCases.delete(id);
     
     if (wasActive) {
         const nextId = cases[Math.max(0, idx - 1)].id;
@@ -1356,9 +1652,23 @@ const DEFAULT_LINE_CLASSIFICATION = {
 };
 
 let _lastYield = performance.now();
+
+// Lines a scanner processes between yields. Refreshed by yieldIfNeeded() — which
+// already runs once per chunk — so the cadence adapts to pressure mid-scan at
+// zero per-line cost. Read directly (not via a call) in the hot loops below:
+// these run 150,000+ times on a big bundle.
+let _scanChunk = 2000;
+
+// Hand the main thread back to the browser if we have been hogging it. This is
+// the single most important CPU lever in the app: without it, classifying a
+// 150k-line bundle is one uninterrupted synchronous block and the panel is
+// frozen for the duration. Under pressure the governor shortens both the yield
+// interval and the chunk size, so the UI keeps painting even mid-analysis.
 async function yieldIfNeeded() {
+    const knobs = Power.knobs;
+    _scanChunk = knobs.chunkLines;
     const now = performance.now();
-    if (now - _lastYield > 20) {
+    if (now - _lastYield > knobs.yieldEveryMs) {
         await new Promise(r => setTimeout(r, 0));
         _lastYield = performance.now();
     }
@@ -1394,7 +1704,7 @@ async function precomputeLogIntel(log) {
         const installerEventCache = new Array(len);
 
         for (let idx = 0; idx < len; idx++) {
-            if (idx % 2000 === 0 && idx > 0) {
+            if (idx % _scanChunk === 0 && idx > 0) {
                 await yieldIfNeeded();
             }
             const line = lines[idx];
@@ -2591,7 +2901,7 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
         const { prefilteredIndices, timestampCache, installerEventCache } = log.precomputedIntel;
 
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % 2000 === 0 && i > 0) {
+            if (i % _scanChunk === 0 && i > 0) {
                 await yieldIfNeeded();
             }
             const idx = prefilteredIndices[i];
@@ -2975,7 +3285,7 @@ async function extractExceptionBlocksFromLog(log) {
     const MAX_BLOCKS = 800;
 
     for (let i = 0; i < lines.length; i++) {
-        if (i % 2000 === 0 && i > 0) {
+        if (i % _scanChunk === 0 && i > 0) {
             await yieldIfNeeded();
         }
         if (blocks.length >= MAX_BLOCKS) break;
@@ -3258,7 +3568,7 @@ async function getLogPanelIntel(log) {
     }
 
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % 2000 === 0 && i > 0) {
+        if (i % _scanChunk === 0 && i > 0) {
             await yieldIfNeeded();
         }
         const idx = prefilteredIndices[i];
@@ -3408,7 +3718,7 @@ async function collectCuratedFailureAnchors(lines, fileName = "", logObj = null)
     const anchors = [];
     const seen = new Set();
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % 2000 === 0 && i > 0) {
+        if (i % _scanChunk === 0 && i > 0) {
             await yieldIfNeeded();
         }
         // These anchors are a small set of distinct high-value markers; once we have enough (or have
@@ -3508,7 +3818,7 @@ async function extractFailurePhases(lines, logObj = null) {
     const phases = [];
     const seen = new Set();
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % 2000 === 0 && i > 0) {
+        if (i % _scanChunk === 0 && i > 0) {
             await yieldIfNeeded();
         }
         const idx = prefilteredIndices[i];
@@ -3538,7 +3848,7 @@ async function collectDistinctSqlFacts(lines, logObj = null) {
     const facts = [];
     const seen = new Set();
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % 2000 === 0 && i > 0) {
+        if (i % _scanChunk === 0 && i > 0) {
             await yieldIfNeeded();
         }
         const idx = prefilteredIndices[i];
@@ -3986,7 +4296,7 @@ async function buildLogPatternProfile(logs) {
         const { prefilteredIndices, intelCache, signatureCache } = log.precomputedIntel;
 
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % 2000 === 0 && i > 0) {
+            if (i % _scanChunk === 0 && i > 0) {
                 await yieldIfNeeded();
             }
             const idx = prefilteredIndices[i];
@@ -4089,7 +4399,7 @@ async function buildInstallerPatternSummary(logs) {
         const { prefilteredIndices } = log.precomputedIntel;
 
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % 2000 === 0 && i > 0) await yieldIfNeeded();
+            if (i % _scanChunk === 0 && i > 0) await yieldIfNeeded();
             const idx = prefilteredIndices[i];
             const line = lines[idx];
 
@@ -4246,7 +4556,14 @@ async function getPromptCharBudget() {
         : (small ? Math.min(SMALL_PROMPT_BUDGET_CTX, hardMax) : Math.min(32768, hardMax));
     const numPredict = small ? 1024 : 4096;
     const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token
-    return Math.floor((target - numPredict - 600) * CHARS_PER_TOKEN);
+    const raw = Math.floor((target - numPredict - 600) * CHARS_PER_TOKEN);
+    // POWER GOVERNOR: shrink the prompt when the machine is under pressure, and
+    // permanently on a weak machine. Prompt size is the dominant CPU cost of a
+    // local run — prefill scales with prompt TOKENS, not with num_ctx — so this
+    // is the cheapest lever available for keeping the panel responsive. The
+    // Log-Intelligence pre-analysis means a smaller budget still carries the
+    // high-signal evidence, it just carries fewer raw lines around it.
+    return Math.max(2000, Math.floor(raw * Power.knobs.promptScale));
 }
 
 // Char budget left for LOG SNIPPETS after everything else (system prompt, case data,
@@ -8598,7 +8915,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         const MAX_EVENTS_PER_LOG = 6000;
         let logEventCount = 0;
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % 2000 === 0 && i > 0) {
+            if (i % _scanChunk === 0 && i > 0) {
                 await yieldIfNeeded();
             }
             if (logEventCount >= MAX_EVENTS_PER_LOG) break;
@@ -9294,7 +9611,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     let captureExhausted = false;
 
     while (i < totalLines) {
-        if (i % 2000 === 0 && i > 0) {
+        if (i % _scanChunk === 0 && i > 0) {
             await yieldIfNeeded();
         }
         // Safety valve for pathological inputs (data-export CSVs where every row is "forensic"):
@@ -10541,9 +10858,33 @@ const PulseKB = {
         }
     },
 
+    // Roughly how much memory the built index occupies. Each chunk holds the
+    // article text AND a lowercased copy of it (the search scorer needs the
+    // lowercase form on every query, and rebuilding it per search was far worse),
+    // so a chunk costs about 2× its text, ×2 again for UTF-16.
+    approxBytes() {
+        if (!this.chunks) return 0;
+        let n = 0;
+        for (const c of this.chunks) n += (c.text ? c.text.length : 0) * 4;
+        return n;
+    },
+
+    // Hand the whole index back. It is pure derived data — a re-parse of the
+    // bundled .md corpus — so this is always safe, just expensive to undo
+    // (which is why it is the LAST reclaimer in the sacrifice order).
+    evict() {
+        const freed = this.approxBytes();
+        if (!freed) return 0;
+        this.chunks = null;
+        this.indexing = null;
+        console.log(`[Power] PulseKB index evicted (~${Math.round(freed / 1048576)}MB) — it will be rebuilt on the next question that needs it.`);
+        return freed;
+    },
+
     async ensureIndex() {
         if (this.chunks) return this.chunks;
         if (this.indexing) return this.indexing;
+        Power.markActive(60000);
         this.indexing = (async () => {
             const t0 = performance.now();
             const chunks = [];
@@ -10568,10 +10909,15 @@ const PulseKB = {
                 }
                 this._ingest(raw, file.product, chunks);
                 raw = null; // release (PulseKnowledge.md is ~24MB)
+                // Parsing four corpora back to back is a long synchronous block.
+                // Yield between files so the panel keeps painting while it runs.
+                await yieldIfNeeded();
             }
             this.chunks = chunks;
+            const ms = Math.round(performance.now() - t0);
             if (!chunks.length) console.log('PulseKB: no offline knowledge found. Sync via Settings.');
-            else console.log(`PulseKB: indexed ${chunks.length} articles from ${this.KB_FILES.length} file(s) in ${Math.round(performance.now() - t0)}ms`);
+            else console.log(`PulseKB: indexed ${chunks.length} articles from ${this.KB_FILES.length} file(s) in ${ms}ms`);
+            Power.perf.mark('kb-index', { articles: chunks.length, bytes: this.approxBytes(), ms });
             return this.chunks;
         })();
         return this.indexing;
@@ -11439,6 +11785,13 @@ function extractVersionsFromDOM(html) {
 // article; the Android agent versions in the android-agent-release-notes article.
 async function deriveOfflineVersionsFromKB() {
     const out = { console: [], agent: [] };
+    // This runs at STARTUP as the fallback when live Pulse is unreachable, and it
+    // needs the KB index for a few seconds to scrape version numbers out of the
+    // release-notes articles. Without the flag below it would quietly defeat the
+    // pre-warm gate: a machine that declined to hold the index all session would
+    // build it here anyway and then keep it. Note whether it was already resident,
+    // and hand it straight back afterwards if it was not.
+    const indexWasResident = !!PulseKB.chunks;
     try {
         const chunks = await PulseKB.ensureIndex();
         if (!chunks || !chunks.length) return out;
@@ -11456,6 +11809,12 @@ async function deriveOfflineVersionsFromKB() {
         out.console = sortDesc(consoleVers);
         out.agent = sortDesc(agentVers);
     } catch (e) { console.warn('Offline version derivation from KB failed', e); }
+    finally {
+        // Built purely to scrape version numbers on a machine that is not meant to
+        // carry the index? Give it back — the version lists we extracted are a few
+        // dozen short strings, and they are all we needed it for.
+        if (!indexWasResident && !Power.knobs.prewarmKb) PulseKB.evict();
+    }
     return out;
 }
 
@@ -11916,7 +12275,16 @@ const OllamaAI = {
             const budgetCtx = (isSmall && (!LOCAL_AI_CTX_MAX || LOCAL_AI_CTX_MAX === 'auto'))
                 ? Math.min(SMALL_PROMPT_BUDGET_CTX, ctxCeiling)
                 : ctxCeiling;
-            const maxAllowedChars = Math.floor((budgetCtx - basePredict - 600) * CHARS_PER_TOKEN);
+            // POWER GOVERNOR: the same prompt scaling getPromptCharBudget() applies
+            // when the caller ASSEMBLES the prompt is applied again here, where the
+            // prompt is actually TRIMMED. Both are needed — a quick action can hand
+            // us a prompt built before pressure rose, and this is the last gate
+            // before it reaches a CPU-bound model. Floored so a critical machine
+            // still gets a usable prompt rather than a stub.
+            const powerKnobs = Power.knobs;
+            const maxAllowedChars = Math.max(2000, Math.floor(
+                (budgetCtx - basePredict - 600) * CHARS_PER_TOKEN * powerKnobs.promptScale
+            ));
             if (totalChars > maxAllowedChars) {
                 // 1. Drop OLDER history first, but PROTECT the most recent turns so the model always
                 //    keeps short-term memory / context flow (it can answer "what did I just say?" and
@@ -12014,7 +12382,31 @@ const OllamaAI = {
             const headroom = numCtx - estimatedTokens - OUTPUT_SAFETY_MARGIN;
             if (headroom > numPredict) numPredict = Math.min(predictCeiling, headroom);
 
-            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx} (fixed), num_predict: ${numPredict} (floor ${basePredict}, ceiling ${predictCeiling}), modelMax: ${modelMax}, hardMax: ${hardMax}`);
+            // POWER GOVERNOR: scale the answer budget too, but GENTLY (answerScale
+            // bottoms out at 0.60 where promptScale reaches 0.55×tier). A slow
+            // answer is a nuisance; an answer that stops mid-sentence is a wasted
+            // run the engineer has to fire again — which costs more than it saved.
+            // Never cut below the basePredict floor the report sections need.
+            numPredict = Math.max(basePredict, Math.floor(numPredict * powerKnobs.answerScale));
+
+            console.log(`[Ollama Request] Model: ${model}, Chars: ${totalChars}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx} (fixed), num_predict: ${numPredict} (floor ${basePredict}, ceiling ${predictCeiling}), modelMax: ${modelMax}, hardMax: ${hardMax}, power: ${powerKnobs.level}/${powerKnobs.tier} (prompt ×${powerKnobs.promptScale}, answer ×${powerKnobs.answerScale})`);
+
+            // Open a performance-log span for this request. The caller passes a
+            // mode tag (analysis / chat / quick-action / jira) via req.perfMode so
+            // the internal log can tell a forensic run apart from a one-line chat
+            // reply — they have wildly different cost profiles and averaging them
+            // together makes both numbers meaningless.
+            const perfRun = Power.perf.start('ai-run', {
+                model,
+                mode: req.perfMode || 'chat',
+                promptChars: totalChars,
+                estTokens: estimatedTokens,
+                numCtx,
+                numPredict,
+                level: powerKnobs.level,
+                promptScale: powerKnobs.promptScale
+            });
+            Power.markActive(180000);
 
             const doOllamaFetch = (ctx) => fetch(`${baseUrl}/api/chat`, {
                 method: 'POST',
@@ -12044,13 +12436,14 @@ const OllamaAI = {
             try {
                 res = await doOllamaFetch(numCtx);
             } catch (netErr) {
-                if (netErr && netErr.name === 'AbortError') throw netErr; // user cancelled — propagate quietly
+                if (netErr && netErr.name === 'AbortError') { perfRun.end({ error: 'aborted' }); throw netErr; } // user cancelled — propagate quietly
                 console.warn('[Ollama Request] fetch failed, retrying once...', netErr);
                 await new Promise(r => setTimeout(r, 800));
                 try {
                     res = await doOllamaFetch(numCtx);
                 } catch (netErr2) {
-                    if (netErr2 && netErr2.name === 'AbortError') throw netErr2;
+                    if (netErr2 && netErr2.name === 'AbortError') { perfRun.end({ error: 'aborted' }); throw netErr2; }
+                    perfRun.end({ error: 'unreachable' });
                     throw new Error(`Couldn't reach the local AI at ${baseUrl}. Make sure Ollama is running (try \`ollama serve\`) and that the model "${model}" is installed. If the log is very large, the analysis can take a while on a CPU — try again, lower Context Size in Settings (⚙), or remove very large files.`);
                 }
             }
@@ -12061,14 +12454,81 @@ const OllamaAI = {
                     numCtx = Math.max(8192, Math.floor(numCtx / 2 / 1024) * 1024);
                     console.warn(`[Ollama Request] OOM detected — retrying with num_ctx: ${numCtx}`);
                     try { toast('GPU memory tight — retried with a smaller context. Consider lowering Context Size in Settings (⚙).', 'w', 6000); } catch (e) {}
+                    Power.perf.mark('ollama-oom-retry', { model, from: ctxCeiling, to: numCtx });
                     res = await doOllamaFetch(numCtx);
                 }
                 if (!res.ok) {
                     const err2 = res.bodyUsed ? err : await res.text();
+                    perfRun.end({ error: `http-${res.status}` });
                     throw new Error(`Ollama error ${res.status}: ${err2}`);
                 }
             }
-            return res.body.getReader();
+
+            // ---- INSTRUMENTED STREAM ----
+            // The caller only ever calls read()/cancel(), so a thin proxy is enough.
+            // It exists to close the performance span with REAL numbers rather than
+            // estimates: Ollama's final NDJSON frame carries its own prompt_eval_count
+            // and eval_count, which beat any char-per-token guess we could make here.
+            // Wall-clock time-to-first-token is recorded alongside them, because that
+            // is the number the engineer actually feels while waiting.
+            const rawReader = res.body.getReader();
+            const tailDecoder = new TextDecoder();
+            let tail = '';
+            let closed = false;
+
+            const closeSpan = (extra) => {
+                if (closed) return;
+                closed = true;
+                let stats = {};
+                // Find the terminal frame (the one carrying "done":true) in the tail.
+                try {
+                    const lines = tail.split('\n');
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        const s = lines[i].trim();
+                        if (!s || s[0] !== '{') continue;
+                        const o = JSON.parse(s);
+                        if (o && o.done) {
+                            stats = {
+                                tokens: o.eval_count || null,
+                                promptTokens: o.prompt_eval_count || null,
+                                doneReason: o.done_reason || '',
+                                // Ollama reports durations in nanoseconds.
+                                prefillMs: o.prompt_eval_duration ? Math.round(o.prompt_eval_duration / 1e6) : null,
+                                genMs: o.eval_duration ? Math.round(o.eval_duration / 1e6) : null,
+                                loadMs: o.load_duration ? Math.round(o.load_duration / 1e6) : null
+                            };
+                            break;
+                        }
+                    }
+                } catch (e) { /* a truncated tail just means no stats — not an error */ }
+                perfRun.end(Object.assign(stats, extra || {}));
+            };
+
+            return {
+                async read() {
+                    let r;
+                    try {
+                        r = await rawReader.read();
+                    } catch (e) {
+                        closeSpan({ error: (e && e.name === 'AbortError') ? 'aborted' : 'stream-error' });
+                        throw e;
+                    }
+                    if (r.done) {
+                        closeSpan({});
+                        return r;
+                    }
+                    perfRun.firstToken();
+                    perfRun.touch();
+                    // Keep only the tail — the terminal stats frame is the last line,
+                    // and buffering a whole forensic report here would double its cost.
+                    tail = (tail + tailDecoder.decode(r.value, { stream: true })).slice(-4096);
+                    return r;
+                },
+                cancel(reason) {
+                    closeSpan({ error: 'cancelled' });
+                    return rawReader.cancel(reason);
+                }
+            };
         }
     }
 };
@@ -12443,6 +12903,19 @@ async function send(overrideText = null, silent = false, opts = {}) {
     }
     if ($('welcome')) $('welcome').style.display = 'none';
     if (typeof updateQuickActionsPanel === 'function') updateQuickActionsPanel();
+
+    // The log text of a case that was opened from storage — or released under
+    // memory pressure — is loaded on demand. Everything below reads log.content
+    // directly, so make sure it is actually there before any of it runs. This is
+    // a no-op (one Set lookup) whenever the case is already hydrated, which is
+    // the overwhelmingly common path.
+    Power.markActive(180000);
+    if (!_logsAreHydrated(c)) {
+        toast('Loading this case\'s logs...', 'i', 0);
+        try { await ensureCaseHydrated(c.id); } catch (e) { /* fall through — the manifest still names the files */ }
+        hideToast();
+        renderLogs();
+    }
 
     // Wait for any log files still being read/extracted (ZIPs can take a while) —
     // sending early would silently exclude them from the AI's context.
@@ -13155,11 +13628,17 @@ ${imgContext}`;
         const controller = new AbortController();
         streamControllers.set(c.id, controller);
 
+        // Tag the run for the internal performance log. A forensic analysis and a
+        // one-line chat reply differ by an order of magnitude in cost, so pooling
+        // them would make both the median and the worst-case meaningless.
+        const perfMode = opts.perfMode || (analysisRun ? 'analysis' : (silent ? 'quick-action' : 'chat'));
+
         const reader = await OllamaAI.completions.create({
             model: selectedModel,
             messages: modelMessages,
             stream: true,
-            signal: controller.signal
+            signal: controller.signal,
+            perfMode
         });
 
         let resp = '';
@@ -13290,7 +13769,8 @@ ${imgContext}`;
                     model: selectedModel,
                     messages: contMsgs,
                     stream: true,
-                    signal: controller.signal
+                    signal: controller.signal,
+                    perfMode: perfMode + '-continuation'
                 });
             } catch (e) {
                 if (e && e.name === 'AbortError') throw e;
@@ -13675,7 +14155,15 @@ const removeLog = (indices) => {
     const c = cases.find(x => x.id === activeCaseId);
     if (c) {
         const sorted = (Array.isArray(indices) ? indices : [indices]).slice().sort((a, b) => b - a);
-        sorted.forEach(i => c.logs.splice(i, 1));
+        sorted.forEach(i => {
+            const [gone] = c.logs.splice(i, 1);
+            // Cut the removed log's content and derived caches loose explicitly.
+            // Splicing it out of the array is usually enough, but an in-flight
+            // analysis can still be holding a direct reference to the object —
+            // clearing the big fields means that reference pins a husk rather
+            // than tens of megabytes of text, lines[] and per-line caches.
+            if (gone) { dropDerivedLogCaches(gone); gone.content = ''; }
+        });
         markLogsDirty(c.id);
     }
     renderLogs();
@@ -13818,29 +14306,68 @@ const handleFiles = async (files) => {
     toast('Uploading logs...', 'i', 0);
     const added = [];
     const skipped = [];
+    Power.markActive(120000);
+
+    // ADMISSION CONTROL. A ZIP inflates several times over on the way in — bytes
+    // on disk → decoded string → lines[] → per-line intel caches — so reading one
+    // that does not fit is how the tab used to die mid-upload with everything
+    // already half-loaded. Ask the governor FIRST, and free what we can before
+    // refusing. The estimate is deliberately pessimistic (4× the file size) since
+    // a compressed bundle is the case that hurts.
+    const totalUploadBytes = uploads.reduce((a, f) => a + (f.size || 0), 0);
+    if (totalUploadBytes > 0) {
+        let verdict = Power.canAllocate(totalUploadBytes * 4);
+        if (!verdict.ok) {
+            trimHydratedCases();
+            if (Power.governor) { try { await Power.governor.reclaim('critical', { force: true }); } catch (e) {} }
+            verdict = Power.canAllocate(totalUploadBytes * 4);
+        }
+        if (!verdict.ok) {
+            pendingLogUploads.set(c.id, Math.max(0, (pendingLogUploads.get(c.id) || 1) - 1));
+            hideToast();
+            toast(`These files are too large for this machine. ${verdict.message || ''} Attach fewer files, or remove some from the Logs panel first.`, 'e', 9000);
+            Power.perf.mark('ingest-refused', { files: uploads.length, bytes: totalUploadBytes, projectedMB: Math.round(verdict.projectedMB || 0) });
+            return;
+        }
+    }
 
     try {
         for (const f of uploads) {
             try {
+                const tIngest = performance.now();
                 const entries = await readLogUpload(f);
                 if (!entries.length) {
                     skipped.push(`${f.name}: no supported log files found`);
                     continue;
                 }
 
+                let ingestedBytes = 0;
                 for (const entry of entries) {
                     const content = normalizeLogText(entry.content || "");
                     const lines = content ? content.split('\n') : [];
+                    ingestedBytes += content.length;
                     const log = {
                         name: entry.name,
                         content: content,
                         lines: lines,
+                        size: content.length,
                         sourceZip: entry.sourceZip || "",
                         uploadedAt: Date.now()
                     };
                     await getLogPanelIntel(log);
                     c.logs.push(log);
+                    // A multi-file bundle is scanned file by file; check in between
+                    // so pressure that builds mid-bundle is acted on immediately
+                    // rather than after the last file has landed.
+                    await yieldIfNeeded();
                 }
+                _hydratedCases.add(c.id);
+                Power.perf.mark('log-ingest', {
+                    file: f.name,
+                    files: entries.length,
+                    bytes: ingestedBytes,
+                    ms: Math.round(performance.now() - tIngest)
+                });
                 // ZIPs land as one attachment in the chat note, not one line per inner file
                 if (entries[0].sourceZip) {
                     added.push(`${f.name} (${entries.length} log file${entries.length === 1 ? '' : 's'})`);
@@ -13923,6 +14450,38 @@ $('fileIn').onchange = async e => {
 
 
 // --- IMAGE HANDLING ---
+/* OCR ADMISSION CONTROL
+ * Every Tesseract worker is a fresh WASM instance with its own linear memory,
+ * and with the English traineddata resident that is roughly 80-150MB EACH. The
+ * old code created one per image the moment its FileReader resolved, so pasting
+ * six screenshots spawned six workers at once — around a gigabyte of WASM heap
+ * appearing in a couple of seconds, on top of whatever logs were already loaded.
+ * That is the "attaching images froze everything" case.
+ *
+ * Workers are now gated by the governor's maxOcrWorkers (1 on a weak or strained
+ * machine, up to 3 on a healthy high-tier one). The limit is re-read on every
+ * release, so pressure arriving mid-batch narrows the queue for the images that
+ * have not started yet.
+ */
+const _ocrQueue = [];
+let _ocrActive = 0;
+
+function acquireOcrSlot() {
+    const limit = Math.max(1, Power.knobs.maxOcrWorkers);
+    if (_ocrActive < limit) { _ocrActive++; return Promise.resolve(); }
+    return new Promise(resolve => _ocrQueue.push(resolve));
+}
+
+function releaseOcrSlot() {
+    _ocrActive = Math.max(0, _ocrActive - 1);
+    const limit = Math.max(1, Power.knobs.maxOcrWorkers);
+    while (_ocrQueue.length > 0 && _ocrActive < limit) {
+        _ocrActive++;
+        const next = _ocrQueue.shift();
+        try { next(); } catch (e) { _ocrActive = Math.max(0, _ocrActive - 1); }
+    }
+}
+
 async function handleImages(files) {
     console.log('handleImages triggered', files);
     const c = cases.find(x => x.id === activeCaseId);
@@ -13946,6 +14505,12 @@ async function handleImages(files) {
             // no external site, ever — in standalone mode the same local lib/ files are used via
             // relative paths (they sit next to SOTI_AI_Analyser.html). Chrome's MV3 CSP
             // (script-src/worker-src 'self') additionally hard-blocks any remote script/worker.
+            // Wait for a worker slot before touching Tesseract at all — queueing
+            // here is what keeps N images from becoming N simultaneous WASM heaps.
+            await acquireOcrSlot();
+            Power.markActive(60000);
+            const tOcr = performance.now();
+            let ocrWorker = null;
             try {
                 const Lib = typeof Tesseract !== 'undefined' ? Tesseract : window.Tesseract;
                 const isExt = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id;
@@ -13963,6 +14528,7 @@ async function handleImages(files) {
                 console.log('[OCR] Worker options:', JSON.stringify(workerOpts));
                 
                 const worker = await Lib.createWorker('eng', 1, workerOpts);
+                ocrWorker = worker;
                 await worker.setParameters({ tessedit_pageseg_mode: '11' });
                 const result = await worker.recognize(data);
 
@@ -13985,7 +14551,7 @@ async function handleImages(files) {
                 console.log('[OCR] Text assigned to LIVE img:', target.text.substring(0, 50));
                 toast(`Text extracted successfully`, 's');
 
-                await worker.terminate();
+                Power.perf.mark('ocr', { file: f.name, chars: cleanText.length, ms: Math.round(performance.now() - tOcr) });
             } catch (e) {
                 console.error('OCR failed', e);
                 const liveCase2 = cases.find(x => x.id === activeCaseId);
@@ -13993,7 +14559,16 @@ async function handleImages(files) {
                 const target2 = liveImg2 || imgObj;
                 target2.text = `[OCR failed: ${e.message || e}]`;
                 target2.processing = false;
+                Power.perf.mark('ocr', { file: f.name, error: String(e && e.message || e), ms: Math.round(performance.now() - tOcr) });
             } finally {
+                // Terminate in `finally`, not on the success path. A worker whose
+                // recognize() threw used to be leaked — its WASM heap stayed
+                // allocated for the life of the panel, so a few failed OCRs left
+                // hundreds of megabytes stranded and unreachable.
+                if (ocrWorker) {
+                    try { await ocrWorker.terminate(); } catch (e2) { /* already gone */ }
+                }
+                releaseOcrSlot();
                 renderImgs();
                 saveState();
             }
@@ -16497,6 +17072,403 @@ ${JIRA_TEMPLATE}`;
 $('mJiraClose').onclick = $('btnJiraDone').onclick = () => $('mJira').style.display = 'none';
 $('btnCopyJira').onclick = () => { $('jiraTa').select(); document.execCommand('copy'); toast('Copied!', 's'); };
 
+/* ---------------------------------------------------------------------------
+ * POWER MONITOR UI
+ * ---------------------------------------------------------------------------
+ * The topbar pill is the always-on readout; the panel behind it explains the
+ * number. It exists so "the app is using too much" stops being a feeling and
+ * becomes something an engineer can read, screenshot and send on. Everything
+ * here is presentation only — no measurement or policy lives in this section.
+ * ------------------------------------------------------------------------- */
+const PowerMonitor = {
+    _bound: false,
+    _open: false,
+    _tick: null,
+
+    // "1.77 GB", "412 MB", "2.5 s" — same formatters power.js uses internally so
+    // the panel and the console never disagree about units.
+    _mb(v) { return (Power.governor ? Power.governor.format.mb(v) : Math.round(v) + ' MB'); },
+    _ms(v) { return (Power.governor ? Power.governor.format.ms(v) : Math.round(v) + ' ms'); },
+
+    _row(k, v, cls) {
+        return `<div class="pwr-item"><span class="pwr-item-k">${escapeHtml(k)}</span><span class="pwr-item-v ${cls || ''}">${escapeHtml(String(v))}</span></div>`;
+    },
+
+    init() {
+        if (this._bound) return;
+        const pill = $('powerPill');
+        if (!pill) return;
+        this._bound = true;
+
+        // No governor (power.js missing or blocked) → no pill. Better an absent
+        // control than one that reports nothing.
+        if (!Power.available) return;
+        pill.style.display = 'flex';
+
+        pill.onclick = () => this.open();
+        const close = () => this.close();
+        if ($('mPowerClose')) $('mPowerClose').onclick = close;
+        if ($('btnPowerDone')) $('btnPowerDone').onclick = close;
+        if ($('mPower')) $('mPower').onclick = e => { if (e.target === $('mPower')) close(); };
+
+        if ($('btnPowerFree')) $('btnPowerFree').onclick = async () => {
+            const before = (Power.snapshot() || {}).usedMB || 0;
+            trimHydratedCases();
+            let freed = 0;
+            // force: the user asked for room, so run every reclaimer rather than
+            // stopping the moment the app looks comfortable.
+            if (Power.governor) { try { freed = await Power.governor.reclaim('critical', { force: true }); } catch (e) {} }
+            this.render();
+            toast(freed > 0
+                ? `Released ${this._mb(freed / 1048576)} of rebuildable caches (was ${this._mb(before)}).`
+                : 'Nothing to release — the app is already lean.', freed > 0 ? 's' : 'i', 4000);
+        };
+
+        if ($('btnPowerCopy')) $('btnPowerCopy').onclick = () => {
+            const text = this.asText();
+            navigator.clipboard.writeText(text)
+                .then(() => toast('Power report copied', 's'))
+                .catch(() => toast('Copy failed', 'e'));
+        };
+
+        this.updatePill();
+        Power.onChange(() => { this.updatePill(); if (this._open) this.render(); });
+        // The pill refreshes on its own timer as well as on level changes, so the
+        // megabyte figure moves continuously rather than only at threshold crossings.
+        setInterval(() => this.updatePill(), 3000);
+    },
+
+    updatePill() {
+        const pill = $('powerPill');
+        const txt = $('powerTxt');
+        if (!pill || !txt) return;
+        const s = Power.snapshot();
+        if (!s) return;
+        pill.classList.remove('lvl-warm', 'lvl-high', 'lvl-critical');
+        if (s.level !== 'ok') pill.classList.add('lvl-' + s.level);
+        txt.textContent = s.heapMeasurable
+            ? `${Math.round(s.usedMB)} MB`
+            : `${s.tier}`;
+        const pct = s.budgetMB ? Math.round((s.usedMB / s.budgetMB) * 100) : 0;
+        pill.title = s.heapMeasurable
+            ? `Power Monitor — using ${this._mb(s.usedMB)} of this machine's ${this._mb(s.budgetMB)} budget (${pct}%). Responsiveness lag ${Math.round(s.lagMs)}ms. Click for detail.`
+            : `Power Monitor — this browser does not expose memory readings, so only responsiveness is tracked. Click for detail.`;
+    },
+
+    open() {
+        const m = $('mPower');
+        if (!m) return;
+        this._open = true;
+        m.style.display = 'flex';
+        this.render();
+        // Live while open, then stopped — a panel nobody is looking at should not
+        // be re-rendering tables every second.
+        if (this._tick) clearInterval(this._tick);
+        this._tick = setInterval(() => this.render(), 1500);
+    },
+
+    close() {
+        this._open = false;
+        if (this._tick) { clearInterval(this._tick); this._tick = null; }
+        if ($('mPower')) $('mPower').style.display = 'none';
+    },
+
+    render() {
+        const s = Power.snapshot();
+        const p = Power.profile();
+        if (!s || !p) return;
+        const k = Power.knobs;
+
+        // ---- this machine ----
+        const profEl = $('pwrProfile');
+        if (profEl) {
+            profEl.innerHTML = [
+                this._row('Memory class', p.deviceMemoryReported ? `${p.deviceMemoryGB} GB+` : 'not reported'),
+                this._row('Logical cores', p.coresReported ? p.cores : 'not reported'),
+                this._row('Browser heap ceiling', p.heapMeasurable ? this._mb(p.heapLimitMB) : 'unavailable'),
+                this._row('Capability tier', p.tier),
+                this._row('Memory budget', this._mb(p.budgetMB), 'good')
+            ].join('');
+        }
+
+        const noteEl = $('pwrBudgetNote');
+        if (noteEl) {
+            const why = {
+                ram: `derived from this machine's memory class and ${p.cores} logical cores`,
+                heap: `capped by what this browser will grant a single tab (${this._mb(p.heapLimitMB)})`,
+                floor: 'raised to the minimum the app needs to function',
+                ceiling: 'capped at the maximum this app will ever ask for'
+            }[p.limitedBy] || '';
+            noteEl.textContent = p.heapMeasurable
+                ? `This app will hold at most about ${this._mb(p.budgetMB)} on this machine — ${why}. Past that it starts handing rebuildable caches back rather than letting the browser run out. Readings cover this tab's JavaScript memory; the local AI model runs in Ollama as a separate process and is not counted here.`
+                : `This browser does not expose memory readings, so the app governs on responsiveness alone. Limits are set from the conservative ${p.tier} profile.`;
+        }
+
+        // ---- right now ----
+        const memPct = s.budgetMB ? Math.min(100, (s.usedMB / s.budgetMB) * 100) : 0;
+        const memFill = $('pwrMemFill');
+        if (memFill) {
+            memFill.style.width = memPct + '%';
+            memFill.className = 'pwr-meter-fill' + (s.memLevel !== 'ok' ? ' ' + s.memLevel : '');
+        }
+        if ($('pwrMemVal')) {
+            $('pwrMemVal').textContent = s.heapMeasurable
+                ? `${this._mb(s.usedMB)} / ${this._mb(s.budgetMB)}  (${Math.round(memPct)}%)`
+                : 'not measurable in this browser';
+        }
+
+        // Responsiveness is shown INVERTED — a full green bar means "instant",
+        // which reads correctly at a glance. Raw lag in ms is on the right.
+        const lagPct = Math.max(0, 100 - Math.min(100, (s.lagMs / 400) * 100));
+        const lagFill = $('pwrLagFill');
+        if (lagFill) {
+            lagFill.style.width = lagPct + '%';
+            lagFill.className = 'pwr-meter-fill' + (s.cpuLevel !== 'ok' ? ' ' + s.cpuLevel : '');
+        }
+        if ($('pwrLagVal')) {
+            const label = { ok: 'instant', warm: 'slight delay', high: 'sluggish', critical: 'stalling' }[s.cpuLevel];
+            $('pwrLagVal').textContent = `${label} (${Math.round(s.lagMs)} ms lag)`;
+        }
+
+        const liveEl = $('pwrLive');
+        if (liveEl) {
+            const cls = { ok: 'good', warm: 'warn', high: 'warn', critical: 'bad' }[s.level];
+            liveEl.innerHTML = [
+                this._row('Status', s.level, cls),
+                this._row('Peak this session', this._mb(s.peakMB)),
+                this._row('Memory released', s.reclaimCount ? `${this._mb(s.reclaimedMB)} over ${s.reclaimCount} sweep${s.reclaimCount === 1 ? '' : 's'}` : 'none needed', s.reclaimCount ? 'warn' : 'good'),
+                this._row('Cases held in memory', `${_hydratedCases.size} of ${cases.length}`),
+                this._row('Knowledge index', PulseKB.chunks ? `${PulseKB.chunks.length} articles (${this._mb(PulseKB.approxBytes() / 1048576)})` : 'not loaded')
+            ].join('');
+        }
+
+        // ---- active limits ----
+        const knobEl = $('pwrKnobs');
+        if (knobEl) {
+            knobEl.innerHTML = [
+                this._row('Prompt size', Math.round(k.promptScale * 100) + '%', k.promptScale < 1 ? 'warn' : 'good'),
+                this._row('Answer length', Math.round(k.answerScale * 100) + '%', k.answerScale < 1 ? 'warn' : 'good'),
+                this._row('Scan chunk', k.chunkLines.toLocaleString() + ' lines'),
+                this._row('UI yield every', k.yieldEveryMs + ' ms'),
+                this._row('Parallel OCR', k.maxOcrWorkers + (k.maxOcrWorkers === 1 ? ' image' : ' images')),
+                this._row('Knowledge pre-load', k.prewarmKb ? 'on' : 'on demand')
+            ].join('');
+        }
+
+        // ---- AI performance by request type ----
+        const sumEl = $('pwrSummary');
+        if (sumEl) {
+            const rows = Power.perf.summary().filter(r => /^(ai-run|analysis|chat|quick-action)/.test(r.kind) || r.kind === 'ai-run');
+            const all = rows.length ? rows : Power.perf.summary();
+            // Break the ai-run rows out by mode — that is the split that matters.
+            const byMode = {};
+            for (const e of Power.perf.entries()) {
+                if (e.kind !== 'ai-run' || e.open) continue;
+                const m = (e.meta && e.meta.mode) || 'chat';
+                (byMode[m] = byMode[m] || []).push(e);
+            }
+            const modes = Object.keys(byMode);
+            if (modes.length === 0) {
+                sumEl.innerHTML = `<tr><td class="dim">No AI runs yet this session.</td></tr>`;
+            } else {
+                const body = modes.map(m => {
+                    const es = byMode[m];
+                    const med = arr => {
+                        const s2 = arr.slice().sort((a, b) => a - b);
+                        const i = Math.floor(s2.length / 2);
+                        return s2.length % 2 ? s2[i] : Math.round((s2[i - 1] + s2[i]) / 2);
+                    };
+                    const ttfts = es.filter(e => e.ttftMs !== null).map(e => e.ttftMs);
+                    const tpss = es.filter(e => e.tps).map(e => e.tps);
+                    return `<tr>
+                        <td>${escapeHtml(m)}</td>
+                        <td class="num">${es.length}</td>
+                        <td class="num">${this._ms(med(es.map(e => e.ms)))}</td>
+                        <td class="num">${ttfts.length ? this._ms(med(ttfts)) : '—'}</td>
+                        <td class="num">${tpss.length ? med(tpss).toFixed(1) : '—'}</td>
+                    </tr>`;
+                }).join('');
+                sumEl.innerHTML = `<tr><th>Type</th><th class="num">Runs</th><th class="num">Median</th><th class="num">To 1st token</th><th class="num">Tok/s</th></tr>${body}`;
+            }
+        }
+
+        // ---- recent activity ----
+        const logEl = $('pwrLog');
+        if (logEl) {
+            const entries = Power.perf.entries().slice(-60).reverse();
+            if (entries.length === 0) {
+                logEl.innerHTML = `<tr><td class="dim">Nothing recorded yet.</td></tr>`;
+            } else {
+                const body = entries.map(e => {
+                    const t = new Date(e.wallStart).toLocaleTimeString();
+                    const cls = e.error ? 'err' : (e.kind === 'reclaim' ? 'reclaim' : '');
+                    const detail = this._detail(e);
+                    return `<tr class="${cls}">
+                        <td class="dim">${escapeHtml(t)}</td>
+                        <td>${escapeHtml(e.kind)}</td>
+                        <td class="dim">${escapeHtml(detail)}</td>
+                        <td class="num">${e.open ? 'running…' : this._ms(e.ms)}</td>
+                    </tr>`;
+                }).join('');
+                logEl.innerHTML = `<tr><th>Time</th><th>Event</th><th>Detail</th><th class="num">Took</th></tr>${body}`;
+            }
+        }
+    },
+
+    // One-line human summary of a log entry, per event kind.
+    _detail(e) {
+        const m = e.meta || {};
+        if (e.error) return `${m.mode || m.file || ''} — ${e.error}`;
+        switch (e.kind) {
+            case 'ai-run':
+                return [
+                    m.mode,
+                    m.promptChars ? `${Math.round(m.promptChars / 1000)}k chars` : '',
+                    e.tokens ? `${e.tokens} tok` : '',
+                    e.tps ? `${e.tps} tok/s` : '',
+                    e.peakHeapMB ? `peak ${Math.round(e.peakHeapMB)}MB` : ''
+                ].filter(Boolean).join(' · ');
+            case 'log-ingest':
+                return `${m.file || ''} — ${m.files || 1} file(s), ${Math.round((m.bytes || 0) / 1048576)}MB`;
+            case 'ingest-refused':
+                return `${m.files} file(s) would reach ${m.projectedMB}MB — refused`;
+            case 'ocr':
+                return `${m.file || ''}${m.chars ? ` — ${m.chars} chars` : ''}`;
+            case 'kb-index':
+                return `${m.articles} articles, ${Math.round((m.bytes || 0) / 1048576)}MB`;
+            case 'kb-prewarm-skipped':
+                return `deferred on ${m.tier} tier`;
+            case 'case-hydrate':
+                return `${m.files} file(s), ${Math.round((m.bytes || 0) / 1048576)}MB loaded`;
+            case 'case-dehydrate':
+                return `${m.freedMB}MB released (${m.reason})`;
+            case 'reclaim':
+                return `${m.freedMB}MB freed at ${m.level} — ${m.ran || ''}`;
+            case 'ollama-oom-retry':
+                return `context ${m.from} → ${m.to}`;
+            default:
+                return Object.keys(m).filter(x => x !== 'ms').slice(0, 3).map(x => `${x}=${m[x]}`).join(' ');
+        }
+    },
+
+    // Plain-text version of the whole panel, for pasting into a bug report.
+    asText() {
+        const s = Power.snapshot() || {};
+        const p = Power.profile() || {};
+        const k = Power.knobs;
+        const lines = [
+            'SOTI AI Analyser — Power Report',
+            new Date().toISOString(),
+            '',
+            `Machine:   ${p.deviceMemoryReported ? p.deviceMemoryGB + 'GB+' : 'RAM unknown'}, ${p.cores} logical cores, heap ceiling ${p.heapMeasurable ? Math.round(p.heapLimitMB) + 'MB' : 'unknown'}`,
+            `Tier:      ${p.tier}  (budget ${p.budgetMB}MB, limited by ${p.limitedBy})`,
+            `Now:       ${Math.round(s.usedMB)}MB used, peak ${Math.round(s.peakMB)}MB, lag ${Math.round(s.lagMs)}ms, level ${s.level}`,
+            `Reclaimed: ${Math.round(s.reclaimedMB || 0)}MB over ${s.reclaimCount || 0} sweep(s)`,
+            `Limits:    prompt ${Math.round(k.promptScale * 100)}%, answer ${Math.round(k.answerScale * 100)}%, chunk ${k.chunkLines}, yield ${k.yieldEveryMs}ms, OCR ${k.maxOcrWorkers}`,
+            `Model:     ${LOCAL_AI_MODEL || '(none selected)'}  ctx=${LOCAL_AI_CTX_MAX}`,
+            '',
+            'Recent activity:'
+        ];
+        for (const e of Power.perf.entries().slice(-40)) {
+            lines.push(`  ${new Date(e.wallStart).toLocaleTimeString()}  ${e.kind.padEnd(20)} ${e.open ? 'running' : Math.round(e.ms) + 'ms'}  ${this._detail(e)}`);
+        }
+        return lines.join('\n');
+    }
+};
+
+/* ---------------------------------------------------------------------------
+ * RECLAIMERS — what this app is willing to give back, and in what order
+ * ---------------------------------------------------------------------------
+ * Registered lowest `priority` = sacrificed FIRST, because it is cheapest to
+ * rebuild. Nothing here can lose the user's work: every one of these is either
+ * pure derived data or text that is durable in chrome.storage and re-readable.
+ * The case the engineer is looking at is never touched.
+ * ------------------------------------------------------------------------- */
+
+// 10 — per-line intel caches on logs that are NOT in the active case. Pure
+// function of the log text; rebuilt in seconds by precomputeLogIntel().
+Power.registerReclaimer({
+    name: 'log-intel-caches',
+    priority: 10,
+    minLevel: 'high',
+    reclaim() {
+        let freed = 0;
+        for (const c of cases) {
+            if (c.id === activeCaseId) continue;
+            for (const l of (c.logs || [])) freed += dropDerivedLogCaches(l);
+        }
+        return freed;
+    }
+});
+
+// 20 — the same caches on the ACTIVE case, but only once things are critical and
+// only while no analysis is running. Dropping these mid-analysis would make the
+// run rebuild them immediately, converting a memory problem into a CPU one.
+Power.registerReclaimer({
+    name: 'active-log-caches',
+    priority: 20,
+    minLevel: 'critical',
+    reclaim() {
+        if ([...busyMap.values()].some(Boolean)) return 0;
+        const c = cases.find(x => x.id === activeCaseId);
+        if (!c) return 0;
+        let freed = 0;
+        for (const l of (c.logs || [])) freed += dropDerivedLogCaches(l);
+        return freed;
+    }
+});
+
+// 30 — log TEXT of background cases. Durable on disk; re-read when reopened.
+Power.registerReclaimer({
+    name: 'background-case-logs',
+    priority: 30,
+    minLevel: 'high',
+    reclaim() {
+        let freed = 0;
+        for (const c of cases) {
+            if (c.id === activeCaseId) continue;
+            freed += dehydrateCaseLogs(c.id);
+        }
+        return freed;
+    }
+});
+
+// 40 — the transient research blobs from the last question. Regenerated by the
+// next search; holding them between turns buys nothing.
+Power.registerReclaimer({
+    name: 'research-buffers',
+    priority: 40,
+    minLevel: 'critical',
+    reclaim() {
+        if ([...busyMap.values()].some(Boolean)) return 0;
+        const freed = (RELEASE_NOTES_CONTENT.length + PULSE_SEARCH_RESULTS.length
+            + DOCS_SEARCH_RESULTS.length + RESEARCHED_ARTICLE_CONTENT.length) * 2;
+        RELEASE_NOTES_CONTENT = '';
+        PULSE_SEARCH_RESULTS = '';
+        DOCS_SEARCH_RESULTS = '';
+        RESEARCHED_ARTICLE_CONTENT = '';
+        return freed;
+    }
+});
+
+// 60 — LAST RESORT: the offline knowledge index. Correct to drop (it is a
+// re-parse of bundled files) but the most expensive to rebuild, so it only goes
+// if everything above was not enough.
+Power.registerReclaimer({
+    name: 'kb-index',
+    priority: 60,
+    minLevel: 'critical',
+    reclaim() { return PulseKB.evict(); }
+});
+
+// Keep the hydration budget honest as pressure changes, not only when the user
+// switches cases.
+Power.onChange(snap => {
+    if (snap.level === 'high' || snap.level === 'critical') trimHydratedCases();
+});
+
+PowerMonitor.init();
+
 loadState();
 fetchLatestSOTIVersions();
 loadLocalAISettings().then(() => {
@@ -16504,9 +17476,20 @@ loadLocalAISettings().then(() => {
     // Preload the model so the first query is warm (no model-load wait on a slow CPU).
     setTimeout(() => { warmUpModel(); }, 1500);
 });
-// Warm the offline knowledge-base index in the background so the first
-// question never pays the 24MB parse cost.
-setTimeout(() => { PulseKB.ensureIndex().catch(() => {}); }, 3000);
+// Warm the offline knowledge-base index in the background so the first question
+// never pays the 24MB parse cost — but ONLY where that trade is worth making.
+// On a low-tier machine (or one already under pressure) the pre-warm buys a
+// couple of seconds on a question that may never be asked, in exchange for a
+// permanent resident cost and a long synchronous parse during startup. There it
+// is deferred: ensureIndex() still runs on the first question that needs it.
+setTimeout(() => {
+    if (!Power.knobs.prewarmKb) {
+        console.log(`[Power] KB index pre-warm deferred (tier: ${Power.tier}, level: ${Power.level}) — it will build on first use.`);
+        Power.perf.mark('kb-prewarm-skipped', { tier: Power.tier, level: Power.level });
+        return;
+    }
+    PulseKB.ensureIndex().catch(() => {});
+}, 3000);
 
 // --- SETTINGS MODAL (AI - OLLAMA & PULSE SYNC) ---
 async function refreshSettingsModal() {

@@ -24,6 +24,12 @@
                 <div class="dot" id="dot"></div>
                 <span id="statusTxt">Ready — Cloud Scale</span>
             </div>
+            <!-- Live power/resource readout. Driven by power.js via the monitor UI in
+                 sidepanel.js; hidden until the governor takes its first sample. -->
+            <button class="power-pill" id="powerPill" title="Power Monitor — how much memory and CPU this app is using on your machine" style="display:none">
+                <span class="power-dot" id="powerDot"></span>
+                <span class="power-txt" id="powerTxt">—</span>
+            </button>
         </div>
         <div class="tr">
 
@@ -445,8 +451,72 @@
         </div>
     </div>
 
+    <!-- Power Monitor — machine profile, live memory/CPU, throttle knobs and the
+         AI performance log. Everything the panel renders comes from window.SotiPower. -->
+    <div class="backdrop" id="mPower" style="display:none">
+        <div class="modal m-power">
+            <div class="mhdr" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                <div class="mtitle" style="display:flex;align-items:center;gap:8px">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
+                    Power Monitor
+                </div>
+                <button class="mcls" id="mPowerClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+
+            <!-- What this app has decided it may use on THIS machine -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">This machine</div>
+                <div class="pwr-grid" id="pwrProfile"></div>
+                <div class="pwr-note" id="pwrBudgetNote"></div>
+            </div>
+
+            <!-- Live usage against that decision -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">Right now</div>
+                <div class="pwr-meter-row">
+                    <div class="pwr-meter-label"><span>Memory</span><span id="pwrMemVal">—</span></div>
+                    <div class="pwr-meter"><div class="pwr-meter-fill" id="pwrMemFill"></div></div>
+                </div>
+                <div class="pwr-meter-row">
+                    <div class="pwr-meter-label"><span>Responsiveness</span><span id="pwrLagVal">—</span></div>
+                    <div class="pwr-meter"><div class="pwr-meter-fill" id="pwrLagFill"></div></div>
+                </div>
+                <div class="pwr-grid" id="pwrLive"></div>
+            </div>
+
+            <!-- The throttles currently in force -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">Active limits</div>
+                <div class="pwr-grid" id="pwrKnobs"></div>
+            </div>
+
+            <!-- The internal AI performance log -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">AI performance <span class="pwr-sub">— by request type</span></div>
+                <div class="pwr-table-wrap"><table class="pwr-table" id="pwrSummary"></table></div>
+            </div>
+
+            <div class="pwr-section">
+                <div class="pwr-section-title">Recent activity <span class="pwr-sub">— newest first</span></div>
+                <div class="pwr-table-wrap pwr-scroll"><table class="pwr-table" id="pwrLog"></table></div>
+            </div>
+
+            <div class="mact" style="display:flex;justify-content:space-between;gap:10px;margin-top:18px">
+                <div style="display:flex;gap:8px">
+                    <button class="btn" id="btnPowerFree" title="Drop rebuildable caches now">Free memory now</button>
+                    <button class="btn" id="btnPowerCopy" title="Copy this report for a bug report">Copy report</button>
+                </div>
+                <button class="btn btn-sec" id="btnPowerDone">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- power.js MUST load before sidepanel.js: sidepanel's governor bridge reads
+         window.SotiPower at definition time, and the hot paths consult it from the
+         very first log scan. It degrades to static defaults if this file is absent. -->
+    <script src="power.js?v=2.7.0"></script>
     <script src="lib/tesseract.v5.min.js"></script>
-    <script src="sidepanel.js?v=2.5.0"></script>
+    <script src="sidepanel.js?v=2.7.0"></script>
     <!-- Generation Loading Modal — real progress (driven by JiraProgress in sidepanel.js) -->
     <div class="backdrop" id="mGen" style="display:none">
         <div class="modal" style="text-align:center; max-width:340px">
