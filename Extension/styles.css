@@ -1389,3 +1389,192 @@ body {
 .pwr-table tr.reclaim td { color: var(--blue2) }
 
 .pwr-empty { font-size: 11px; color: var(--txt3); padding: 10px 0; font-style: italic }
+
+/* ============================================================
+   COLLAPSIBLE SUB-SECTIONS INSIDE THE CASE INFO PANEL
+   "Case Details" and "Logs" both live in Case Info now, each
+   closed by default so the panel opens short instead of as a
+   twelve-field wall. Styled a step quieter than the panel
+   header (.ph) so the hierarchy reads panel > section.
+   ============================================================ */
+.subsec {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.subsec-ph {
+    padding: 8px 10px;
+    background: var(--bg2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+    transition: background .2s;
+}
+
+.subsec-ph:hover { background: var(--bg3); }
+
+.subsec-ph-left {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--txt1);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.subsec-ph-collapse { font-size: 10px; color: var(--txt2); }
+
+.subsec-pb {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* ============================================================
+   HOME PANEL — Quick Options + Meeting Notes on the main window
+   A sibling of .welcome inside .chat-msgs, so it sits directly
+   under "How to get started" on first load and remains available
+   once the conversation starts.
+   ============================================================ */
+.home-panel {
+    width: 100%;
+    max-width: 460px;
+    margin: 0 auto 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.home-panel .qa-panel {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+}
+
+.home-panel .qa-ph { border-radius: 0; }
+
+.mn-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.mn-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* The placeholder is a worked EXAMPLE of good notes, so it needs to read as
+   guidance rather than as text the user has already typed: dimmer than real
+   input, and italic so the distinction survives at a glance. */
+/* Tall enough that the whole worked example is visible without scrolling — a
+   standard you have to scroll to read is not a standard. Still user-resizable. */
+/* Tall enough for the whole worked example with NO scrolling. That matters for more
+   than looks: the example layer is positioned, so if the textarea scrolled beneath
+   it the two would drift and a click would put the caret in the wrong section.
+   12 lines x 17.25px + padding + borders = ~229px; 240px leaves slack. */
+.mn-txt { min-height: 240px; }
+
+/* Both layers must advance by exactly the same number of pixels per line, so the
+   line box is stated explicitly rather than left to `normal` on two element types. */
+.mn-txt, .mn-ghost { line-height: 1.5; }
+
+.mn-txt::placeholder {
+    color: var(--txt3);
+    opacity: .75;
+    font-style: italic;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+/* Disabled state for the case-gated Professionalise button */
+.btn-clean-notes:disabled,
+.btn-clean-notes[aria-disabled="true"] {
+    opacity: .45;
+    cursor: not-allowed;
+}
+
+/* ============================================================
+   MAIN-WINDOW SPACING
+   The How-to box is the last thing in the welcome block now the
+   feature cards are gone, so its trailing margin — plus the
+   welcome's generous bottom padding and its vertical auto-
+   centering — opened a ~100px gap before Quick Options. Close it
+   up so the dropdown reads as the next step, not a separate area.
+   ============================================================ */
+.welcome {
+    padding: 40px 20px 10px;
+    margin: 0 auto;
+}
+
+.welcome .w-howto { margin-bottom: 0; }
+
+/* ============================================================
+   MEETING NOTES — real headings, worked example behind them
+   The textarea genuinely contains "Summary: / Troubleshooting
+   steps: / Next steps:", so the structure survives into the case
+   record. The example lives in an overlay layer. While the field
+   is still untouched the textarea's own text is transparent and
+   the example shows through; on the first keystroke the example
+   is removed and the real headings appear. Only ever one of the
+   two is visible, so the two layers can never mis-align.
+   ============================================================ */
+.mn-wrap { position: relative; }
+
+.mn-ghost {
+    position: absolute;
+    inset: 0;
+    padding: 10px;
+    font-family: inherit;
+    font-size: 11.5px;
+    /* pre, NOT pre-wrap: a wrapped example line would occupy two rows here but one
+       in the textarea, and every heading below it would then sit a row out from the
+       caret. Clipping a long line is the lesser evil; the lines are written short
+       enough that it does not happen at normal panel widths. */
+    white-space: pre;
+    overflow: hidden;
+    pointer-events: none;   /* clicks land in the textarea underneath */
+    border: 1px solid transparent;
+    border-radius: var(--r6);
+}
+
+/* The headings read as real text — because they ARE: the same headings are sitting
+   in the textarea's value underneath, they are simply painted here while the
+   example is up. */
+.mn-g-head {
+    color: var(--txt1);
+    font-style: normal;
+    font-weight: 600;
+}
+
+/* The example itself: clearly guidance, not something you typed. */
+.mn-g-eg {
+    color: var(--txt3);
+    opacity: .8;
+    font-style: italic;
+}
+
+.mn-g-blank { color: transparent; }
+
+/* Untouched: hide the real text so the example reads cleanly. The caret stays
+   visible so clicking in still shows where typing will go. */
+.mn-txt.mn-pristine {
+    color: transparent;
+    caret-color: var(--blue);
+}

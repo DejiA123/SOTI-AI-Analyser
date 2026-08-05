@@ -703,12 +703,79 @@ function sanitizeAssistantResponse(text) {
     return stripEmailChainMarkers(cleaned).replace(/[ \t]{2,}/g, " ").trim();
 }
 
+/* ---------------------------------------------------------------------------
+ * MEETING NOTES — the headings, and the example that sets the standard
+ * ---------------------------------------------------------------------------
+ * One definition drives both: the SKELETON that is really pre-filled into the
+ * field (so every set of notes arrives structured, and the structure persists
+ * into the case record) and the EXAMPLE shown behind it until the engineer
+ * starts typing. Deriving both from the same list is what stops the guidance
+ * and the headings drifting apart when either is edited.
+ * ------------------------------------------------------------------------- */
+// Example lines are kept SHORT on purpose. The layer that draws them must not wrap
+// (see renderMeetingNotesGhost) or it would fall out of step with the textarea's
+// caret, so each line has to fit the panel at its narrowest.
+const MEETING_NOTES_SECTIONS = [
+    {
+        header: 'Summary:',
+        example: [
+            'Devices dropping offline after the 15.5.1 upgrade.',
+            '~40 Android Enterprise devices, since 04/08.'
+        ]
+    },
+    {
+        header: 'Troubleshooting steps:',
+        example: [
+            '- Last successful device check-in 04/08 09:12',
+            '- Ruled out network: port 5494 open',
+            '- Collected DS + MS logs for the window'
+        ]
+    },
+    {
+        header: 'Next steps:',
+        example: [
+            '- Send re-enrolment steps to customer by 07/08',
+            '- Review logs and confirm root cause'
+        ]
+    }
+];
+
+// What the field actually contains on a new case: the headings, with room under each.
+const MEETING_NOTES_SKELETON = MEETING_NOTES_SECTIONS
+    .map(s => [s.header, ...s.example.map(() => '')].join('\n'))
+    .join('\n\n');
+
+// What is shown behind them while the field is untouched.
+const MEETING_NOTES_EXAMPLE = MEETING_NOTES_SECTIONS
+    .map(s => [s.header, ...s.example].join('\n'))
+    .join('\n\n');
+
+// The skeleton earlier versions pre-filled, including the "Time of the meeting:" line that
+// is no longer wanted. Saved cases still carry it, so everything that asks "are these notes
+// empty?" must keep recognising it.
+const MEETING_NOTES_EMPTY_TEMPLATE = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
+
+// True when the field holds no actual notes — blank, the current headings-only skeleton,
+// or a skeleton left behind by an older build.
+function meetingNotesAreEmpty(value) {
+    const v = (value || '').trim();
+    if (!v) return true;
+    if (v === MEETING_NOTES_EMPTY_TEMPLATE) return true;
+    if (v === MEETING_NOTES_SKELETON.trim()) return true;
+    // Headings with nothing typed under them, whatever the blank-line spacing.
+    const stripped = v.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+    const headersOnly = MEETING_NOTES_SECTIONS.map(s => s.header).join('\n');
+    return stripped === headersOnly;
+}
+
 function getDefaultCI() {
     return {
         caseNum: '', sotiVer: '', platform: '', agentVer: '', caseAge: '',
         enviro: '', dsCfg: '', affDev: '',
         scrubAccount: '', scrubCustomer: '',
-        meetingNotes: 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:',
+        // The headings only — the worked example is shown behind them by the ghost layer
+        // until the engineer types, so it never has to be deleted before writing.
+        meetingNotes: MEETING_NOTES_SKELETON,
         issueSummary: '', product: '', emailChain: '',
         jiraExpected: '', jiraImpact: '', jiraPriority: 'Medium', jiraRepro: ''
     };
@@ -1164,10 +1231,13 @@ async function loadState() {
             }
             
             // Patch existing cases for missing properties
-            const template = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
             cases.forEach(c => {
-                if (c.ci && (!c.ci.meetingNotes || c.ci.meetingNotes.trim() === "")) {
-                    c.ci.meetingNotes = template;
+                // Migration: cases saved by earlier versions carry the old pre-filled
+                // skeleton (including the "Time of the meeting:" line). Clear it so the
+                // placeholder example shows through — but ONLY when it is still the
+                // untouched skeleton, never when the engineer has written into it.
+                if (c.ci && meetingNotesAreEmpty(c.ci.meetingNotes)) {
+                    c.ci.meetingNotes = MEETING_NOTES_SKELETON;
                 }
                 if (!c.imgs) c.imgs = [];
                 if (!c.createdAt) c.createdAt = Date.now(); // Backfill for older cases
@@ -1300,7 +1370,8 @@ function switchCase(id) {
         $('affDev').value = c.ci.affDev || '';
         $('scrubAccount').value = c.ci.scrubAccount || '';
         $('scrubCustomer').value = c.ci.scrubCustomer || '';
-        $('meetingNotes').value = c.ci.meetingNotes || '';
+        $('meetingNotes').value = c.ci.meetingNotes || MEETING_NOTES_SKELETON;
+        renderMeetingNotesGhost();
         $('issueSummary').value = c.ci.issueSummary || '';
         $('product').value = c.ci.product || '';
         $('emailChain').value = c.ci.emailChain || '';
@@ -10831,10 +10902,21 @@ function updateFieldValidation(id) {
     if (!el) return;
     
     let val = el.value ? el.value.trim() : "";
-    const template = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
-    // Consider as empty if truly empty OR if it's the meeting notes and matches the template exactly
-    let isEmpty = !val || val === "" || (id === 'meetingNotes' && val === template);
-    
+    // Empty means truly empty, or — for a case restored from an older version — still the
+    // retired pre-filled skeleton, which was never real content.
+    let isEmpty = id === 'meetingNotes' ? meetingNotesAreEmpty(el.value) : (!val || val === "");
+
+    // Meeting Notes never wears the red "you have not filled this in" outline. It is
+    // optional (plenty of cases have no meeting), it now sits on the main window where a
+    // red box is the first thing you see on a brand-new case, and its placeholder is a
+    // worked EXAMPLE of good notes — framing guidance as a validation error reads as
+    // "you did something wrong" before the engineer has done anything at all.
+    if (id === 'meetingNotes') {
+        el.classList.remove('empty');
+        el.classList.toggle('filled', !isEmpty);
+        return;
+    }
+
     if (isEmpty) {
         el.classList.add('empty');
         el.classList.remove('filled');
@@ -10851,6 +10933,9 @@ function updateAllValidations() {
         'issueSummary', 'meetingNotes', 'emailChain',
         'jiraExpected', 'jiraImpact', 'jiraRepro'
     ].forEach(updateFieldValidation);
+    // Runs on load and after every restore/sync, so the example behind the notes is
+    // always in step with what the field actually holds.
+    renderMeetingNotesGhost();
 }
 
 // --- PII VAULT ---
@@ -11539,8 +11624,7 @@ function buildEffectiveIssueSummary(ci) {
     const summary = ((ci && ci.issue_summary) || ($('issueSummary') && $('issueSummary').value) || '').trim();
     if (summary) return summary;
     const notes = ((ci && ci.meeting_notes) || ($('meetingNotes') && $('meetingNotes').value) || '').trim();
-    const template = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
-    if (!notes || notes === template) return '';
+    if (meetingNotesAreEmpty(notes)) return '';
     const summaryMatch = notes.match(/Summary:\s*([\s\S]*?)(?=\n\s*(?:Troubleshooting steps|Next steps):|$)/i);
     if (summaryMatch && summaryMatch[1].trim()) return summaryMatch[1].trim();
     return notes.slice(0, 2500);
@@ -14883,6 +14967,7 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
             if (_saveStateTimer) clearTimeout(_saveStateTimer);
             saveState();
         };
+        if (id === 'meetingNotes') el.addEventListener('input', renderMeetingNotesGhost);
         el.oninput = onFieldInput;
         el.onchange = onFieldCommit;
         el.onblur = onFieldCommit;
@@ -14974,13 +15059,90 @@ $('toggleL').onclick = () => {
     $('panelL').classList.toggle('collapsed', !h);
 };
 
-$('toggleR').onclick = () => { 
-    const b = $('bodyR'); 
+// Logs and Case Details are now collapsible SUB-SECTIONS inside the Case Info panel.
+// The element ids are unchanged, so every existing consumer (Analyse Now collapsing the
+// logs section, drag-and-drop wiring, the auto-open on upload) keeps working as before.
+$('toggleR').onclick = () => {
+    const b = $('bodyR');
     const h = b.style.display === 'none';
-    b.style.display = h ? '' : 'none'; 
-    $('iconR').textContent = h ? '▼' : '▶'; 
+    b.style.display = h ? '' : 'none';
+    $('iconR').textContent = h ? '▼' : '▶';
     $('panelR').classList.toggle('collapsed', !h);
 };
+
+if ($('toggleCaseDetails')) {
+    $('toggleCaseDetails').onclick = () => {
+        const b = $('bodyCaseDetails');
+        if (!b) return;
+        const opening = b.style.display === 'none';
+        b.style.display = opening ? '' : 'none';
+        const icon = $('iconCaseDetails');
+        if (icon) icon.textContent = opening ? '▼' : '▶';
+    };
+}
+
+// Open the Case Info panel and its Case Details section, then focus a field. Used
+// wherever the app needs the engineer to supply case context (e.g. the case number
+// the meeting-notes actions require) — the field is two collapsed levels deep now,
+// so pointing at it is not enough, it has to be revealed.
+/* ---------------------------------------------------------------------------
+ * MEETING NOTES GHOST
+ * ---------------------------------------------------------------------------
+ * While the field holds nothing but the headings, this layer draws them in full
+ * white with the worked example beneath each one in grey — the headings read as
+ * real text (they ARE real text: the same headings sit in the textarea's value),
+ * and the example shows the standard to write to. The first keystroke drops the
+ * layer and the textarea's own headings take over, already in place.
+ *
+ * The textarea's text is transparent while the layer is up, so exactly one of
+ * the two is ever painted. That is what keeps them from double-printing — but
+ * the caret still lands on the textarea underneath, so the two MUST agree line
+ * for line or a click under "Next steps:" would start typing somewhere else.
+ * Two things guarantee that: the skeleton reserves exactly one blank line per
+ * example line (both are built from MEETING_NOTES_SECTIONS), and the layer sets
+ * `white-space: pre` so a long example line can never wrap and push the rest of
+ * the column out of step with the textarea.
+ * ------------------------------------------------------------------------- */
+function renderMeetingNotesGhost() {
+    const ta = $('meetingNotes');
+    const ghost = $('meetingNotesGhost');
+    if (!ta || !ghost) return;
+
+    const pristine = meetingNotesAreEmpty(ta.value);
+    ta.classList.toggle('mn-pristine', pristine);
+    ghost.style.display = pristine ? '' : 'none';
+    if (!pristine) { ghost.textContent = ''; return; }
+
+    // Rebuilt from the section list so the layer can never drift from the value.
+    ghost.textContent = '';
+    const line = (text, cls) => {
+        const el = document.createElement('div');
+        el.className = cls;
+        el.textContent = text;          // textContent, never innerHTML — notes are user data
+        ghost.appendChild(el);
+    };
+    MEETING_NOTES_SECTIONS.forEach((section, idx) => {
+        if (idx > 0) line(' ', 'mn-g-blank');   // the separator line between sections
+        line(section.header, 'mn-g-head');
+        section.example.forEach(t => line(t, 'mn-g-eg'));
+    });
+
+    // The box is sized so the skeleton never scrolls, but the field is user-resizable:
+    // drag it shorter and the textarea WILL scroll under a layer that otherwise stays
+    // put, drifting the caret away from the heading it appears to sit under. Follow it.
+    if (!ghost._scrollBound) {
+        ghost._scrollBound = true;
+        ta.addEventListener('scroll', () => { ghost.scrollTop = ta.scrollTop; });
+    }
+    ghost.scrollTop = ta.scrollTop;
+}
+
+function revealCaseField(fieldId) {
+    if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
+    if ($('bodyCaseDetails') && $('bodyCaseDetails').style.display === 'none') $('toggleCaseDetails').click();
+    const el = fieldId && $(fieldId);
+    if (el && typeof el.focus === 'function') el.focus();
+}
 
 // --- LOG HANDLING ---
 const renderLogs = () => {
@@ -15285,6 +15447,10 @@ const handleFiles = async (files) => {
         toast('Logs uploaded', 's', 2500);
         // Visible note in the chat — also lands in history so the model knows files arrived
         addMsg('assistant', `📎 **${added.length} attachment${added.length === 1 ? '' : 's'}:** ${added.join(', ')}${skipped.length ? `\n\n⚠ Skipped: ${skipped.join('; ')}` : ''}`, true);
+        // Reveal the uploaded files. Logs is a section INSIDE Case Info now, so opening
+        // it while Case Info itself is shut would expand something nobody can see —
+        // the parent has to come open first.
+        if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
         if ($('panelR') && $('panelR').classList.contains('collapsed') && typeof $('toggleR').onclick === 'function') {
             $('toggleR').onclick();
         }
@@ -15709,18 +15875,26 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
     $('chatIn').focus();
 }
 
-const MEETING_NOTES_EMPTY_TEMPLATE = 'Time of the meeting:\n\nSummary:\n\nTroubleshooting steps:\n\nNext steps:';
+// Some actions produce a CASE RECORD — cleaned meeting notes written to go straight into
+// Salesforce, a JIRA raised off the case. Their output has nowhere to land if no case
+// exists, so the case number is the precondition: it is the field that confirms one does.
+function requireCaseNumber(action = 'this') {
+    const caseNum = (($('caseNum') && $('caseNum').value) || '').trim();
+    if (caseNum) return true;
+    toast(`Add the Case Number in Case Info before using ${action} — it has to belong to a case.`, 'e', 6000);
+    revealCaseField('caseNum');
+    return false;
+}
 
 async function cleanUpMeetingNotes() {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) { toast('No active case selected', 'e'); return; }
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
+    if (!requireCaseNumber('Professionalise')) return;
 
     const notes = ($('meetingNotes').value || '').trim();
-    if (!notes || notes === MEETING_NOTES_EMPTY_TEMPLATE) {
-        toast('Meeting Notes is empty — type your notes in Case Info first', 'e');
-        // Open the Case Info panel and put the cursor in the notes box so they can start typing
-        if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
+    if (meetingNotesAreEmpty(notes)) {
+        toast('Meeting Notes is empty — write your notes first', 'e');
         $('meetingNotes').focus();
         return;
     }
@@ -15739,10 +15913,10 @@ STRICT RULES:
 - Correct spelling and grammar, expand shorthand, and write clear professional sentences.
 - Keep EVERY fact exactly as noted — names, dates, times, versions, error messages, device counts, commitments. Do NOT invent, assume, or add anything that is not in my notes, and do NOT drop any detail.
 - Structure the output with these plain-text headers, in this order, omitting any section my notes contain nothing for:
-Time of the meeting:
 Summary:
 Troubleshooting steps:
 Next steps:
+- Do NOT add a "Time of the meeting:" header. If my notes mention when the meeting happened, keep that detail inside "Summary:".
 - Under "Troubleshooting steps:" and "Next steps:" use simple "-" dash bullets, one action per bullet.
 - Output PLAIN TEXT only — no markdown symbols like ** or ##, no emojis, no preamble such as "Here are your notes", and no closing remarks. Output ONLY the cleaned notes, ready to paste straight into Salesforce.
 
@@ -15761,7 +15935,7 @@ async function generateCaseSummary() {
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
 
     const notes = ($('meetingNotes').value || '').trim();
-    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasNotes = !meetingNotesAreEmpty(notes);
     const hasAnyCaseData = hasNotes
         || ($('issueSummary').value || '').trim()
         || ($('emailChain').value || '').trim()
@@ -15941,7 +16115,7 @@ async function draftCustomerEmail() {
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
 
     const notes = ($('meetingNotes').value || '').trim();
-    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasNotes = !meetingNotesAreEmpty(notes);
     const hasAnyCaseData = hasNotes
         || ($('issueSummary').value || '').trim()
         || ($('emailChain').value || '').trim()
@@ -16019,7 +16193,7 @@ async function fixCustomerIssue() {
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
 
     const notes = ($('meetingNotes').value || '').trim();
-    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasNotes = !meetingNotesAreEmpty(notes);
     const hasAnyCaseData = hasNotes
         || ($('issueSummary').value || '').trim()
         || ($('emailChain').value || '').trim()
@@ -16078,7 +16252,7 @@ async function generate306090Analysis() {
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
 
     const notes = ($('meetingNotes').value || '').trim();
-    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasNotes = !meetingNotesAreEmpty(notes);
     const hasAnyCaseData = hasNotes
         || ($('issueSummary').value || '').trim()
         || ($('emailChain').value || '').trim()
@@ -16146,7 +16320,7 @@ async function generateProblemResolutionSummary() {
     if (busyMap.get(c.id)) { toast('The AI is still working — wait for the current answer to finish', 'w'); return; }
 
     const notes = ($('meetingNotes').value || '').trim();
-    const hasNotes = notes && notes !== MEETING_NOTES_EMPTY_TEMPLATE;
+    const hasNotes = !meetingNotesAreEmpty(notes);
     const hasAnyCaseData = hasNotes
         || ($('issueSummary').value || '').trim()
         || ($('emailChain').value || '').trim()
@@ -16185,47 +16359,15 @@ ${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case fac
 
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 
-// --- WELCOME CARD SHORTCUTS ---
-// The cards on the welcome screen are real one-click AI actions, not decoration:
-// 📋 Case Summary + Next Steps, 📧 Draft an email to the customer, 🔧 Fix the customer's
-// issue for me, 📅 30/60/90 Case Analysis, 🧩 Problem & Resolution Summary (Internal),
-// 📦 Export the full session report.
-// They mirror the top Quick Actions panel.
-{
-    const wireCard = (id, fn) => {
-        const el = $(id);
-        if (!el) return;
-        el.onclick = fn;
-        el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
-    };
-    wireCard('wCardCase', generateCaseSummary);
-    wireCard('wCardLogs', draftCustomerEmail);
-    wireCard('wCardMissing', fixCustomerIssue);
-    wireCard('wCard306090', generate306090Analysis);
-    wireCard('wCardProbRes', generateProblemResolutionSummary);
-    wireCard('wCardExport', () => exportSession());
-}
-
-// --- TOP QUICK ACTIONS PANEL ---
-// A drop-down at the top of the chat that appears only once the user is chatting with the AI.
-// It exposes the same one-click actions as the welcome cards so they stay reachable mid-chat.
+// --- QUICK OPTIONS (main window) ---
+// The six one-click AI actions used to exist twice: as cards on the welcome screen and as
+// a drop-down that appeared only once a chat was under way. They are now a single drop-down
+// in the home panel, which sits under "How to get started" on first load and stays put once
+// the conversation starts — so it is always available and never duplicated.
 function updateQuickActionsPanel() {
     const panel = $('qaPanel');
     if (!panel) return;
-    const c = cases.find(x => x.id === activeCaseId);
-    const welcome = $('welcome');
-    // We're "in a chat" once the welcome screen is hidden (live turn) or the case already
-    // has visible messages (restored history). The welcome's own display is the app's
-    // existing source of truth for this, so we reuse it here.
-    const welcomeHidden = !!(welcome && welcome.style.display === 'none');
-    const hasChat = welcomeHidden || !!(c && c.msgs && c.msgs.some(m => !m.hidden));
-    panel.style.display = hasChat ? 'block' : 'none';
-    if (!hasChat) { // reset to collapsed so it re-opens fresh next chat
-        const body = $('qaBody');
-        if (body) body.style.display = 'none';
-        const icon = $('qaIcon');
-        if (icon) icon.textContent = '▶';
-    }
+    panel.style.display = 'block';
 }
 
 if ($('qaToggle')) {
@@ -16240,10 +16382,10 @@ if ($('qaToggle')) {
 }
 if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
 if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
-if ($('qaFixIssue')) $('qaFixIssue').onclick = fixCustomerIssue;
 if ($('qa306090')) $('qa306090').onclick = generate306090Analysis;
 if ($('qaProbRes')) $('qaProbRes').onclick = generateProblemResolutionSummary;
-if ($('qaExport')) $('qaExport').onclick = () => exportSession();
+// Exporting the session stays on the ⋮ menu (btnExport) — it was listed in both places.
+if ($('qaJira')) $('qaJira').onclick = openJiraReview;
 
 $('btnNew').onclick = createNewCase;
 
@@ -17433,9 +17575,15 @@ const JIRA_GEN_MARKERS = [
     { needle: 'why was L3/SME not consulted',  label: 'L3/SME section' }
 ];
 
-$('btnJira').onclick = () => {
+// Create JIRA moved out of the top bar into Quick Options, and is gated the same way
+// the meeting-notes actions are: a JIRA raised off a case needs the case to exist, and
+// the case number is what says it does. Wired below with the other quick actions.
+function openJiraReview() {
+    const c = cases.find(x => x.id === activeCaseId);
+    if (!c) { toast('No active case selected', 'e'); return; }
+    if (!requireCaseNumber('Create JIRA')) return;
     $('mJiraReview').style.display = 'flex';
-};
+}
 
 $('mJiraReviewClose').onclick = $('btnJiraReviewCancel').onclick = () => {
     $('mJiraReview').style.display = 'none';

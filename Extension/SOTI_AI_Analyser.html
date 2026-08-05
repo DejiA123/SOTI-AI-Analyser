@@ -37,10 +37,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                 New Case
             </button>
-            <button class="btn btn-jira" id="btnJira" title="Generate JIRA Report">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
-                Create JIRA
-            </button>
+            <!-- Create JIRA now lives in the Quick Options dropdown — see openJiraReview(). -->
             <div class="more-menu">
                 <button class="btn" id="btnMore" title="More Options">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
@@ -85,19 +82,13 @@
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px; opacity:0.8"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
                     </button>
                 </div>
-                <div class="fld">
-                    <div style="display: flex; align-items: center; gap: 6px;">
-                        <span class="flbl">Meeting Notes</span>
-                        <span class="info-icon" title="Useful for capturing manual notes during customer meetings or troubleshooting sessions. This content will be analysed alongside other case data.">
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                        </span>
+                <!-- Case Details (Collapsible) — closed by default so the panel opens short -->
+                <div class="subsec" id="secCaseDetails">
+                    <div class="subsec-ph" id="toggleCaseDetails">
+                        <div class="subsec-ph-left">📝 Case Details</div>
+                        <div class="subsec-ph-collapse" id="iconCaseDetails">▶</div>
                     </div>
-                    <textarea class="ftxt" id="meetingNotes" rows="6" placeholder="Manual notes..."></textarea>
-                    <button class="btn btn-clean-notes" id="btnCleanNotes" title="AI rewrites your raw meeting notes into clean, professional case notes — ready to paste into Salesforce.">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
-                        Clean Up Meeting Notes
-                    </button>
-                </div>
+                    <div class="subsec-pb" id="bodyCaseDetails" style="display:none">
                 <div class="fld"><span class="flbl">Case Number</span><input class="finput" id="caseNum" placeholder="e.g. 0012345678"></div>
                 <div class="fld" style="display: none;"><span class="flbl">Account Scrub</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
                 <div class="fld" style="display: none;"><span class="flbl">Customer Scrub</span><input class="finput" id="scrubCustomer" placeholder="e.g. John Doe"></div>
@@ -177,27 +168,53 @@
                     </div>
                     <textarea class="ftxt" id="emailChain" rows="6"></textarea>
                 </div>
+                    </div>
+                </div>
+
+                <!-- Logs (Collapsible) — lives inside Case Info: logs belong to a case.
+                     Element ids are kept from the old right-hand panel so every existing
+                     handler (upload, drag-drop, Analyse Now, collapse-on-analyse) keeps working. -->
+                <div class="subsec" id="panelR">
+                    <div class="subsec-ph" id="toggleR">
+                        <div class="subsec-ph-left">
+                            📁 Logs
+                            <span class="info-icon" title="Upload technical logs (MS, DS, Agent, DDR) to provide the AI with raw diagnostic data for high-fidelity analysis.">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                            </span>
+                        </div>
+                        <div class="subsec-ph-collapse" id="iconR">▶</div>
+                    </div>
+                    <div class="subsec-pb" id="bodyR" style="display: none">
+                        <div class="dz" id="dz">
+                            <div class="dz-text">Click or drag files here</div>
+                            <div class="dz-sub">LOG · TXT · XML · JSON · HAR · ZIP</div>
+                        </div>
+
+                        <div class="log-guide" id="logGuide">
+                            <div class="guide-title">Supported Log Types</div>
+                            <div class="guide-grid">
+                                <div class="guide-item"><span class="badge ms">MS</span> Management Service</div>
+                                <div class="guide-item"><span class="badge ds">DS</span> Deployment Server</div>
+                                <div class="guide-item"><span class="badge dse">DSE</span> DS Extension</div>
+                                <div class="guide-item"><span class="badge agt">AGT</span> Agent Manager</div>
+                                <div class="guide-item"><span class="badge ddr">DDR</span> Device Debug Report</div>
+                                <div class="guide-item"><span class="badge enr">ENR</span> Enrollment</div>
+                                <div class="guide-item"><span class="badge har">HAR</span> Har logs</div>
+                                <div class="guide-item"><span class="badge evt">EVT</span> Event Log</div>
+                            </div>
+                        </div>
+
+                        <div id="noFiles" class="no-files">No files uploaded yet.</div>
+                        <div class="log-list" id="logList"></div>
+                        <button class="btn btn-analyse" id="btnAnalyse" style="display:none">Analyse Now</button>
+                    </div>
+                </div>
 
             </div>
         </aside>
 
         <!-- Chat Area -->
         <section class="chat-wrap">
-            <!-- Quick Actions dropdown — only appears once the user is chatting with the AI -->
-            <div class="qa-panel" id="qaPanel" style="display:none">
-                <div class="qa-ph" id="qaToggle">
-                    <div class="qa-ph-left">⚡ Quick Actions</div>
-                    <div class="qa-ph-collapse" id="qaIcon">▶</div>
-                </div>
-                <div class="qa-pb" id="qaBody" style="display:none">
-                    <button class="qa-drop-item" id="qaCaseSummary" title="AI writes a full summary of this case and the recommended next steps">📋 Case Summary + Next Steps</button>
-                    <button class="qa-drop-item" id="qaDraftEmail" title="AI drafts the next email to the customer from the latest case context">📧 Draft an email to the customer</button>
-                    <button class="qa-drop-item" id="qaFixIssue" title="AI works out the complete, grounded fix for the customer's issue">🔧 Work out a resolution</button>
-                    <button class="qa-drop-item" id="qa306090" title="AI builds a 30/60/90 aging-case analysis with JIRA justification">📅 30/60/90 Case Analysis</button>
-                    <button class="qa-drop-item" id="qaProbRes" title="AI writes an internal Problem &amp; Resolution summary for this case">🧩 Problem &amp; Resolution Summary (Internal)</button>
-                    <button class="qa-drop-item" id="qaExport" title="Download the full session report as a .txt file">📦 Export the full session report</button>
-                </div>
-            </div>
             <div class="chat-msgs" id="chatMsgs">
                 <div class="welcome" id="welcome">
                     <div class="w-hex-wrap">⬡</div>
@@ -212,13 +229,45 @@
                         <div class="w-step"><span class="w-step-num">4</span> Click Sync from Salesforce</div>
                     </div>
 
-                    <div class="w-features">
-                        <div class="w-card" id="wCardCase" role="button" tabindex="0" title="AI writes a full summary of this case and the recommended next steps"><span class="w-icon">📋</span> Case Summary + Next Steps</div>
-                        <div class="w-card" id="wCardLogs" role="button" tabindex="0" title="AI drafts the next email to the customer from the latest case context"><span class="w-icon">📧</span> Draft an email to the customer</div>
-                        <div class="w-card" id="wCardMissing" role="button" tabindex="0" title="AI works out the complete, grounded fix for the customer's issue"><span class="w-icon">🔧</span> Work out a resolution</div>
-                        <div class="w-card" id="wCard306090" role="button" tabindex="0" title="AI builds a 30/60/90 aging-case analysis with JIRA justification"><span class="w-icon">📅</span> 30/60/90 Case Analysis</div>
-                        <div class="w-card" id="wCardProbRes" role="button" tabindex="0" title="AI writes an internal Problem &amp; Resolution summary for this case"><span class="w-icon">🧩</span> Problem &amp; Resolution Summary (Internal)</div>
-                        <div class="w-card" id="wCardExport" role="button" tabindex="0" title="Download the full session report as a .txt file"><span class="w-icon">📦</span> Export the full session report when done</div>
+                </div>
+
+                <!-- HOME PANEL — sits directly under "How to get started" while the welcome
+                     screen is up, and stays put once the chat starts (it is a SIBLING of the
+                     welcome block, not a child), so Quick Options and Meeting Notes never
+                     become unreachable mid-conversation. -->
+                <div class="home-panel" id="homePanel">
+                    <div class="qa-panel" id="qaPanel">
+                        <div class="qa-ph" id="qaToggle">
+                            <div class="qa-ph-left">⚡ Quick Options</div>
+                            <div class="qa-ph-collapse" id="qaIcon">▶</div>
+                        </div>
+                        <div class="qa-pb" id="qaBody" style="display:none">
+                            <button class="qa-drop-item" id="qaCaseSummary" title="AI writes a full summary of this case and the recommended next steps">📋 Case Summary + Next Steps</button>
+                            <button class="qa-drop-item" id="qaDraftEmail" title="AI drafts the next email to the customer from the latest case context">📧 Draft an email to the customer</button>
+                            <button class="qa-drop-item" id="qaJira" title="Generate a JIRA report for this case">📄 Create JIRA</button>
+                            <button class="qa-drop-item" id="qaProbRes" title="AI writes an internal Problem &amp; Resolution summary for this case">🧩 Problem &amp; Resolution Summary (Internal)</button>
+                            <button class="qa-drop-item" id="qa306090" title="AI builds a 30/60/90 aging-case analysis with JIRA justification">📅 30/60/90 Case Analysis</button>
+                        </div>
+                    </div>
+
+                    <div class="mn-block">
+                        <div class="mn-head">
+                            <span class="flbl">Meeting Notes</span>
+                            <span class="info-icon" title="Capture manual notes during customer meetings or troubleshooting sessions. This content is analysed alongside the rest of the case data.">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                            </span>
+                        </div>
+                        <!-- The headings are REAL pre-filled text in the textarea. The worked
+                             example sits in an overlay behind them and clears the moment the
+                             engineer starts typing. See renderMeetingNotesGhost(). -->
+                        <div class="mn-wrap">
+                            <div class="mn-ghost" id="meetingNotesGhost" aria-hidden="true"></div>
+                            <textarea class="ftxt mn-txt" id="meetingNotes" rows="8"></textarea>
+                        </div>
+                        <button class="btn btn-clean-notes" id="btnCleanNotes" title="AI rewrites your raw meeting notes into clean, professional case notes — ready to paste into Salesforce.">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                            Professionalise
+                        </button>
                     </div>
                 </div>
             </div>
@@ -245,42 +294,6 @@
             </div>
         </section>
 
-        <!-- Logs Area (Collapsible) -->
-        <aside class="panel-right collapsed" id="panelR">
-            <div class="ph" id="toggleR">
-                <div class="ph-left">
-                    📁 Logs
-                    <span class="info-icon" title="Upload technical logs (MS, DS, Agent, DDR) to provide the AI with raw diagnostic data for high-fidelity analysis.">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                    </span>
-                </div>
-                <div class="ph-collapse" id="iconR">▶</div>
-            </div>
-            <div class="pb" id="bodyR" style="display: none">
-                <div class="dz" id="dz">
-                    <div class="dz-text">Click or drag files here</div>
-                    <div class="dz-sub">LOG · TXT · XML · JSON · HAR · ZIP</div>
-                </div>
-
-                <div class="log-guide" id="logGuide">
-                    <div class="guide-title">Supported Log Types</div>
-                    <div class="guide-grid">
-                        <div class="guide-item"><span class="badge ms">MS</span> Management Service</div>
-                        <div class="guide-item"><span class="badge ds">DS</span> Deployment Server</div>
-                        <div class="guide-item"><span class="badge dse">DSE</span> DS Extension</div>
-                        <div class="guide-item"><span class="badge agt">AGT</span> Agent Manager</div>
-                        <div class="guide-item"><span class="badge ddr">DDR</span> Device Debug Report</div>
-                        <div class="guide-item"><span class="badge enr">ENR</span> Enrollment</div>
-                        <div class="guide-item"><span class="badge har">HAR</span> Har logs</div>
-                        <div class="guide-item"><span class="badge evt">EVT</span> Event Log</div>
-                    </div>
-                </div>
-
-                <div id="noFiles" class="no-files">No files uploaded yet.</div>
-                <div class="log-list" id="logList"></div>
-                <button class="btn btn-analyse" id="btnAnalyse" style="display:none">Analyse Now</button>
-            </div>
-        </aside>
     </div>
 
     <!-- Hidden Inputs -->
@@ -514,9 +527,9 @@
     <!-- power.js MUST load before sidepanel.js: sidepanel's governor bridge reads
          window.SotiPower at definition time, and the hot paths consult it from the
          very first log scan. It degrades to static defaults if this file is absent. -->
-    <script src="power.js?v=2.7.0"></script>
+    <script src="power.js?v=2.7.1"></script>
     <script src="lib/tesseract.v5.min.js"></script>
-    <script src="sidepanel.js?v=2.7.0"></script>
+    <script src="sidepanel.js?v=2.7.1"></script>
     <!-- Generation Loading Modal — real progress (driven by JiraProgress in sidepanel.js) -->
     <div class="backdrop" id="mGen" style="display:none">
         <div class="modal" style="text-align:center; max-width:340px">
