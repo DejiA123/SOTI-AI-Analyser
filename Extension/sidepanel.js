@@ -925,6 +925,12 @@ function dropDerivedLogCaches(l) {
         freed += n * 24;   // parallel typed-ish arrays: ~24 bytes/line of slots
         l.precomputedIntel = null;
     }
+    if (l._derived) {
+        // Memoized evidence sections (exception blocks, installer analysis, …).
+        // All rebuildable from the text, so they are always safe to drop.
+        l._derived.values.forEach(v => { freed += typeof v === 'string' ? v.length * 2 : 2048; });
+        l._derived = null;
+    }
     if (l.panelIntel) {
         freed += 4096;
         l.panelIntel = null;
@@ -1659,19 +1665,105 @@ let _lastYield = performance.now();
 // these run 150,000+ times on a big bundle.
 let _scanChunk = 2000;
 
+// Clock-check granularity for the scan loops. The governor still decides HOW OFTEN to
+// actually yield (yieldEveryMs); this only decides how often a loop is allowed to
+// notice. It tracks the governor's chunk size when that is finer than the default.
+function scanCheckInterval() {
+    return _scanChunk > 0 && _scanChunk < YIELD_CHECK_EVERY ? _scanChunk : YIELD_CHECK_EVERY;
+}
+
 // Hand the main thread back to the browser if we have been hogging it. This is
 // the single most important CPU lever in the app: without it, classifying a
 // 150k-line bundle is one uninterrupted synchronous block and the panel is
 // frozen for the duration. Under pressure the governor shortens both the yield
 // interval and the chunk size, so the UI keeps painting even mid-analysis.
+// How often a scan loop should CONSULT the clock. This is not how often it yields —
+// yieldIfNeeded still yields on elapsed time — it is the granularity at which a loop
+// can notice it has overrun its slice. Loops used to check every `chunkLines` (2000)
+// iterations, and 2000 iterations of per-line regex classification on a server log is
+// several hundred ms of frozen panel between checks. 256 keeps the worst-case
+// synchronous stretch inside roughly one frame while costing one cheap modulo.
+const YIELD_CHECK_EVERY = 256;
+
+// Hand the main thread back so the browser can paint and process input.
+// scheduler.yield() resumes at higher priority than a timer (so a long analysis is
+// not starved by unrelated timers) but is not everywhere yet; setTimeout(0) is the
+// portable fallback and is a real task boundary, which is what lets a frame render.
+function yieldToBrowser() {
+    if (typeof scheduler !== 'undefined' && typeof scheduler.yield === 'function') {
+        try { return scheduler.yield(); } catch (e) { /* fall through */ }
+    }
+    return new Promise(r => setTimeout(r, 0));
+}
+
 async function yieldIfNeeded() {
     const knobs = Power.knobs;
     _scanChunk = knobs.chunkLines;
     const now = performance.now();
     if (now - _lastYield > knobs.yieldEveryMs) {
-        await new Promise(r => setTimeout(r, 0));
+        await yieldToBrowser();
         _lastYield = performance.now();
     }
+}
+
+// When several logs are attached, the report must account for ALL of them. Each file
+// now gets its own expanded evidence section, but a model handed two files will still
+// happily write up whichever one carried the loudest exception and present that as the
+// whole picture — which reads as "you only looked at one of my logs". Naming the files
+// and requiring a verdict per file makes the coverage explicit, including the honest
+// "nothing relevant in this one" case.
+function multiFileCoverageDirective(logs) {
+    const names = (logs || []).map(l => l && l.name).filter(Boolean);
+    if (names.length < 2) return "";
+    const list = names.slice(0, 12).join(', ') + (names.length > 12 ? `, …(${names.length - 12} more)` : '');
+    return `[ALL ${names.length} ATTACHED FILES MUST BE ACCOUNTED FOR: ${list}]\n`
+        + `Every one of these files was scanned and each has its own evidence section below. Your report covers the WHOLE upload, not the single noisiest file:\n`
+        + `- Name every file you drew evidence from, and cite findings as "<file>:Line <n>" so it is clear which log each fact came from.\n`
+        + `- If a file contains nothing relevant to this issue, SAY SO explicitly ("<file>: no related failures in the covered window") rather than silently omitting it.\n`
+        + `- Where two files cover the same moment, correlate them (a Management Service error and the Deployment Server error it produced are ONE incident seen twice, not two findings).\n`;
+}
+
+/* ---------------------------------------------------------------------------
+ * PER-LOG DERIVED-ARTIFACT MEMO
+ * ---------------------------------------------------------------------------
+ * One analysis run asks the same questions of the same file several times: the
+ * cross-log incident index parses a file's exception blocks and installer
+ * events, and then buildConcentratedSnippets -> getSmartLogSnippet parses the
+ * very same file again for its own section. Each of those is a full sweep of
+ * every line, so a 640k-line log paid for the same sweep two or three times
+ * over per click.
+ *
+ * These artifacts are pure functions of the file text, so they are cached on
+ * the log object under the SAME cacheKey precomputeLogIntel uses. They are
+ * dropped by dropDerivedLogCaches() with the rest of the derived state when
+ * the governor reclaims memory, so this trades no durability for the speed.
+ * ------------------------------------------------------------------------- */
+function logDerivedCacheKey(log) {
+    return `${log.name || ""}:${(log.content || "").length}`;
+}
+
+async function memoizeOnLog(log, slot, build) {
+    if (!log) return build();
+    const key = logDerivedCacheKey(log);
+    if (!log._derived || log._derived.cacheKey !== key) {
+        log._derived = { cacheKey: key, values: new Map(), inflight: new Map() };
+    }
+    const { values, inflight } = log._derived;
+    if (values.has(slot)) return values.get(slot);
+    // Concurrent callers must share one build, not race two full sweeps.
+    if (inflight.has(slot)) return inflight.get(slot);
+
+    const job = (async () => {
+        try {
+            const value = await build();
+            values.set(slot, value);
+            return value;
+        } finally {
+            inflight.delete(slot);
+        }
+    })();
+    inflight.set(slot, job);
+    return job;
 }
 
 function findLogObject(fileName, content) {
@@ -1704,7 +1796,7 @@ async function precomputeLogIntel(log) {
         const installerEventCache = new Array(len);
 
         for (let idx = 0; idx < len; idx++) {
-            if (idx % _scanChunk === 0 && idx > 0) {
+            if (idx % scanCheckInterval() === 0 && idx > 0) {
                 await yieldIfNeeded();
             }
             const line = lines[idx];
@@ -1722,7 +1814,7 @@ async function precomputeLogIntel(log) {
             if (hasPrefilter) {
                 prefilteredIndices.push(idx);
 
-                const intel = classifyLogLine(scanLine);
+                const intel = classifyLogLine(scanLine, true);
                 intelCache[idx] = intel;
 
                 if (intel.isForensic && !intel.hasStackFrame) {
@@ -1823,9 +1915,13 @@ function isMsiNoiseLine(line) {
     return false;
 }
 
+// Compiled once. It used to be built with `new RegExp(...)` inside getKeywordHits, i.e.
+// a fresh compile of this very large alternation for every negated line of every file.
+const EXCEPTION_CLASS_RE = new RegExp(EXCEPTION_CLASS_PATTERN, 'i');
+
 function getKeywordHits(line) {
     if (isMsiNoiseLine(line)) return [];
-    if (isNegatedSignalLine(line) && !new RegExp(EXCEPTION_CLASS_PATTERN, 'i').test(line || "")) return [];
+    if (isNegatedSignalLine(line) && !EXCEPTION_CLASS_RE.test(line || "")) return [];
     return HIGH_SIGNAL_KEYWORDS
         .filter(rule => rule.regex.test(line || ""))
         .map(rule => ({ label: rule.label, score: rule.score }));
@@ -1835,8 +1931,11 @@ function isStackTraceLine(line) {
     return /^\s*(at\s+|---\s*>|---\s*End|Caused by:|Suppressed:|Inner Exception| ---> |--->|Traceback \(most recent call last\):|File ".+?", line \d+|at .+?\(.+?:\d+(?::\d+)?\)|\.\.\. \d+ more)/i.test(line || "");
 }
 
-function classifyLogLine(line) {
-    if (!FAST_FORENSIC_PREFILTER.test(line)) {
+// `prefiltered` = the caller has already run FAST_FORENSIC_PREFILTER on this exact text.
+// precomputeLogIntel does, for every line of every file, and the prefilter is the single
+// widest alternation in the app — re-testing it here doubled that cost across the bundle.
+function classifyLogLine(line, prefiltered = false) {
+    if (!prefiltered && !FAST_FORENSIC_PREFILTER.test(line)) {
         return DEFAULT_LINE_CLASSIFICATION;
     }
     // Bound the cost of the ~22 classification regexes below. Forensic signal lives at the START
@@ -1999,8 +2098,18 @@ function scoreRootCauseCandidate(event) {
     return Math.max(score, 30);
 }
 
+// Pure string -> epoch, and the same timestamps are re-parsed on every pass (candidate
+// build, incident index, domino normalisation, chronic-noise damping). On a big bundle
+// that was ~2s of pure Date.parse/regex churn per analysis, so the result is memoized.
+// The cap keeps the map bounded on a bundle with a million distinct timestamps.
+const _tsSortCache = new Map();
+const TS_SORT_CACHE_MAX = 60000;
+
 function parseLogTimestampForSort(ts) {
     if (!ts) return Number.POSITIVE_INFINITY;
+    const cached = _tsSortCache.get(ts);
+    if (cached !== undefined) return cached;
+
     let normalized = normalizeLogTimestamp(ts)
         .replace(',', '.')
         .replace(/^(\d{2})\/(\d{2})\/(\d{4})/, '$3-$2-$1');
@@ -2008,7 +2117,11 @@ function parseLogTimestampForSort(ts) {
         normalized = `1970-01-01 ${normalized}`;
     }
     const parsed = Date.parse(normalized);
-    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+    const result = Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+
+    if (_tsSortCache.size >= TS_SORT_CACHE_MAX) _tsSortCache.clear();
+    _tsSortCache.set(ts, result);
+    return result;
 }
 
 function extractExceptionClasses(text) {
@@ -2373,32 +2486,101 @@ function getCausalEdge(upstream, downstream) {
     };
 }
 
+function dominoItemKey(item) {
+    if (!item._dkey) item._dkey = `${item.file}:${item.line}:${item.component}`;
+    return item._dkey;
+}
+
+/* ---------------------------------------------------------------------------
+ * COLLAPSE REPEATS BEFORE THE CAUSAL SEARCH
+ * ---------------------------------------------------------------------------
+ * chooseArchitectRoot() evaluates a propagation path FOR EVERY candidate, and
+ * each path scans every other candidate — so the causal search costs O(n²)
+ * getCausalEdge() calls, each running ~12 regexes over two log lines. A big
+ * server bundle hands it tens of thousands of candidates (a 53 MB DS log
+ * yields 24,613), which is ~29 MINUTES of uninterruptible main-thread CPU for
+ * ONE file. That is what froze the panel on a multi-file upload.
+ *
+ * The n that matters is not "how many forensic lines" but "how many DISTINCT
+ * failures": a chain step is only ever reported once, and 6,817 copies of
+ * "Unknown payload type" cannot contribute a link that their first occurrence
+ * does not. Collapsing on the normalized signature is therefore free of any
+ * analytical loss — and on real logs it is a 39×–78× reduction (24,613 → 628;
+ * 14,865 → 191), i.e. three to four orders of magnitude off a quadratic cost.
+ *
+ * The surviving representative is the strongest instance of its signature, so
+ * the ranking still sees each failure at its worst; `repeatCount` is carried
+ * through so the report can still say how often it recurred. `cap` is a final
+ * backstop for pathological bundles with genuinely thousands of distinct
+ * failures, keeping the highest-scoring ones in chronological order.
+ * ------------------------------------------------------------------------- */
+const DOMINO_POOL_CAP = 1200;
+
+async function collapseDominoRepeats(all, cap = DOMINO_POOL_CAP) {
+    const bySig = new Map();
+    for (let n = 0; n < all.length; n++) {
+        if ((n % YIELD_CHECK_EVERY) === 0 && n > 0) await yieldIfNeeded();
+        const item = all[n];
+        const sig = `${item.component}::${normalizeLogSignature(item.text || "").slice(0, 180)}`;
+        const prev = bySig.get(sig);
+        if (!prev) {
+            item.repeatCount = 1;
+            bySig.set(sig, item);
+            continue;
+        }
+        prev.repeatCount++;
+        // Keep the strongest instance; ties keep the earliest (already first seen),
+        // so a chain anchors on the first time the worst version of it happened.
+        if (item.causalScore > prev.causalScore) {
+            item.repeatCount = prev.repeatCount;
+            bySig.set(sig, item);
+        }
+    }
+
+    const distinct = new Set(bySig.values());
+    if (distinct.size <= cap) {
+        // `all` is already in chronological order — filtering preserves it.
+        return all.filter(item => distinct.has(item));
+    }
+    const strongest = new Set(
+        [...distinct]
+            .sort((a, b) => b.causalScore - a.causalScore || (a.sortTime || 0) - (b.sortTime || 0))
+            .slice(0, cap)
+    );
+    return all.filter(item => strongest.has(item));
+}
+
 function getPropagationPath(root, all) {
     const path = [root];
     const edges = [];
-    const used = new Set([`${root.file}:${root.line}:${root.component}`]);
+    const used = new Set([dominoItemKey(root)]);
     let current = root;
 
     for (let step = 0; step < 6; step++) {
-        const candidates = all
-            .filter(item => !used.has(`${item.file}:${item.line}:${item.component}`))
-            .map(item => getCausalEdge(current, item))
-            .filter(Boolean)
-            .sort((a, b) => b.score - a.score || (a.deltaMs ?? Infinity) - (b.deltaMs ?? Infinity));
+        let best = null;
+        for (const item of all) {
+            if (used.has(dominoItemKey(item))) continue;
+            const edge = getCausalEdge(current, item);
+            if (!edge) continue;
+            if (!best
+                || edge.score > best.score
+                || (edge.score === best.score && (edge.deltaMs ?? Infinity) < (best.deltaMs ?? Infinity))) {
+                best = edge;
+            }
+        }
 
-        if (candidates.length === 0) break;
-        const best = candidates[0];
+        if (!best) break;
         if (best.score < 35) break;
         edges.push(best);
         path.push(best.to);
-        used.add(`${best.to.file}:${best.to.line}:${best.to.component}`);
+        used.add(dominoItemKey(best.to));
         current = best.to;
     }
 
     return { path, edges, score: edges.reduce((sum, edge) => sum + edge.score, 0) };
 }
 
-function chooseArchitectRoot(all) {
+async function chooseArchitectRoot(all) {
     // Temporal anchor: the strongest event on the timeline is the failure the report must
     // explain. A root cause must exist AT or BEFORE that moment — an event that happens
     // minutes AFTER the primary failure cluster cannot have caused it, no matter how loud
@@ -2409,19 +2591,26 @@ function chooseArchitectRoot(all) {
         .reduce((best, item) => (!best || item.causalScore > best.causalScore) ? item : best, null);
     const anchorTime = primarySymptom ? primarySymptom.sortTime : Number.NaN;
 
-    const candidates = all.map(item => {
+    // Each iteration walks the pool seven times over (six propagation steps plus the
+    // incoming-cause sweep), so this is the densest CPU in the whole analysis. Yield
+    // between candidates or the panel is frozen solid for the duration.
+    const candidates = [];
+    for (let n = 0; n < all.length; n++) {
+        if ((n & 31) === 0 && n > 0) await yieldIfNeeded();
+        const item = all[n];
         const propagation = getPropagationPath(item, all);
-        const incomingScore = all
-            .map(other => getCausalEdge(other, item))
-            .filter(Boolean)
-            .reduce((max, edge) => Math.max(max, edge.score), 0);
+        let incomingScore = 0;
+        for (const other of all) {
+            const edge = getCausalEdge(other, item);
+            if (edge && edge.score > incomingScore) incomingScore = edge.score;
+        }
         const symptomPenalty = item.component === "Device/Agent" ? 35 : item.component === "Deployment Server" ? 18 : 0;
         const latenessPenalty = (Number.isFinite(anchorTime) && Number.isFinite(item.sortTime) && item.sortTime > anchorTime + 60000)
             ? 90
             : 0;
         const total = item.causalScore + (propagation.score * 0.55) - (incomingScore * 0.65) - symptomPenalty - latenessPenalty;
-        return { item, propagation, incomingScore, total };
-    });
+        candidates.push({ item, propagation, incomingScore, total });
+    }
 
     candidates.sort((a, b) => {
         const diff = b.total - a.total;
@@ -2433,8 +2622,14 @@ function chooseArchitectRoot(all) {
     return candidates[0] || null;
 }
 
-function buildDominoAnalysis(events, blocks) {
-    const normalizedEvents = events.map(e => {
+async function buildDominoAnalysis(events, blocks) {
+    // Normalising an event runs component detection, severity detection, failure-kind
+    // classification and causal scoring — several regexes each. Across a big bundle's
+    // event list that is a long synchronous stretch, so it yields as it goes.
+    const normalizedEvents = [];
+    for (let n = 0; n < events.length; n++) {
+        if ((n % YIELD_CHECK_EVERY) === 0 && n > 0) await yieldIfNeeded();
+        const e = events[n];
         const sql = e.categories.includes('SQL/Database') ? diagnoseSqlIssue(e.text) : null;
         const component = detectComponent(e.file, e.text, e.categories);
         const severity = detectLogSeverity(e.text);
@@ -2455,8 +2650,8 @@ function buildDominoAnalysis(events, blocks) {
             score: e.score
         };
         item.causalScore = scoreCausalCandidate(item);
-        return item;
-    });
+        normalizedEvents.push(item);
+    }
 
     const normalizedBlocks = blocks.map(b => {
         const component = detectComponent(b.file, b.excerpt || b.message, b.categories);
@@ -2496,9 +2691,14 @@ function buildDominoAnalysis(events, blocks) {
 
     if (all.length === 0) return { report: "", root: null };
 
-    const architectChoice = chooseArchitectRoot(all);
+    // The causal search is quadratic, so it runs over DISTINCT failures only (see
+    // collapseDominoRepeats). `all` itself is kept intact for the chronological
+    // rendering below — preRoot/timeline are plain slices and cost nothing.
+    const pool = await collapseDominoRepeats(all);
+
+    const architectChoice = await chooseArchitectRoot(pool);
     let root = architectChoice ? architectChoice.item : all[0];
-    let propagation = architectChoice ? architectChoice.propagation : getPropagationPath(root, all);
+    let propagation = architectChoice ? architectChoice.propagation : getPropagationPath(root, pool);
 
     // AUTHORIZATION-VERDICT RE-ANCHOR: when the strongest candidate is a permission DENIAL
     // (AccessControlException / "Feature permission 'X' is denied" / "Failed access right
@@ -2515,7 +2715,7 @@ function buildDominoAnalysis(events, blocks) {
         if (verdict && verdict !== root) {
             reanchoredFrom = root;
             root = verdict;
-            propagation = getPropagationPath(root, all);
+            propagation = getPropagationPath(root, pool);
         }
     }
 
@@ -2539,7 +2739,8 @@ function buildDominoAnalysis(events, blocks) {
         report += `Root re-anchored: the strongest candidate was the permission DENIAL at ${formatIncidentLocation(reanchoredFrom)}, but a denial is a consequence — the first domino is the permission-resolution VERDICT below ("Granted None permission" = the user's directory groups resolved to NO effective SOTI rights). Every subsequent access check for that session must fail.\n`;
     }
     report += `Selected primary causal candidate:\n`;
-    report += `- ${formatIncidentLocation(root)} | ${root.component} | ${root.severity} | ${root.failureKind} | causal score ${root.causalScore}\n`;
+    report += `- ${formatIncidentLocation(root)} | ${root.component} | ${root.severity} | ${root.failureKind} | causal score ${root.causalScore}`
+        + `${root.repeatCount > 1 ? ` | this failure recurs ${root.repeatCount}x in the logs` : ""}\n`;
     if (root.innermostException) report += `  Innermost exception: ${root.innermostException}\n`;
     if (root.sql) {
         const details = [];
@@ -2561,23 +2762,24 @@ function buildDominoAnalysis(events, blocks) {
         propagation.edges.forEach((edge, idx) => {
             const item = edge.to;
             const role = idx === propagation.edges.length - 1 ? "Possible user-visible symptom" : "Downstream effect";
-            report += `${idx + 1}. ${role}: ${formatIncidentLocation(item)} | ${item.component} | ${item.severity} | ${item.failureKind} | ${formatDuration(edge.deltaMs)} | edge score ${edge.score}\n`;
+            report += `${idx + 1}. ${role}: ${formatIncidentLocation(item)} | ${item.component} | ${item.severity} | ${item.failureKind} | ${formatDuration(edge.deltaMs)} | edge score ${edge.score}`
+                + `${item.repeatCount > 1 ? ` | recurs ${item.repeatCount}x` : ""}\n`;
             report += `   Why linked: ${edge.reason}\n`;
             report += `   Evidence: ${truncateLogLine(item.text, 260)}\n`;
         });
     }
 
     report += `\nArchitect-level master timeline around the chain:\n`;
-    const chainKeys = new Set(propagation.path.map(item => `${item.file}:${item.line}:${item.component}`));
+    const chainKeys = new Set(propagation.path.map(dominoItemKey));
     const timelineSlice = all
         .filter(item => {
-            if (chainKeys.has(`${item.file}:${item.line}:${item.component}`)) return true;
+            if (chainKeys.has(dominoItemKey(item))) return true;
             if (!Number.isFinite(root.sortTime) || !Number.isFinite(item.sortTime)) return false;
             return Math.abs(item.sortTime - root.sortTime) <= 600000;
         })
         .slice(0, 40);
     timelineSlice.forEach(item => {
-        const role = item === root ? "ROOT" : chainKeys.has(`${item.file}:${item.line}:${item.component}`) ? "DOMINO" : "CONTEXT";
+        const role = item === root ? "ROOT" : chainKeys.has(dominoItemKey(item)) ? "DOMINO" : "CONTEXT";
         report += `- [${role}] ${formatIncidentLocation(item)} | ${item.component} | ${item.failureKind} | ${truncateLogLine(item.text, 220)}\n`;
     });
 
@@ -2901,7 +3103,7 @@ async function buildInstallerFailureAnalysis(logs, opts = {}) {
         const { prefilteredIndices, timestampCache, installerEventCache } = log.precomputedIntel;
 
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % _scanChunk === 0 && i > 0) {
+            if (i % scanCheckInterval() === 0 && i > 0) {
                 await yieldIfNeeded();
             }
             const idx = prefilteredIndices[i];
@@ -3273,6 +3475,10 @@ function nearestTimestampAt(timestampCache, idx, maxBack = 60) {
 }
 
 async function extractExceptionBlocksFromLog(log) {
+    return memoizeOnLog(log, 'exceptionBlocks', () => extractExceptionBlocksFromLogUncached(log));
+}
+
+async function extractExceptionBlocksFromLogUncached(log) {
     await precomputeLogIntel(log);
     const name = log.name || "Unknown log";
     const lines = log.lines || (log.content ? log.content.split('\n') : []);
@@ -3285,7 +3491,7 @@ async function extractExceptionBlocksFromLog(log) {
     const MAX_BLOCKS = 800;
 
     for (let i = 0; i < lines.length; i++) {
-        if (i % _scanChunk === 0 && i > 0) {
+        if (i % scanCheckInterval() === 0 && i > 0) {
             await yieldIfNeeded();
         }
         if (blocks.length >= MAX_BLOCKS) break;
@@ -3511,14 +3717,15 @@ function normalizeLogText(content) {
     return String(content).replace(/^\uFEFF/, "").replace(/\u0000/g, "").replace(/\r\n/g, "\n");
 }
 
-function decodeLogBytes(input) {
-    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input || []);
+// Which encoding, and how many bytes of BOM to skip. Split out so the one-shot and the
+// chunked decoders below can never disagree about what a file is.
+function detectLogEncoding(bytes) {
     if (bytes.length >= 2) {
-        if (bytes[0] === 0xFF && bytes[1] === 0xFE) return normalizeLogText(new TextDecoder("utf-16le").decode(bytes.slice(2)));
-        if (bytes[0] === 0xFE && bytes[1] === 0xFF) return normalizeLogText(new TextDecoder("utf-16be").decode(bytes.slice(2)));
+        if (bytes[0] === 0xFF && bytes[1] === 0xFE) return { label: "utf-16le", skip: 2 };
+        if (bytes[0] === 0xFE && bytes[1] === 0xFF) return { label: "utf-16be", skip: 2 };
     }
     if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
-        return normalizeLogText(new TextDecoder("utf-8").decode(bytes.slice(3)));
+        return { label: "utf-8", skip: 3 };
     }
 
     const sample = bytes.slice(0, Math.min(bytes.length, 4000));
@@ -3530,14 +3737,81 @@ function decodeLogBytes(input) {
             else oddNulls++;
         }
     }
-    if (oddNulls > 20 && oddNulls > evenNulls * 3) return normalizeLogText(new TextDecoder("utf-16le").decode(bytes));
-    if (evenNulls > 20 && evenNulls > oddNulls * 3) return normalizeLogText(new TextDecoder("utf-16be").decode(bytes));
+    if (oddNulls > 20 && oddNulls > evenNulls * 3) return { label: "utf-16le", skip: 0 };
+    if (evenNulls > 20 && evenNulls > oddNulls * 3) return { label: "utf-16be", skip: 0 };
+    return { label: "utf-8", skip: 0 };
+}
 
+function decodeLogBytes(input) {
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input || []);
+    const { label, skip } = detectLogEncoding(bytes);
+    const body = skip ? bytes.subarray(skip) : bytes;
     try {
-        return normalizeLogText(new TextDecoder("utf-8", { fatal: false }).decode(bytes));
+        return normalizeLogText(new TextDecoder(label, { fatal: false }).decode(body));
     } catch (e) {
-        return normalizeLogText(new TextDecoder("windows-1252").decode(bytes));
+        return normalizeLogText(new TextDecoder("windows-1252").decode(body));
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * CHUNKED INGEST
+ * ---------------------------------------------------------------------------
+ * Decoding, normalising and line-splitting a file are each ONE V8 call over the
+ * whole text. On a 70 MB log that is a single uninterruptible operation — the
+ * one thing a cooperative yield cannot break up — and it froze the panel for
+ * over a second per file at upload.
+ *
+ * Doing it a few MB at a time yields between chunks, so the longest blocking
+ * step is bounded by the chunk rather than by the file. The result is identical
+ * to decodeLogBytes(...) + split('\n'):
+ *   - TextDecoder({stream:true}) carries partial multi-byte characters across
+ *     chunk boundaries (and the 4 MB chunk is even, so UTF-16 pairs stay intact);
+ *   - a "\r" landing on a boundary is held back so "\r\n" still normalises to
+ *     "\n" instead of surviving as a stray carriage return;
+ *   - the trailing partial line is carried in `tail` and pushed at the end.
+ * ------------------------------------------------------------------------- */
+const INGEST_CHUNK_BYTES = 4 << 20;
+
+async function decodeAndSplitLogBytes(input) {
+    const bytes = input instanceof Uint8Array ? input : new Uint8Array(input || []);
+    if (bytes.length === 0) return { content: "", lines: [] };
+
+    const { label, skip } = detectLogEncoding(bytes);
+    let decoder;
+    try {
+        decoder = new TextDecoder(label, { fatal: false });
+    } catch (e) {
+        decoder = new TextDecoder("windows-1252");
+    }
+
+    let content = "";
+    const lines = [];
+    let tail = "";
+    let pendingCR = false;
+    let atStart = true;
+
+    for (let off = skip; off < bytes.length; off += INGEST_CHUNK_BYTES) {
+        const end = Math.min(bytes.length, off + INGEST_CHUNK_BYTES);
+        const isLast = end >= bytes.length;
+        let text = decoder.decode(bytes.subarray(off, end), { stream: !isLast });
+
+        if (atStart) { text = text.replace(/^\uFEFF/, ""); atStart = false; }
+        text = text.replace(/\u0000/g, "");
+        if (pendingCR) { text = "\r" + text; pendingCR = false; }
+        if (!isLast && text.endsWith("\r")) { text = text.slice(0, -1); pendingCR = true; }
+        text = text.replace(/\r\n/g, "\n");
+
+        content += text;
+        const parts = (tail + text).split("\n");
+        tail = parts.pop();
+        for (let i = 0; i < parts.length; i++) lines.push(parts[i]);
+
+        await yieldIfNeeded();
+    }
+    if (pendingCR) { content += "\r"; tail += "\r"; }
+    lines.push(tail);
+
+    return { content, lines };
 }
 
 async function getLogPanelIntel(log) {
@@ -3568,7 +3842,7 @@ async function getLogPanelIntel(log) {
     }
 
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % _scanChunk === 0 && i > 0) {
+        if (i % scanCheckInterval() === 0 && i > 0) {
             await yieldIfNeeded();
         }
         const idx = prefilteredIndices[i];
@@ -3648,7 +3922,13 @@ async function getLogPanelIntel(log) {
     return log.panelIntel;
 }
 
-function buildWholeLogSegmentMap(lines, segmentCount = 16) {
+// `precomputed` is the log's precomputedIntel. It holds the classification of every line
+// already — reclassifying here re-ran the ~25 forensic regexes over the WHOLE file (on
+// uncapped lines, in one unyielding forEach, twice per file), which on a 70 MB log is tens
+// of seconds of frozen UI for numbers that were sitting in the cache. Walking the
+// prefiltered indices instead is the same result at a fraction of the cost; the standalone
+// scan is kept as a fallback for callers that have no index (tests, ad-hoc line arrays).
+function buildWholeLogSegmentMap(lines, segmentCount = 16, precomputed = null) {
     const totalLines = lines.length;
     if (totalLines === 0) return "";
     const actualSegmentCount = Math.max(1, Math.min(segmentCount, totalLines));
@@ -3663,21 +3943,34 @@ function buildWholeLogSegmentMap(lines, segmentCount = 16) {
         lastEvent: ""
     }));
 
-    lines.forEach((line, idx) => {
-        if (!FAST_FORENSIC_PREFILTER.test(line)) return;
-        const intel = classifyLogLine(line);
-        if (!intel.isForensic || intel.hasStackFrame) return;
-
+    const record = (idx, intel, timestamp) => {
+        if (!intel || !intel.isForensic || intel.hasStackFrame) return;
+        const line = lines[idx];
+        if (line === undefined) return;
         const segIdx = Math.min(actualSegmentCount - 1, Math.floor((idx / Math.max(1, totalLines)) * actualSegmentCount));
         const seg = segments[segIdx];
         seg.forensicCount++;
         intel.categories.forEach(cat => {
             seg.categories[cat] = (seg.categories[cat] || 0) + 1;
         });
-        const label = `Line ${idx + 1}${extractLogTimestamp(line) ? ` @ ${extractLogTimestamp(line)}` : ""}: ${truncateLogLine(line.trim(), 240)}`;
+        const ts = timestamp !== null && timestamp !== undefined ? timestamp : extractLogTimestamp(line);
+        const label = `Line ${idx + 1}${ts ? ` @ ${ts}` : ""}: ${truncateLogLine(line.trim(), 240)}`;
         if (!seg.firstEvent) seg.firstEvent = label;
         seg.lastEvent = label;
-    });
+    };
+
+    if (precomputed && precomputed.prefilteredIndices && precomputed.intelCache) {
+        const { prefilteredIndices, intelCache, timestampCache } = precomputed;
+        for (let i = 0; i < prefilteredIndices.length; i++) {
+            const idx = prefilteredIndices[i];
+            record(idx, intelCache[idx], (timestampCache && timestampCache[idx]) || "");
+        }
+    } else {
+        lines.forEach((line, idx) => {
+            if (!FAST_FORENSIC_PREFILTER.test(line)) return;
+            record(idx, classifyLogLine(line), null);
+        });
+    }
 
     let report = `\n--- WHOLE-LOG COVERAGE MAP (head/middle/tail segment scan) ---\n`;
     segments.forEach(seg => {
@@ -3718,7 +4011,7 @@ async function collectCuratedFailureAnchors(lines, fileName = "", logObj = null)
     const anchors = [];
     const seen = new Set();
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % _scanChunk === 0 && i > 0) {
+        if (i % scanCheckInterval() === 0 && i > 0) {
             await yieldIfNeeded();
         }
         // These anchors are a small set of distinct high-value markers; once we have enough (or have
@@ -3745,10 +4038,14 @@ async function collectCuratedFailureAnchors(lines, fileName = "", logObj = null)
     return anchors;
 }
 
-async function buildCuratedFailureEvidence(content, fileName = "Attached log", precalculatedLines = null) {
+// `logObj` — pass the caller's own log whenever it has one. Falling through to a fresh
+// { name, content, lines } means precomputeLogIntel sees an object with no index and
+// re-scans every line of the file, which on a 50 MB log is seconds of duplicated work
+// for an index the caller was already holding.
+async function buildCuratedFailureEvidence(content, fileName = "Attached log", precalculatedLines = null, logObj = null) {
     if (!content) return "";
     const lines = precalculatedLines || content.split('\n');
-    const log = findLogObject(fileName, content) || { name: fileName, content, lines };
+    const log = logObj || findLogObject(fileName, content) || { name: fileName, content, lines };
     const anchors = await collectCuratedFailureAnchors(lines, fileName, log);
     if (anchors.length === 0) return "";
 
@@ -3818,7 +4115,7 @@ async function extractFailurePhases(lines, logObj = null) {
     const phases = [];
     const seen = new Set();
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % _scanChunk === 0 && i > 0) {
+        if (i % scanCheckInterval() === 0 && i > 0) {
             await yieldIfNeeded();
         }
         const idx = prefilteredIndices[i];
@@ -3848,7 +4145,7 @@ async function collectDistinctSqlFacts(lines, logObj = null) {
     const facts = [];
     const seen = new Set();
     for (let i = 0; i < prefilteredIndices.length; i++) {
-        if (i % _scanChunk === 0 && i > 0) {
+        if (i % scanCheckInterval() === 0 && i > 0) {
             await yieldIfNeeded();
         }
         const idx = prefilteredIndices[i];
@@ -3868,10 +4165,10 @@ async function collectDistinctSqlFacts(lines, logObj = null) {
     return facts.slice(0, 25);
 }
 
-async function buildPrecisionLogBrief(content, fileName = "Attached log", precalculatedLines = null) {
+async function buildPrecisionLogBrief(content, fileName = "Attached log", precalculatedLines = null, logObj = null) {
     if (!content) return "";
     const lines = precalculatedLines || content.split('\n');
-    const log = findLogObject(fileName, content) || { name: fileName, content, lines };
+    const log = logObj || findLogObject(fileName, content) || { name: fileName, content, lines };
     await precomputeLogIntel(log);
     const { prefilteredIndices } = log.precomputedIntel;
     
@@ -4296,7 +4593,7 @@ async function buildLogPatternProfile(logs) {
         const { prefilteredIndices, intelCache, signatureCache } = log.precomputedIntel;
 
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % _scanChunk === 0 && i > 0) {
+            if (i % scanCheckInterval() === 0 && i > 0) {
                 await yieldIfNeeded();
             }
             const idx = prefilteredIndices[i];
@@ -4399,7 +4696,7 @@ async function buildInstallerPatternSummary(logs) {
         const { prefilteredIndices } = log.precomputedIntel;
 
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % _scanChunk === 0 && i > 0) await yieldIfNeeded();
+            if (i % scanCheckInterval() === 0 && i > 0) await yieldIfNeeded();
             const idx = prefilteredIndices[i];
             const line = lines[idx];
 
@@ -8969,7 +9266,7 @@ async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 
     // The manifest and the pattern-profile / cross-log incident index are reference/secondary
     // material; they are placed AFTER the digest and the incident index is BOUNDED, so the answer
     // evidence leads and is never the part a downstream context trim eats.
-    const leadHeader = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n`;
+    const leadHeader = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n${multiFileCoverageDirective(logs)}`;
     const manifestSection = await buildFileManifest(ranked, lastSentAt, { compactAfter: small ? 10 : 24 });
     let secondary = await buildLogPatternProfile(logs);
     secondary += await buildCrossLogIncidentIndex(logs, { patternMode: false });
@@ -9389,7 +9686,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
         const MAX_EVENTS_PER_LOG = 6000;
         let logEventCount = 0;
         for (let i = 0; i < prefilteredIndices.length; i++) {
-            if (i % _scanChunk === 0 && i > 0) {
+            if (i % scanCheckInterval() === 0 && i > 0) {
                 await yieldIfNeeded();
             }
             if (logEventCount >= MAX_EVENTS_PER_LOG) break;
@@ -9525,7 +9822,7 @@ async function buildCrossLogIncidentIndex(logs, options = {}) {
     const dominoBlocks = exceptionBlocks.length > 200
         ? [...exceptionBlocks].sort((a, b) => b.score - a.score).slice(0, 200)
         : exceptionBlocks;
-    const domino = buildDominoAnalysis(dominoEvents, dominoBlocks);
+    const domino = await buildDominoAnalysis(dominoEvents, dominoBlocks);
     const preferSqlBlock = largeInstallerLogs.length === logs.length && topSqlBlock;
     const deterministicRoot = preferSqlBlock ? {
             source: "parsed SQL/installer block",
@@ -9845,7 +10142,7 @@ async function buildQueryFocusedEvidence(log, matcher, budget) {
     const hits = [];
     const sigCounts = new Map();
     for (let i = 0; i < lines.length; i++) {
-        if (i % 4000 === 0 && i > 0) await yieldIfNeeded();
+        if (i % scanCheckInterval() === 0 && i > 0) await yieldIfNeeded();
         const line = lines[i];
         if (!line || line.length < 3) continue;
         const scan = line.length > 600 ? line.slice(0, 600) : line;
@@ -9907,7 +10204,7 @@ async function collectFocusLines(logs, matcher, weights, terms) {
         // reaching it. Periodic truncation-by-score keeps the strongest evidence wherever it sits.
         let fileHits = [];
         for (let i = 0; i < lines.length; i++) {
-            if (i % 4000 === 0 && i > 0) await yieldIfNeeded();
+            if (i % scanCheckInterval() === 0 && i > 0) await yieldIfNeeded();
             const line = lines[i];
             if (!line || line.length < 3) continue;
             const scan = line.length > 400 ? line.slice(0, 400) : line;
@@ -10013,14 +10310,30 @@ async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weigh
         }
     }
 
-    // PHASE 2 — forensic detail for the top-ranked files with the remaining budget.
+    // PHASE 2 — forensic detail for the top-ranked files, SHARING the remaining budget.
+    //
+    // This used to hand the first file everything that was left (up to perFileCap) and
+    // then find nothing above perFileMin for the second, so a two-file upload produced
+    // expanded evidence for ONE file and a "not expanded" note for the other. The model
+    // then answered from the single file it could actually see and reported it as the
+    // whole picture — the user attached two logs and got one analysed.
+    //
+    // So the room is divided between the files that can each be given a usable slice.
+    // Ranking still decides WHICH files get expanded when there are more files than
+    // slices (a 50-file DebugReport cannot fit), but nothing that fits is starved by a
+    // file that happened to sort first. A single-file upload still gets the whole
+    // budget, because then there is only one slice.
     const perFileCap = small ? 3200 : 15000;
     const perFileMin = small ? 700 : 2500;
+    const budgetLeft = () => Math.max(0, realBudget - spent);
+    const expandCount = Math.max(1, Math.min(ranked.length, Math.floor(budgetLeft() / perFileMin)));
     const deferred = [];
-    for (const log of ranked) {
-        const remaining = realBudget - spent;
-        if (ctx.length > 0 && remaining < perFileMin) { deferred.push(log); continue; }
-        const limit = Math.min(perFileCap, Math.max(perFileMin, remaining));
+    for (let idx = 0; idx < ranked.length; idx++) {
+        const log = ranked[idx];
+        if (idx >= expandCount) { deferred.push(log); continue; }
+        // Recomputed each time so budget a file did not use rolls forward to the next.
+        const share = Math.floor(budgetLeft() / (expandCount - idx));
+        const limit = Math.min(perFileCap, Math.max(perFileMin, share));
         const snippet = await getSmartLogSnippet(log.content || "", limit, log.name || "Attached log", log.lines, log, "");
         ctx += `\n=== FILE: ${log.name || "Attached log"} (${(log.content || "").length} chars) ===\n${snippet}\n=== END: ${log.name || "Attached log"} ===\n`;
         spent += snippet.length;
@@ -10045,9 +10358,12 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     // The installer FAILURE ANALYSIS leads (it carries the deterministic root-cause anchor),
     // so if anything is trimmed the failing CustomAction always survives.
     if (totalLines >= 5000 && isInstallerLogContent(fileName, content)) {
-        let focused = await buildInstallerFailureAnalysis([{ name: fileName, content, lines }]);
-        focused += await buildInstallerPatternSummary([{ name: fileName, content, lines }]);
-        focused += await buildLogPatternProfile([{ name: fileName, content, lines }]);
+        // Pass `log`, never a throwaway {name, content, lines}: a fresh object carries no
+        // precomputedIntel, so each of these three builders re-scanned every line of the
+        // file from scratch — three whole-file sweeps for an index already in hand.
+        let focused = await memoizeOnLog(log, 'installerFailure', () => buildInstallerFailureAnalysis([log]));
+        focused += await memoizeOnLog(log, 'installerPattern', () => buildInstallerPatternSummary([log]));
+        focused += await memoizeOnLog(log, 'patternProfile', () => buildLogPatternProfile([log]));
         // On small/CPU models the deterministic anchor already pinpoints the failing action,
         // so a few KB of evidence is plenty. Hard-cap well below the raw budget: a smaller
         // prompt means far less CPU prefill — the difference between a ~1-minute and a
@@ -10060,8 +10376,8 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     }
 
     const parsedBlocks = await extractExceptionBlocksFromLog(log);
-    const installerReport = await buildInstallerFailureAnalysis([log]);
-    const curatedEvidence = await buildCuratedFailureEvidence(content, fileName, lines);
+    const installerReport = await memoizeOnLog(log, 'installerFailure', () => buildInstallerFailureAnalysis([log]));
+    const curatedEvidence = await memoizeOnLog(log, 'curatedEvidence', () => buildCuratedFailureEvidence(content, fileName, lines, log));
 
     const forensicEntries = [];
     const seenLineNums = new Set();
@@ -10077,6 +10393,11 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
 
     let i = 0;
     let prefilterIdx = 0;
+    // Count ITERATIONS, not line numbers. `i` jumps straight to the next prefiltered
+    // line, so `i % _scanChunk === 0` almost never lined up — the loop yielded on a
+    // coincidence rather than on a schedule and could run for seconds without giving
+    // the panel a frame.
+    let scanned = 0;
 
     // When the context-entry budget is exhausted we STOP CAPTURING raw context but KEEP
     // SCANNING for candidates and signature stats. The old hard `break` made the whole-file
@@ -10085,7 +10406,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     let captureExhausted = false;
 
     while (i < totalLines) {
-        if (i % _scanChunk === 0 && i > 0) {
+        if ((++scanned % YIELD_CHECK_EVERY) === 0) {
             await yieldIfNeeded();
         }
         // Safety valve for pathological inputs (data-export CSVs where every row is "forensic"):
@@ -10139,25 +10460,35 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
                 sigRepeats = existing.count;
             }
 
-            rootCandidates.push({
-                lineNum: i + 1,
-                timestamp: timestamp,
-                sortTime: parseLogTimestampForSort(timestamp),
-                text: line.trim(),
-                sig: sig || "",
-                categories: intel.categories,
-                hasException: intel.hasException,
-                severityToken: intel.severityToken,
-                exceptionClasses: intel.exceptionClasses,
-                keywordHits: intel.keywordHits,
-                score: scoreRootCauseCandidate({
+            // Only the first few occurrences of a signature can ever matter here. The
+            // ranking keeps the top 12 and scoreRootCauseCandidate awards an EARLINESS
+            // bonus, so the first instance of a repeated error always outscores its
+            // later twins — the 4th+ copy cannot enter the ranking, and the domino model
+            // collapses duplicates anyway. Keeping them all meant a noisy server log
+            // built 25,000 candidate objects (each with a timestamp parse and a full
+            // scoring pass) to use twelve. The signature stats above still count EVERY
+            // occurrence, so the "Nx repeated" totals are unaffected.
+            if (!sig || sig.length <= 8 || sigRepeats <= 3) {
+                rootCandidates.push({
                     lineNum: i + 1,
-                    text: line,
+                    timestamp: timestamp,
+                    sortTime: parseLogTimestampForSort(timestamp),
+                    text: line.trim(),
+                    sig: sig || "",
                     categories: intel.categories,
                     hasException: intel.hasException,
-                    keywordHits: intel.keywordHits
-                })
-            });
+                    severityToken: intel.severityToken,
+                    exceptionClasses: intel.exceptionClasses,
+                    keywordHits: intel.keywordHits,
+                    score: scoreRootCauseCandidate({
+                        lineNum: i + 1,
+                        text: line,
+                        categories: intel.categories,
+                        hasException: intel.hasException,
+                        keywordHits: intel.keywordHits
+                    })
+                });
+            }
         }
 
         // === EXCEPTION CHAIN TRACKER ===
@@ -10284,7 +10615,7 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     const rankedRootCandidates = rootCandidates
         .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
         .slice(0, 12);
-    const fileDomino = buildDominoAnalysis(
+    const fileDomino = await buildDominoAnalysis(
         rootCandidates.filter(e => !e.chronic).map(event => ({ ...event, file: fileName })),
         parsedBlocks
     );
@@ -10292,58 +10623,76 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
     // === BUILD FORENSIC REPORT WITH INTELLIGENCE SUMMARY ===
     let forensicReport = "";
     if (compressedEntries.length > 0) {
-        forensicReport = `\n\n=== FORENSIC INCIDENT REPORT (WHOLE-FILE SCAN) ===\n`;
-        forensicReport += `Whole-log scan complete: inspected every line (${totalLines} lines, ${content.length} characters). Found ${forensicEntries.length} forensic entries (${compressedEntries.length} after adjacency compression).\n`;
-        if (firstErrorLine && lastErrorLine) {
-            forensicReport += `Error window: Line ${firstErrorLine} through Line ${lastErrorLine}.\n`;
-        }
-        if (curatedEvidence) {
-            forensicReport += curatedEvidence;
-        }
-        // Intelligence Summary
-        const cats = Object.entries(errorTypeCounts).sort((a, b) => b[1] - a[1]);
-        if (cats.length > 0) {
-            forensicReport += `\n--- ERROR CATEGORY BREAKDOWN ---\n`;
-            cats.forEach(([cat, count]) => {
-                forensicReport += `  ${cat}: ${count} occurrence(s)\n`;
-            });
-            forensicReport += `--- END BREAKDOWN ---\n`;
-        }
+        /* ------------------------------------------------------------------
+         * SECTIONS ARE FITTED BY PRIORITY, NOT CONCATENATED AND THEN CUT.
+         * ------------------------------------------------------------------
+         * This report is assembled far larger than `limit` and used to be
+         * trimmed by keeping the head and the tail and dropping the middle.
+         * That is blind: whichever sections happened to land in the middle
+         * vanished, and whichever happened to be verbose (a dozen exception
+         * blocks each embedding a DeviceNotifyMsg JSON payload) consumed the
+         * head. On a real DS log it dropped the causal model and the ranking
+         * that names the root cause, so the model fell back to the earliest
+         * exception it could still see — reporting a downstream
+         * ArgumentNullException instead of the AuthenticationException /
+         * "A call to SSPI failed" that actually caused the failure.
+         *
+         * Sections are now emitted in priority order and each one is either
+         * included WHOLE or not at all, so a finding is never half-present.
+         * The deterministic findings come first and always fit; the bulky
+         * inventories (category counts, keyword sweep, coverage map) are last
+         * and are what gets dropped when the budget is tight — which is
+         * exactly what they are for.
+         * ---------------------------------------------------------------- */
+        const sections = [];
+        const addSection = (text) => { if (text && text.trim()) sections.push(text); };
 
-        forensicReport += renderSignalSummary(signalSummary, "FILE EXCEPTION / ERROR KEYWORD SWEEP");
+        // Each CORE finding is bounded to a share of the budget by dropping whole trailing
+        // ITEMS. Without this the three of them compete: a log with a dozen fat exception
+        // blocks starved the causal model entirely, and "all or nothing" per section then
+        // dropped the very thing that names the root cause. A share each means all three
+        // are always present — each one complete down to the item it could fit.
+        const coreCap = Math.max(900, Math.floor(limit * 0.28));
+        const fitItems = (head, items, foot, omitted) => {
+            let s = head;
+            let used = head.length + foot.length;
+            let shown = 0;
+            for (const item of items) {
+                if (used + item.length > coreCap && shown > 0) break;
+                s += item;
+                used += item.length;
+                shown++;
+            }
+            if (shown < items.length) s += omitted(items.length - shown);
+            return s + foot;
+        };
 
-        forensicReport += buildWholeLogSegmentMap(lines, 16);
-
-        if (installerReport) {
-            forensicReport += installerReport;
-        }
+        if (curatedEvidence) addSection(curatedEvidence);
+        if (installerReport) addSection(installerReport);
 
         if (rankedRootCandidates.length > 0) {
-            forensicReport += `\n--- ROOT-CAUSE CANDIDATE RANKING (computed from the whole log) ---\n`;
-            rankedRootCandidates.forEach((event, idx) => {
-                forensicReport += `${idx + 1}. Line ${event.lineNum}${event.timestamp ? ` @ ${event.timestamp}` : ""} [score ${event.score}; ${event.categories.join(', ') || 'Unclassified'}] ${event.text}\n`;
-            });
-            forensicReport += `Guidance: the AI must validate the top candidate against chronology and downstream symptoms before declaring root cause.\n`;
-            forensicReport += `--- END ROOT-CAUSE CANDIDATES ---\n`;
-        }
-
-        if (fileDomino.report) {
-            forensicReport += `\n--- FILE-LEVEL CAUSAL / DOMINO MODEL ---\n`;
-            forensicReport += fileDomino.report.replace(/--- CAUSAL DOMINO ANALYSIS \(deterministic chronology \+ component model\) ---\n/, "");
-            forensicReport += `--- END FILE-LEVEL CAUSAL / DOMINO MODEL ---\n`;
+            const items = rankedRootCandidates.map((event, idx) =>
+                `${idx + 1}. Line ${event.lineNum}${event.timestamp ? ` @ ${event.timestamp}` : ""} [score ${event.score}; ${event.categories.slice(0, 4).join(', ') || 'Unclassified'}] ${truncateLogLine(event.text, 200)}\n`);
+            addSection(fitItems(
+                `\n--- ROOT-CAUSE CANDIDATE RANKING (computed from the whole log — highest-scoring first) ---\n`,
+                items,
+                `Guidance: the AI must validate the top candidate against chronology and downstream symptoms before declaring root cause.\n--- END ROOT-CAUSE CANDIDATES ---\n`,
+                (n) => `… [${n} lower-scoring candidate(s) omitted]\n`));
         }
 
         if (parsedBlocks.length > 0) {
             const rankedBlocks = [...parsedBlocks]
                 .sort((a, b) => b.score - a.score || a.startLine - b.startLine)
-                .slice(0, 20);
-            forensicReport += `\n--- PARSED EXCEPTION / SQL BLOCKS (innermost-cause intelligence) ---\n`;
-            rankedBlocks.forEach((block, idx) => {
-                forensicReport += `${idx + 1}. Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [score ${block.score}; ${block.categories.join(', ') || 'Unclassified'}]\n`;
-                forensicReport += `   Outer: ${block.outerException || "Not detected"} | Innermost: ${block.innermostException || "Not detected"}\n`;
-                forensicReport += `   Message: ${block.message}\n`;
-                if (block.throwingFrame) forensicReport += `   Throwing frame: ${block.throwingFrame}\n`;
-                if (block.originatingFrame) forensicReport += `   Originating frame: ${block.originatingFrame}\n`;
+                .slice(0, 12);
+            const items = rankedBlocks.map((block, idx) => {
+                let s = `${idx + 1}. Lines ${block.startLine}-${block.endLine}${block.timestamp ? ` @ ${block.timestamp}` : ""} [score ${block.score}; ${block.categories.slice(0, 4).join(', ') || 'Unclassified'}]\n`;
+                s += `   Outer: ${block.outerException || "Not detected"} | Innermost: ${block.innermostException || "Not detected"}\n`;
+                // Bounded: a DS exception message can embed a whole DeviceNotifyMsg JSON
+                // payload. The exception identity and its opening text are the evidence;
+                // the payload dump is not.
+                s += `   Message: ${truncateLogLine(block.message, 220)}\n`;
+                if (block.throwingFrame) s += `   Throwing frame: ${block.throwingFrame}\n`;
+                if (block.originatingFrame) s += `   Originating frame: ${block.originatingFrame}\n`;
                 if (block.sql) {
                     const details = [];
                     if (block.sql.number) details.push(`Number ${block.sql.number}`);
@@ -10353,52 +10702,114 @@ async function getSmartLogSnippet(content, limit = 300000, fileName = "Attached 
                     if (block.sql.database) details.push(`Database ${block.sql.database}`);
                     if (block.sql.procedure) details.push(`Procedure ${block.sql.procedure}`);
                     if (block.sql.line) details.push(`SQL line ${block.sql.line}`);
-                    forensicReport += `   SQL diagnosis: ${block.sql.type}${details.length ? ` (${details.join('; ')})` : ""}\n`;
+                    s += `   SQL diagnosis: ${block.sql.type}${details.length ? ` (${details.join('; ')})` : ""}\n`;
                 }
+                return s;
             });
-            forensicReport += `--- END PARSED EXCEPTION / SQL BLOCKS ---\n`;
+            addSection(fitItems(
+                `\n--- PARSED EXCEPTION / SQL BLOCKS (innermost-cause intelligence, highest-scoring first) ---\n`,
+                items,
+                `--- END PARSED EXCEPTION / SQL BLOCKS ---\n`,
+                (n) => `… [${n} lower-scoring exception block(s) omitted]\n`));
+        }
+
+        if (fileDomino.report) {
+            // The domino report ends with a 40-entry "master timeline". Inside a PER-FILE
+            // section that is pure duplication — this report already carries its own
+            // chronological timeline and coverage map. Keep the conclusion (root, chain,
+            // why each link holds); the cross-log incident index still renders the full
+            // version, where it is not a duplicate.
+            let dominoBody = fileDomino.report
+                .replace(/--- CAUSAL DOMINO ANALYSIS \(deterministic chronology \+ component model\) ---\n/, "");
+            const timelineAt = dominoBody.indexOf('\nArchitect-level master timeline around the chain:');
+            if (timelineAt > 0) {
+                dominoBody = dominoBody.slice(0, timelineAt)
+                    + `\n[Master timeline omitted here — see the chronological timeline below and the cross-log incident index.]\n`;
+            }
+            // Same reasoning for the "events immediately before the root" preamble: it is
+            // chronological context this report already carries, and here it sits AHEAD of
+            // the conclusion, so it is the part that pushes the selected root and its chain
+            // out of the section's share of the budget.
+            dominoBody = dominoBody.replace(/Events immediately before selected root candidate:\n(?:- .*\n)+/, "");
+            addSection(`\n--- FILE-LEVEL CAUSAL / DOMINO MODEL ---\n${dominoBody}--- END FILE-LEVEL CAUSAL / DOMINO MODEL ---\n`);
         }
 
         if (topSignatures.length > 0) {
-            forensicReport += `\n--- DISTINCT FAILURE SIGNATURES (deduplicated across the whole log) ---\n`;
+            let s = `\n--- DISTINCT FAILURE SIGNATURES (deduplicated across the whole log) ---\n`;
             topSignatures.slice(0, 15).forEach(sig => {
-                forensicReport += `- ${sig.count}x | Lines ${sig.firstLine}-${sig.lastLine}${sig.firstTimestamp ? ` | First ${sig.firstTimestamp}` : ""}${sig.lastTimestamp && sig.lastTimestamp !== sig.firstTimestamp ? ` | Last ${sig.lastTimestamp}` : ""} | ${sig.categories.join(', ') || 'Unclassified'} | ${sig.sample}\n`;
+                s += `- ${sig.count}x | Lines ${sig.firstLine}-${sig.lastLine}${sig.firstTimestamp ? ` | First ${sig.firstTimestamp}` : ""}${sig.lastTimestamp && sig.lastTimestamp !== sig.firstTimestamp ? ` | Last ${sig.lastTimestamp}` : ""} | ${sig.categories.join(', ') || 'Unclassified'} | ${truncateLogLine(sig.sample, 200)}\n`;
             });
-            forensicReport += `--- END DISTINCT FAILURE SIGNATURES ---\n`;
+            s += `--- END DISTINCT FAILURE SIGNATURES ---\n`;
+            addSection(s);
         }
 
-        const precisionBrief = await buildPrecisionLogBrief(content, fileName, lines);
+        const precisionBrief = await memoizeOnLog(log, 'precisionBrief', () => buildPrecisionLogBrief(content, fileName, lines, log));
         if (precisionBrief) {
-            forensicReport += precisionBrief;
+            addSection(precisionBrief);
         } else {
-            forensicReport += `\n--- CHRONOLOGICAL FORENSIC TIMELINE (top ${Math.min(compressedEntries.length, 120)} lines) ---\n`;
+            let s = `\n--- CHRONOLOGICAL FORENSIC TIMELINE (top ${Math.min(compressedEntries.length, 120)} lines) ---\n`;
             let lastLineNum = -10;
             compressedEntries.slice(0, 120).forEach(entry => {
-                if (entry.lineNum - lastLineNum > 1) {
-                    forensicReport += `\n[Line ${entry.lineNum}]\n`;
-                }
-                forensicReport += `${entry.text}\n`;
+                if (entry.lineNum - lastLineNum > 1) s += `\n[Line ${entry.lineNum}]\n`;
+                s += `${truncateLogLine(entry.text, 300)}\n`;
                 lastLineNum = entry.lineNum;
             });
             if (compressedEntries.length > 120) {
-                forensicReport += `\n... [${compressedEntries.length - 120} additional forensic lines omitted — use ROOT-CAUSE CANDIDATES and PARSED EXCEPTION blocks above]\n`;
+                s += `\n... [${compressedEntries.length - 120} additional forensic lines omitted — use ROOT-CAUSE CANDIDATES and PARSED EXCEPTION blocks above]\n`;
             }
-            forensicReport += `--- END CHRONOLOGICAL FORENSIC TIMELINE ---`;
+            s += `--- END CHRONOLOGICAL FORENSIC TIMELINE ---\n`;
+            addSection(s);
         }
-        forensicReport += `\n=== END FORENSIC INCIDENT REPORT ===`;
+
+        // --- BULK REFERENCE: counts and inventories. Last on purpose — these are the
+        // sections it is safe to lose, and they are the widest in the report.
+        const cats = Object.entries(errorTypeCounts).sort((a, b) => b[1] - a[1]);
+        if (cats.length > 0) {
+            let s = `\n--- ERROR CATEGORY BREAKDOWN ---\n`;
+            cats.forEach(([cat, count]) => { s += `  ${cat}: ${count} occurrence(s)\n`; });
+            s += `--- END BREAKDOWN ---\n`;
+            addSection(s);
+        }
+        addSection(renderSignalSummary(signalSummary, "FILE EXCEPTION / ERROR KEYWORD SWEEP"));
+        addSection(buildWholeLogSegmentMap(lines, 16, log.precomputedIntel));
+
+        // Fit: header always, then whole sections in priority order while they fit.
+        const header = `\n\n=== FORENSIC INCIDENT REPORT (WHOLE-FILE SCAN) ===\n`
+            + `Whole-log scan complete: inspected every line (${totalLines} lines, ${content.length} characters). Found ${forensicEntries.length} forensic entries (${compressedEntries.length} after adjacency compression).\n`
+            + (firstErrorLine && lastErrorLine ? `Error window: Line ${firstErrorLine} through Line ${lastErrorLine}.\n` : "");
+        const footer = `\n=== END FORENSIC INCIDENT REPORT ===`;
+
+        forensicReport = header;
+        let used = header.length + footer.length;
+        let dropped = 0;
+        for (const section of sections) {
+            if (used + section.length <= limit) {
+                forensicReport += section;
+                used += section.length;
+            } else {
+                dropped++;
+            }
+        }
+        if (dropped > 0) {
+            forensicReport += `\n[${dropped} lower-priority reference section(s) omitted to fit the model's context window. Everything above is a WHOLE-FILE result: the root-cause ranking, exception blocks and causal model are complete, not sampled.]\n`;
+        }
+        forensicReport += footer;
     } else {
         forensicReport = `\n\n[FORENSIC WHOLE-FILE SCAN COMPLETE: inspected every line (${totalLines} lines, ${content.length} characters). No exceptions, warnings, or error-level entries detected in this log file.]`;
-        forensicReport += buildWholeLogSegmentMap(lines, 16);
+        forensicReport += buildWholeLogSegmentMap(lines, 16, log.precomputedIntel);
     }
 
     const headSize = 30000;
     const tailSize = 100000;
+    // No blind head/tail cut here any more — the section fitter above already kept the
+    // report inside `limit` by dropping WHOLE low-priority sections. This backstop only
+    // fires for the "no forensic entries" branch, which is a couple of hundred chars plus
+    // a coverage map, and it trims from the end so the scan verdict always survives.
     if (forensicReport.length > limit) {
-        const keepHead = Math.floor(limit * 0.65);
-        const keepTail = Math.floor(limit * 0.30);
-        forensicReport = `${forensicReport.slice(0, keepHead)}\n\n[FORENSIC REPORT TRUNCATED FOR MODEL CONTEXT: root-cause ranking, parsed exception blocks, segment map, and distinct signatures above are whole-file summaries; middle timeline entries omitted only after deterministic whole-file analysis.]\n\n${forensicReport.slice(-keepTail)}`;
+        forensicReport = forensicReport.slice(0, Math.max(0, limit - 120))
+            + `\n[Coverage map truncated to fit the model's context window.]\n`;
     }
-    
+
     // If the file is small enough, just return the whole thing plus the report. The final
     // assembleSnippet keeps the query-focused evidence FIRST and enforces `limit`, so a bundle of
     // many files can no longer overflow the model's context window with one file's full content.
@@ -13942,7 +14353,8 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
                     // Lead with the reported symptom (tiny + protected from end-trim) so the model
                     // correlates the evidence with what the customer actually reported instead of
                     // grabbing an unrelated high-severity error.
-                    let leadHeader = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]`;
+                    let leadHeader = `\n\n[DIAGNOSTIC DATA — ${c.logs.length} LOG FILE(S) ATTACHED]\n`;
+                    leadHeader += multiFileCoverageDirective(c.logs);
                     if (summaryText && summaryText !== 'NO SUMMARY PROVIDED') {
                         leadHeader += `\n[REPORTED ISSUE / CASE SYMPTOM — correlate the evidence with THIS]: ${summaryText.slice(0, 600)}\n`;
                     }
@@ -14758,9 +15170,14 @@ async function readLogUpload(file) {
     }
 
     const buffer = await file.arrayBuffer();
+    // Chunked so a multi-tens-of-MB file cannot block the panel in one decode.
+    // `lines` is carried through with the text: it is produced by the same pass,
+    // so handleFiles does not have to split the whole string again afterwards.
+    const { content, lines } = await decodeAndSplitLogBytes(buffer);
     return [{
         name: file.name,
-        content: decodeLogBytes(buffer),
+        content,
+        lines,
         size: file.size
     }];
 }
@@ -14817,8 +15234,12 @@ const handleFiles = async (files) => {
 
                 let ingestedBytes = 0;
                 for (const entry of entries) {
-                    const content = normalizeLogText(entry.content || "");
-                    const lines = content ? content.split('\n') : [];
+                    // readLogUpload already decoded AND normalised in one chunked pass and
+                    // handed back the lines from it. Re-normalising is a no-op over the whole
+                    // string and re-splitting is a second full copy — both are single
+                    // uninterruptible calls, so on a large file they were pure added freeze.
+                    const content = entry.lines ? (entry.content || "") : normalizeLogText(entry.content || "");
+                    const lines = entry.lines || (content ? content.split('\n') : []);
                     ingestedBytes += content.length;
                     const log = {
                         name: entry.name,
