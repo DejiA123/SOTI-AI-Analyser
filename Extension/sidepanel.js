@@ -15818,8 +15818,14 @@ const handleFiles = async (files) => {
         // Reveal the uploaded files. Logs is a section INSIDE Case Info now, so opening
         // it while Case Info itself is shut would expand something nobody can see —
         // the parent has to come open first.
+        //
+        // Both tests read the BODY's display, not the panel's 'collapsed' class. The class is
+        // only ever put there by toggleR/Analyse Now, but the markup ships the section already
+        // shut (`<div class="subsec-pb" id="bodyR" style="display: none">`) with no class on the
+        // panel — so on the first upload of a session the class test was false, the branch never
+        // ran, and the files the user had just dropped stayed hidden behind a collapsed section.
         if ($('bodyL') && $('bodyL').style.display === 'none') $('toggleL').click();
-        if ($('panelR') && $('panelR').classList.contains('collapsed') && typeof $('toggleR').onclick === 'function') {
+        if ($('bodyR') && $('bodyR').style.display === 'none' && typeof $('toggleR').onclick === 'function') {
             $('toggleR').onclick();
         }
     } else {
@@ -16086,6 +16092,16 @@ $('btnAnalyse').onclick = async () => {
     b.style.display = 'none';
     $('iconR').textContent = '▶';
     $('panelR').classList.add('collapsed');
+
+    // ...and the Case Info panel it lives inside, so the user LANDS ON THE CHAT and watches the
+    // report stream in. Collapsing only the Logs sub-section left Case Info open above it, which
+    // on a side panel pushes the chat off-screen: the analysis ran for minutes with nothing to
+    // look at but the form the user had just left. Same move cleanUpMeetingNotes makes.
+    if ($('bodyL') && $('bodyL').style.display !== 'none') {
+        $('bodyL').style.display = 'none';
+        $('iconL').textContent = '▶';
+        $('panelL').classList.add('collapsed');
+    }
 
     // Yield control to let the browser paint the "Analysing logs..." progress indicator
     await paintYield();
