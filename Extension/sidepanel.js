@@ -770,7 +770,7 @@ function meetingNotesAreEmpty(value) {
 
 function getDefaultCI() {
     return {
-        caseNum: '', sotiVer: '', platform: '', agentVer: '', caseAge: '',
+        caseNum: '', sotiVer: '', jiraNum: '', platform: '', agentVer: '', caseAge: '',
         enviro: '', dsCfg: '', affDev: '',
         scrubAccount: '', scrubCustomer: '',
         // The headings only — the worked example is shown behind them by the ghost layer
@@ -1009,6 +1009,7 @@ function buildCaseCiFromForm() {
     return {
         caseNum: $('caseNum').value,
         sotiVer: $('sotiVer').value,
+        jiraNum: $('jiraNum').value,
         platform: $('platform').value,
         agentVer: $('agentVer').value,
         caseAge: $('caseAge').value,
@@ -1362,6 +1363,7 @@ function switchCase(id) {
         // Update UI Fields
         $('caseNum').value = c.ci.caseNum || '';
         $('sotiVer').value = c.ci.sotiVer || '';
+        $('jiraNum').value = c.ci.jiraNum || '';
         $('platform').value = c.ci.platform || '';
         $('agentVer').value = c.ci.agentVer || '';
         $('caseAge').value = c.ci.caseAge || '';
@@ -10928,7 +10930,7 @@ function updateFieldValidation(id) {
 
 function updateAllValidations() {
     [
-        'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer',
+        'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
         'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
         'issueSummary', 'meetingNotes', 'emailChain',
         'jiraExpected', 'jiraImpact', 'jiraRepro'
@@ -14912,6 +14914,7 @@ function exportSession() {
     txt += `Account: ${$('scrubAccount').value || 'N/A'}\n`;
     txt += `Customer: ${$('scrubCustomer').value || 'N/A'}\n`;
     txt += `SOTI Version: ${$('sotiVer').value || 'N/A'}\n`;
+    txt += `JIRA Number: ${$('jiraNum').value || 'N/A'}\n`;
     txt += `Platform: ${$('platform').value || 'N/A'}\n\n`;
     txt += `MEETING NOTES:\n${$('meetingNotes').value || 'N/A'}\n\n`;
     txt += `------------------------------------------\n`;
@@ -14938,7 +14941,7 @@ $('chatIn').oninput = function() { this.style.height = 'auto'; this.style.height
 $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
 
 [
-    'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer',
+    'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
     'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
     'issueSummary', 'meetingNotes', 'emailChain',
     'jiraExpected', 'jiraImpact', 'jiraRepro', 'jiraPriority'
@@ -14995,8 +14998,9 @@ $('btnSyncSF').onclick = async () => {
             await new Promise(r => setTimeout(r, 500));
             data = await chrome.tabs.sendMessage(tab.id, { action: "GET_SALESFORCE_DATA" });
         }
-        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge)) {
+        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge || data.jiraNumber)) {
             if (data.caseNumber) $('caseNum').value = data.caseNumber;
+            if (data.jiraNumber) $('jiraNum').value = data.jiraNumber;
             if (data.accountName) $('scrubAccount').value = data.accountName;
             if (data.contactName) $('scrubCustomer').value = data.contactName;
             

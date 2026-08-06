@@ -421,6 +421,8 @@ async function scrapeSalesforce(options = {}) {
         // rather than inferred from License Type (which only ever guessed at it).
         mcHosted: '',
         caseAge: '',
+        // The engineering defect raised off this case (e.g. MCMR-42071).
+        jiraNumber: '',
         emailChain: '',
         feedItemCount: 0,
         feedLoad: null      // { items, rounds, reason } — see loadEntireFeed
@@ -475,7 +477,27 @@ async function scrapeSalesforce(options = {}) {
         if (text.includes('case age') && !data.caseAge) {
             data.caseAge = getFieldValue(label);
         }
+        // The engineering defect. "JIRA Number" is the label on the SOTI case layout;
+        // the rest are the variants seen on older/renamed ones. Matched on the LABEL,
+        // never on the value's shape, so a case number or an asset tag cannot win.
+        if (!data.jiraNumber && (
+            text.includes('jira') || text.includes('mcmr') ||
+            text.includes('defect') || text.includes('bug number') || text.includes('bug id')
+        )) {
+            data.jiraNumber = getFieldValue(label);
+        }
     });
+
+    // Fallback for a layout whose JIRA label we do not recognise. An MCMR-##### value is
+    // a SOTI engineering defect key and nothing else on a case is shaped like it, so the
+    // field holding one IS the JIRA number. Deliberately anchored to MCMR rather than a
+    // generic PROJ-123 shape, which would also match order numbers and asset tags.
+    if (!data.jiraNumber) {
+        for (const label of fieldLabels) {
+            const val = getFieldValue(label);
+            if (/^MCMR-\d+$/i.test(val)) { data.jiraNumber = val; break; }
+        }
+    }
 
     // Fallback: Try the page header for Case Number
     if (!data.caseNumber) {
