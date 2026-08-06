@@ -105,7 +105,17 @@
                 <div class="fld"><span class="flbl">SOTI Version</span>
                     <select class="fsel" id="sotiVer"><option value="">— Select —</option></select>
                 </div>
-                <div class="fld"><span class="flbl">JIRA Number</span><input class="finput" id="jiraNum" placeholder="e.g. MC-12345"></div>
+                <!-- The value doubles as a link: syncJiraLink() reveals the button and points it
+                     at https://jira.soti.net/browse/<key> whenever the box holds a real issue key.
+                     The input stays a plain editable field so the number can still be typed. -->
+                <div class="fld"><span class="flbl">JIRA Number</span>
+                    <div class="fld-row">
+                        <input class="finput" id="jiraNum" placeholder="e.g. MCMR-42071">
+                        <a class="fld-open" id="jiraNumOpen" target="_blank" rel="noopener noreferrer" title="Open in JIRA" style="display:none">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        </a>
+                    </div>
+                </div>
                 <div class="fld"><span class="flbl">Agent Version</span>
                     <select class="fsel" id="agentVer"><option value="">— Select —</option></select>
                 </div>

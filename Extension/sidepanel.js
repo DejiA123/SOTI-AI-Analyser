@@ -10926,6 +10926,50 @@ function updateFieldValidation(id) {
         el.classList.add('filled');
         el.classList.remove('empty');
     }
+
+    if (id === 'jiraNum') syncJiraLink();
+}
+
+// The JIRA Number field doubles as a link to the ticket. ONLY a value shaped like a
+// real issue key is ever turned into a URL, so the link cannot point anywhere except a
+// browse page on the SOTI JIRA host — a pasted "n/a", a half-typed key or anything
+// carrying its own scheme simply leaves the button hidden rather than offering a dead
+// or unexpected destination.
+const JIRA_BROWSE_BASE = 'https://jira.soti.net/browse/';
+const JIRA_KEY_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
+
+function jiraKeyFrom(raw) {
+    let v = (raw || '').trim();
+    if (!v) return '';
+    // Tolerate a pasted browse URL — the engineer copied the link, not the key. Anchored
+    // to the SOTI host so a link from anywhere else is not quietly rewritten into one of
+    // ours: it fails the key test below and no button appears at all.
+    const fromUrl = v.match(/^https?:\/\/jira\.soti\.net\/browse\/([A-Za-z][A-Za-z0-9]*-\d+)\b/i);
+    if (fromUrl) v = fromUrl[1];
+    return JIRA_KEY_RE.test(v) ? v.toUpperCase() : '';
+}
+
+function jiraUrlFor(raw) {
+    const key = jiraKeyFrom(raw);
+    return key ? JIRA_BROWSE_BASE + encodeURIComponent(key) : '';
+}
+
+// Keep the button in step with whatever is in the box. Driven from
+// updateFieldValidation, so every path that repaints the field — typing, a tab switch,
+// a Salesforce sync — updates the link too.
+function syncJiraLink() {
+    const link = $('jiraNumOpen');
+    const field = $('jiraNum');
+    if (!link || !field) return;
+    const url = jiraUrlFor(field.value);
+    link.style.display = url ? 'flex' : 'none';
+    if (url) {
+        link.href = url;
+        link.title = 'Open ' + url;
+    } else {
+        link.removeAttribute('href');
+        link.title = 'Open in JIRA';
+    }
 }
 
 function updateAllValidations() {
@@ -15082,6 +15126,21 @@ if ($('toggleCaseDetails')) {
         b.style.display = opening ? '' : 'none';
         const icon = $('iconCaseDetails');
         if (icon) icon.textContent = opening ? '▼' : '▶';
+    };
+}
+
+// Open the ticket the JIRA Number names. The anchor carries a real href so the link can
+// be copied or middle-clicked, but inside the extension the click is taken over: the side
+// panel must open a browser tab rather than navigate itself away from the case.
+if ($('jiraNumOpen')) {
+    $('jiraNumOpen').onclick = (e) => {
+        const url = jiraUrlFor($('jiraNum') ? $('jiraNum').value : '');
+        if (!url) { e.preventDefault(); return; }
+        if (isChromeExtension() && chrome.tabs && chrome.tabs.create) {
+            e.preventDefault();
+            chrome.tabs.create({ url, active: true });
+        }
+        // Standalone page: the anchor's target="_blank" opens the tab itself.
     };
 }
 

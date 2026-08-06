@@ -365,6 +365,26 @@ body {
 
 /* Fields */
 .fld { display: flex; flex-direction: column; gap: 4px }
+
+/* A field that carries a link (JIRA Number): the input keeps the full row and the
+   open-in-browser button sits beside it, so the value is still typed and edited
+   normally. The button is hidden by JS until the value is a real issue key. */
+.fld-row { display: flex; align-items: stretch; gap: 6px }
+.fld-row .finput { flex: 1; min-width: 0 }
+.fld-open {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    flex-shrink: 0;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: var(--r4);
+    color: var(--blue2);
+    cursor: pointer;
+    transition: all .2s;
+}
+.fld-open:hover { background: var(--bg2); border-color: var(--blue2); color: var(--blue) }
 .flbl { font-size: 8.5px; font-weight: 700; color: var(--txt3); text-transform: uppercase; letter-spacing: .5px }
 .finput, .fsel {
     background: var(--bg3);
