@@ -770,7 +770,7 @@ function meetingNotesAreEmpty(value) {
 
 function getDefaultCI() {
     return {
-        caseNum: '', caseStatus: '', sotiVer: '', jiraNum: '', platform: '', agentVer: '', caseAge: '',
+        caseNum: '', caseStatus: '', caseUrl: '', sotiVer: '', jiraNum: '', platform: '', agentVer: '', caseAge: '',
         enviro: '', dsCfg: '', affDev: '',
         scrubAccount: '', scrubCustomer: '',
         // The headings only — the worked example is shown behind them by the ghost layer
@@ -1009,6 +1009,7 @@ function buildCaseCiFromForm() {
     return {
         caseNum: $('caseNum').value,
         caseStatus: $('caseStatus').value,
+        caseUrl: $('caseUrl').value,
         sotiVer: $('sotiVer').value,
         jiraNum: $('jiraNum').value,
         platform: $('platform').value,
@@ -1364,6 +1365,7 @@ function switchCase(id) {
 
         // Update UI Fields
         $('caseNum').value = c.ci.caseNum || '';
+        $('caseUrl').value = c.ci.caseUrl || '';
         // Through the helper, not a bare .value: a case stored with a status outside the
         // picklist would otherwise restore blank, because a fresh DOM has no such option.
         applyCaseStatus(c.ci.caseStatus);
@@ -11028,6 +11030,9 @@ function updateFieldValidation(id) {
     }
 
     if (id === 'jiraNum') syncJiraLink();
+    // caseNum is repainted on every path that touches the case, so the Salesforce link
+    // rides along with it rather than needing the hidden URL field to be validated too.
+    if (id === 'caseNum') syncSfCaseLink();
 }
 
 // Case Status is a picklist, so a value has to exist as an <option> before it can be
@@ -11046,6 +11051,40 @@ function applyCaseStatus(value) {
     opt.textContent = v;
     sel.appendChild(opt);
     sel.value = v;
+}
+
+// The Case Number field carries a link back to the Salesforce record, captured by the sync.
+// The stored value is checked rather than trusted: it is only ever turned into a link when
+// it is an https URL on a Salesforce host, so a hand-edited or stale value can never send
+// anyone somewhere unexpected.
+const SF_CASE_HOST_RE = /(^|\.)(force\.com|salesforce\.com)$/i;
+
+function salesforceCaseUrl(raw) {
+    const v = (raw || '').trim();
+    if (!v) return '';
+    let u;
+    try { u = new URL(v); } catch (e) { return ''; }
+    if (u.protocol !== 'https:') return '';
+    if (!SF_CASE_HOST_RE.test(u.hostname)) return '';
+    if (!/\/lightning\/r\/Case\/[A-Za-z0-9]{15,18}(\/|$)/.test(u.pathname)) return '';
+    return u.href;
+}
+
+// Keep the button in step with whatever the sync stored — driven from updateFieldValidation
+// so every path that repaints the case (typing, a tab switch, a sync) updates the link too.
+function syncSfCaseLink() {
+    const link = $('caseUrlOpen');
+    const field = $('caseUrl');
+    if (!link || !field) return;
+    const url = salesforceCaseUrl(field.value);
+    link.style.display = url ? 'flex' : 'none';
+    if (url) {
+        link.href = url;
+        link.title = 'Open ' + url;
+    } else {
+        link.removeAttribute('href');
+        link.title = 'Open in Salesforce';
+    }
 }
 
 // The JIRA Number field doubles as a link to the ticket. ONLY a value shaped like a
@@ -15094,6 +15133,7 @@ function exportSession() {
     txt += `CASE INFORMATION:\n`;
     txt += `Case Number: ${$('caseNum').value || 'N/A'}\n`;
     txt += `Case Status: ${$('caseStatus').value || 'N/A'}\n`;
+    if ($('caseUrl').value) txt += `Case Link: ${$('caseUrl').value}\n`;
     txt += `Account: ${$('scrubAccount').value || 'N/A'}\n`;
     txt += `Customer: ${$('scrubCustomer').value || 'N/A'}\n`;
     txt += `SOTI Version: ${$('sotiVer').value || 'N/A'}\n`;
@@ -15183,6 +15223,8 @@ $('btnSyncSF').onclick = async () => {
         }
         if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge || data.jiraNumber || data.caseStatus)) {
             if (data.caseNumber) $('caseNum').value = data.caseNumber;
+            // Revealed as the button beside Case Number — see syncSfCaseLink().
+            if (data.caseUrl) $('caseUrl').value = data.caseUrl;
             if (data.caseStatus) applyCaseStatus(data.caseStatus);
             if (data.jiraNumber) $('jiraNum').value = data.jiraNumber;
             if (data.accountName) $('scrubAccount').value = data.accountName;
@@ -15316,6 +15358,20 @@ if ($('toggleCaseDetails')) {
         b.style.display = opening ? '' : 'none';
         const icon = $('iconCaseDetails');
         if (icon) icon.textContent = opening ? '▼' : '▶';
+    };
+}
+
+// Open the Salesforce case the sync captured. Same shape as the JIRA link below: a real
+// href so it can be copied or middle-clicked, but inside the extension the click opens a
+// browser tab so the side panel never navigates itself away from the case.
+if ($('caseUrlOpen')) {
+    $('caseUrlOpen').onclick = (e) => {
+        const url = salesforceCaseUrl($('caseUrl') ? $('caseUrl').value : '');
+        if (!url) { e.preventDefault(); return; }
+        if (isChromeExtension() && chrome.tabs && chrome.tabs.create) {
+            e.preventDefault();
+            chrome.tabs.create({ url, active: true });
+        }
     };
 }
 

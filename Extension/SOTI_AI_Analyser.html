@@ -101,7 +101,18 @@
                         <div class="subsec-ph-collapse" id="iconCaseDetails">▶</div>
                     </div>
                     <div class="subsec-pb" id="bodyCaseDetails" style="display:none">
-                <div class="fld"><span class="flbl">Case Number</span><input class="finput" id="caseNum" placeholder="e.g. 0012345678"></div>
+                <!-- The record link is captured by Sync from Salesforce and kept out of sight —
+                     it is a machine value, not something to type. It only drives the button,
+                     which syncJfCaseLink() reveals once a real Salesforce URL is stored. -->
+                <div class="fld"><span class="flbl">Case Number</span>
+                    <div class="fld-row">
+                        <input class="finput" id="caseNum" placeholder="e.g. 0012345678">
+                        <a class="fld-open" id="caseUrlOpen" target="_blank" rel="noopener noreferrer" title="Open in Salesforce" style="display:none">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        </a>
+                    </div>
+                </div>
+                <div class="fld" style="display: none;"><span class="flbl">Case URL</span><input class="finput" id="caseUrl"></div>
                 <!-- The Salesforce Case Status picklist. A synced value that is NOT one of these
                      is added as an option by applyCaseStatus() rather than dropped, so a status
                      added to the picklist later still shows up instead of blanking the field. -->

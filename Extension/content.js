@@ -418,6 +418,35 @@ function getFieldValue(labelEl, exact = false) {
     return '';
 }
 
+/*
+ * The link back to the case record. In the Salesforce CONSOLE the address bar shows the
+ * console, not the record — the record lives on a workspace tab whose anchor carries a
+ * RELATIVE href ("/lightning/r/Case/500OF00000ShNVtYAN/view"). It is resolved against the
+ * page's OWN origin, never a hard-coded one, so a sandbox, a different pod or a My Domain
+ * rename all keep working.
+ *
+ * Several case tabs are normally open at once, so the tab that NAMES the case we just
+ * scraped wins over the merely-active one; the record page's own URL is the last resort.
+ */
+function findCaseRecordUrl(caseNumber) {
+    const CASE_PATH = /\/lightning\/r\/Case\/[A-Za-z0-9]{15,18}(\/|$)/;
+    const abs = (href) => { try { return new URL(href, location.origin).href; } catch (e) { return ''; } };
+    const hrefOf = (a) => a.getAttribute('href') || '';
+
+    const anchors = findInShadows('a[href*="/lightning/r/Case/"]', document, false)
+        .filter(a => CASE_PATH.test(hrefOf(a)));
+
+    const num = (caseNumber || '').trim();
+    if (num) {
+        const byNumber = anchors.find(a => `${a.getAttribute('title') || ''} ${a.textContent || ''}`.includes(num));
+        if (byNumber) return abs(hrefOf(byNumber));
+    }
+    const active = anchors.find(a => a.getAttribute('aria-selected') === 'true');
+    if (active) return abs(hrefOf(active));
+    if (CASE_PATH.test(location.pathname)) return location.href.split('?')[0];
+    return anchors.length ? abs(hrefOf(anchors[0])) : '';
+}
+
 async function scrapeSalesforce(options = {}) {
     const { loadFullFeed = true } = options;
     const data = {
@@ -435,6 +464,8 @@ async function scrapeSalesforce(options = {}) {
         // rather than inferred from License Type (which only ever guessed at it).
         mcHosted: '',
         caseAge: '',
+        // Absolute link back to this case record, so the panel can reopen it.
+        caseUrl: '',
         // The engineering defect raised off this case (e.g. MCMR-42071).
         jiraNumber: '',
         emailChain: '',
@@ -506,6 +537,8 @@ async function scrapeSalesforce(options = {}) {
             data.jiraNumber = getFieldValue(label);
         }
     });
+
+    data.caseUrl = findCaseRecordUrl(data.caseNumber);
 
     // Fallback for a layout whose JIRA label we do not recognise. An MCMR-##### value is
     // a SOTI engineering defect key and nothing else on a case is shaped like it, so the
