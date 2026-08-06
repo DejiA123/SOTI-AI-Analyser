@@ -347,6 +347,20 @@ body {
     font-size: 11px !important;
 }
 
+/* Sync from JIRA — sits under Sync from Salesforce in the same row. JIRA blue
+   rather than Salesforce cyan, so the two are not mistaken for each other. */
+.btn-jira {
+    width: 100%;
+    margin-top: 8px;
+    background: #2684ff !important;
+    color: #fff !important;
+    border: none !important;
+    padding: 8px !important;
+    font-weight: 600 !important;
+    font-size: 11px !important;
+}
+.btn-jira:hover { background: #0065ff !important; }
+
 /* Meeting-notes AI cleanup button (sits under the Meeting Notes textarea) */
 .btn-clean-notes {
     width: 100%;

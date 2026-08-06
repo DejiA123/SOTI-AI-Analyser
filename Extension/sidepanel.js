@@ -776,7 +776,7 @@ function getDefaultCI() {
         // The headings only — the worked example is shown behind them by the ghost layer
         // until the engineer types, so it never has to be deleted before writing.
         meetingNotes: MEETING_NOTES_SKELETON,
-        issueSummary: '', product: '', emailChain: '',
+        issueSummary: '', product: '', emailChain: '', jiraDetails: '',
         jiraExpected: '', jiraImpact: '', jiraPriority: 'Medium', jiraRepro: ''
     };
 }
@@ -1026,6 +1026,7 @@ function buildCaseCiFromForm() {
         issueSummary: $('issueSummary').value,
         product: $('product').value,
         emailChain: $('emailChain').value,
+        jiraDetails: $('jiraDetails').value,
         jiraExpected: $('jiraExpected').value,
         jiraImpact: $('jiraImpact').value,
         jiraPriority: $('jiraPriority').value,
@@ -1381,6 +1382,7 @@ function switchCase(id) {
         $('issueSummary').value = c.ci.issueSummary || '';
         $('product').value = c.ci.product || '';
         $('emailChain').value = c.ci.emailChain || '';
+        $('jiraDetails').value = c.ci.jiraDetails || '';
         $('jiraExpected').value = c.ci.jiraExpected || '';
         $('jiraImpact').value = c.ci.jiraImpact || '';
         $('jiraPriority').value = c.ci.jiraPriority || 'Medium';
@@ -10998,7 +11000,7 @@ function updateAllValidations() {
     [
         'caseNum', 'caseStatus', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
         'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
-        'issueSummary', 'meetingNotes', 'emailChain',
+        'issueSummary', 'meetingNotes', 'emailChain', 'jiraDetails',
         'jiraExpected', 'jiraImpact', 'jiraRepro'
     ].forEach(updateFieldValidation);
     // Runs on load and after every restore/sync, so the example behind the notes is
@@ -15010,7 +15012,7 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
 [
     'caseNum', 'caseStatus', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
     'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
-    'issueSummary', 'meetingNotes', 'emailChain',
+    'issueSummary', 'meetingNotes', 'emailChain', 'jiraDetails',
     'jiraExpected', 'jiraImpact', 'jiraRepro', 'jiraPriority'
 ].forEach(id => {
     const el = $(id);
@@ -15123,7 +15125,57 @@ $('btnSyncSF').onclick = async () => {
     } catch (err) { toast('Sync failed', 'e'); }
 };
 
-$('toggleL').onclick = () => { 
+// Pull the JIRA issue open in the active tab. Mirrors the Salesforce sync: message
+// the content script, and if it is not there yet (the tab was already open when the
+// extension loaded) inject it and ask again.
+if ($('btnSyncJira')) {
+    $('btnSyncJira').onclick = async () => {
+        if (!isChromeExtension()) {
+            toast('JIRA sync requires the Chrome extension', 'w');
+            return;
+        }
+        toast('Syncing from JIRA...', 'i');
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tab) return;
+            // Checked before messaging so the failure reads "you are not on a JIRA
+            // issue" rather than a generic sync error, which is the mistake people
+            // actually make.
+            if (!/^https:\/\/jira\.soti\.net\//i.test(tab.url || '')) {
+                toast('Open the JIRA issue in the active tab first, then click Sync from JIRA', 'w', 6000);
+                return;
+            }
+            let data = null;
+            try {
+                data = await chrome.tabs.sendMessage(tab.id, { action: "GET_JIRA_DATA" });
+            } catch (e) {
+                await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+                await new Promise(r => setTimeout(r, 500));
+                data = await chrome.tabs.sendMessage(tab.id, { action: "GET_JIRA_DATA" });
+            }
+            if (!data || !(data.key || data.digest)) {
+                toast('Nothing found on that page — open the JIRA issue view and try again', 'w', 6000);
+                return;
+            }
+            if (data.digest) $('jiraDetails').value = data.digest;
+            // The key fills the JIRA Number field too, so the open-in-JIRA link lights up.
+            if (data.key) $('jiraNum').value = data.key;
+
+            saveState();
+            renderTabs();
+            updateAllValidations();
+            const bits = [];
+            if (data.comments && data.comments.length) bits.push(`${data.comments.length} comments`);
+            if (data.attachments && data.attachments.length) bits.push(`${data.attachments.length} attachments`);
+            toast(`Synced ${data.key || 'JIRA issue'}${bits.length ? ` (${bits.join(', ')})` : ''}`, 's');
+        } catch (err) {
+            console.error('JIRA sync failed', err);
+            toast('JIRA sync failed', 'e');
+        }
+    };
+}
+
+$('toggleL').onclick = () => {
     const b = $('bodyL'); 
     const h = b.style.display === 'none';
     b.style.display = h ? '' : 'none'; 

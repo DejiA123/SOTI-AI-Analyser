@@ -628,8 +628,159 @@ async function scrapeSalesforce(options = {}) {
     return data;
 }
 
+/* ===========================================================================
+ *  JIRA (server / Data Center) ISSUE SCRAPE
+ * ---------------------------------------------------------------------------
+ *  Reads the classic JIRA issue view on jira.soti.net. Every value is taken
+ *  from the ids JIRA has used for years (#type-val, #priority-val, the
+ *  li[id^="rowForcustomfield_"] rows, #attachment_thumbnails, the comment
+ *  blocks) with a fallback wherever one exists, because a field that is not on
+ *  the layout must leave a blank rather than throw and lose the whole scrape.
+ * ========================================================================= */
+
+// A value cell carries inline "Edit" affordances and a "(4)" expander that are
+// chrome, not content. Strip them, then collapse whitespace: JIRA pretty-prints
+// its markup, so the raw textContent is full of newlines and runs of spaces.
+function jiraFieldText(el) {
+    if (!el) return '';
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll(
+        '.overlay-icon, .aui-iconfont-edit, .shortener-expand, .assign-to-me-link, ' +
+        '.user-hover-trigger, script, style, img'
+    ).forEach(n => n.remove());
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim().replace(/[,\s]+$/, '');
+}
+
+function scrapeJira() {
+    const data = {
+        key: '', summary: '', status: '', type: '', priority: '', resolution: '',
+        fixVersions: '', affectsVersions: '', components: '', labels: '',
+        assignee: '', reporter: '', watchers: '',
+        fields: [], attachments: [], comments: [], digest: ''
+    };
+    const one = (sel) => jiraFieldText(document.querySelector(sel));
+
+    // --- Key. #key-val is the canonical element; the URL and the hidden <h2>
+    // ("[MCMR-42071] summary") are the fallbacks for layouts that drop it.
+    data.key = one('#key-val');
+    if (!data.key) {
+        const fromUrl = location.pathname.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/i);
+        if (fromUrl) data.key = fromUrl[1].toUpperCase();
+    }
+    let headline = '';
+    for (const h2 of document.querySelectorAll('h2')) {
+        const m = (h2.textContent || '').trim().match(/^\[([A-Z][A-Z0-9]+-\d+)\]\s*([\s\S]+)$/i);
+        if (m) { if (!data.key) data.key = m[1].toUpperCase(); headline = m[2].trim(); break; }
+    }
+    data.summary = one('#summary-val') || headline;
+
+    // --- Workflow state. #status-val is the badge; the transitions button
+    // ("Plan Queue") carries it on boards that render the workflow instead.
+    data.status = one('#status-val') || one('#opsbar-transitions_more .dropdown-text');
+
+    data.type = one('#type-val');
+    data.priority = one('#priority-val');
+    data.resolution = one('#resolution-val');
+    data.fixVersions = one('#fixfor-val');
+    data.affectsVersions = one('#versions-val');
+    data.components = one('#components-val');
+    data.assignee = one('#assignee-val');
+    data.reporter = one('#reporter-val');
+    data.watchers = one('#watcher-data');
+
+    const labels = Array.from(document.querySelectorAll('#wrap-labels .labels li, .labels-wrap .labels li'))
+        .map(li => jiraFieldText(li)).filter(Boolean);
+    data.labels = labels.join(', ');
+
+    // --- Custom fields: Salesforce Case #, MC Hosted, Workaround exists,
+    // Customer Phase, Found In Build # and friends all live in these rows.
+    document.querySelectorAll('li[id^="rowForcustomfield_"]').forEach(li => {
+        const label = jiraFieldText(li.querySelector('.name label') || li.querySelector('.name')).replace(/:$/, '');
+        const value = jiraFieldText(li.querySelector('[id$="-val"]'));
+        if (label && value) data.fields.push({ label, value });
+    });
+
+    document.querySelectorAll('#attachment_thumbnails li.attachment-content').forEach(li => {
+        const name = jiraFieldText(li.querySelector('.attachment-title'));
+        if (!name) return;
+        data.attachments.push({
+            name,
+            size: jiraFieldText(li.querySelector('.attachment-size')),
+            date: jiraFieldText(li.querySelector('.attachment-date'))
+        });
+    });
+
+    // --- Comments. Each block renders TWICE — a "verbose" copy and a "concise"
+    // one — so read only the verbose half or every comment arrives doubled.
+    document.querySelectorAll('#issue_actions_container .activity-comment, .issuePanelContainer .activity-comment')
+        .forEach(block => {
+            const verbose = block.querySelector('.twixi-wrap.verbose') || block;
+            const bodyEl = verbose.querySelector('.action-body');
+            if (!bodyEl) return;
+            const body = (bodyEl.innerText || bodyEl.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+            if (!body) return;
+            const dateEl = verbose.querySelector('.action-details .date, .action-details time');
+            data.comments.push({
+                author: jiraFieldText(verbose.querySelector('.action-details a.user-hover')),
+                when: (dateEl && (dateEl.getAttribute('title') || dateEl.getAttribute('datetime'))) || jiraFieldText(dateEl),
+                body: body.slice(0, 4000)
+            });
+        });
+    data.comments = data.comments.slice(0, 300);
+
+    data.digest = buildJiraDigest(data);
+    return data;
+}
+
+// One readable block for the JIRA Details field. Same shape as the Salesforce
+// email chain — "[when] Who:" then the text — so a chain and a JIRA thread read
+// the same way whether a human or the model is doing the reading.
+function buildJiraDigest(d) {
+    const out = [];
+    const head = [d.key, d.summary].filter(Boolean).join(' — ');
+    if (head) out.push(head);
+
+    const line = (label, value) => { if (value) out.push(`${label}: ${value}`); };
+    line('Status', d.status);
+    line('Type', d.type);
+    line('Priority', d.priority);
+    line('Resolution', d.resolution);
+    line('Affects Version/s', d.affectsVersions);
+    line('Fix Version/s', d.fixVersions);
+    line('Component/s', d.components);
+    line('Labels', d.labels);
+    line('Assignee', d.assignee);
+    line('Reporter', d.reporter);
+    line('Watchers', d.watchers);
+    d.fields.forEach(f => line(f.label, f.value));
+
+    if (d.attachments.length) {
+        out.push('', `ATTACHMENTS (${d.attachments.length})`);
+        d.attachments.forEach(a => out.push(`- ${a.name}${a.size ? ` (${a.size}` : ''}${a.date ? `, ${a.date})` : (a.size ? ')' : '')}`));
+    }
+    if (d.comments.length) {
+        out.push('', `COMMENTS (${d.comments.length}, newest first)`);
+        d.comments.forEach(c => {
+            out.push('', `[${c.when || 'no date'}] ${c.author || 'Unknown'}:`);
+            out.push(c.body);
+        });
+    }
+    return out.join('\n').trim();
+}
+
 // Listen for requests from the side panel
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "GET_JIRA_DATA") {
+        try {
+            const data = scrapeJira();
+            console.log('SOTI AI Analyser: Scraped JIRA', data);
+            sendResponse(data);
+        } catch (err) {
+            console.error('SOTI AI Analyser: JIRA scrape failed', err);
+            sendResponse(null);
+        }
+        return true;
+    }
     if (request.action === "GET_SALESFORCE_DATA") {
         // Scraping is now asynchronous (it scrolls the feed to the bottom first),
         // so we reply from the promise. `return true` below keeps the message

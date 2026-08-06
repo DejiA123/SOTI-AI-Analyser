@@ -48,7 +48,8 @@
     {
       "matches": [
         "https://*.salesforce.com/*",
-        "https://*.force.com/*"
+        "https://*.force.com/*",
+        "https://jira.soti.net/*"
       ],
       "js": ["content.js"]
     }
