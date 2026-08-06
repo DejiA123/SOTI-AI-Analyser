@@ -16616,33 +16616,66 @@ ${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case fac
 
 $('btnCleanNotes').onclick = cleanUpMeetingNotes;
 
-// --- QUICK OPTIONS (main window) ---
-// The six one-click AI actions used to exist twice: as cards on the welcome screen and as
-// a drop-down that appeared only once a chat was under way. They are now a single drop-down
-// in the home panel, which sits under "How to get started" on first load and stays put once
-// the conversation starts — so it is always available and never duplicated.
+// --- QUICK OPTIONS ---
+// ONE panel node with two homes, moved rather than duplicated (a second copy would mean
+// duplicate ids and two sets of handlers):
+//   • welcome screen — in the home panel, under "How to get started". Nothing has scrolled
+//     yet, so pinning a strip to the top there would only cost screen space.
+//   • once the conversation starts — in the pinned #qaBar under the case tabs, OUTSIDE the
+//     chat scroll, because that is the moment it would otherwise scroll out of reach.
+// The switch follows the WELCOME BLOCK's own visibility, so the panel can never disagree
+// with what the user is looking at: send() hides the welcome screen and calls straight
+// through to here, and switchCase() does the same after re-rendering the chat.
 function updateQuickActionsPanel() {
     const panel = $('qaPanel');
     if (!panel) return;
     panel.style.display = 'block';
+
+    const welcome = $('welcome');
+    const chatting = !welcome || welcome.style.display === 'none';
+    const bar = $('qaBar');
+    const home = $('homePanel');
+    const target = chatting ? bar : home;
+    if (target && panel.parentElement !== target) {
+        // In the home panel it sits ABOVE Meeting Notes, which is where it has always been.
+        if (chatting) target.appendChild(panel);
+        else target.insertBefore(panel, target.firstChild);
+        // Moving the node leaves the list open over the wrong place; start closed.
+        setQuickActionsOpen(false);
+    }
+    if (bar) bar.style.display = chatting ? '' : 'none';
+}
+
+function setQuickActionsOpen(open) {
+    const b = $('qaBody');
+    if (!b) return;
+    b.style.display = open ? 'flex' : 'none';
+    const icon = $('qaIcon');
+    if (icon) icon.textContent = open ? '▼' : '▶';
 }
 
 if ($('qaToggle')) {
-    $('qaToggle').onclick = () => {
-        const b = $('qaBody');
-        if (!b) return;
-        const opening = b.style.display === 'none';
-        b.style.display = opening ? 'flex' : 'none';
-        const icon = $('qaIcon');
-        if (icon) icon.textContent = opening ? '▼' : '▶';
+    // stopPropagation: the window handler below closes the list on an outside click, and
+    // without this the opening click would bubble straight into it and shut it again.
+    $('qaToggle').onclick = (e) => {
+        e.stopPropagation();
+        setQuickActionsOpen($('qaBody') && $('qaBody').style.display === 'none');
     };
 }
-if ($('qaCaseSummary')) $('qaCaseSummary').onclick = generateCaseSummary;
-if ($('qaDraftEmail')) $('qaDraftEmail').onclick = draftCustomerEmail;
-if ($('qa306090')) $('qa306090').onclick = generate306090Analysis;
-if ($('qaProbRes')) $('qaProbRes').onclick = generateProblemResolutionSummary;
+// Clicks inside the list are not "outside" — an action button closes the list itself.
+if ($('qaBody')) $('qaBody').onclick = (e) => e.stopPropagation();
+// Picking an action closes the list. The body is an overlay now, so leaving it open would
+// sit on top of the answer the click just asked for.
+const wireQuickAction = (id, fn) => {
+    const el = $(id);
+    if (el) el.onclick = (...args) => { setQuickActionsOpen(false); return fn(...args); };
+};
+wireQuickAction('qaCaseSummary', generateCaseSummary);
+wireQuickAction('qaDraftEmail', draftCustomerEmail);
+wireQuickAction('qa306090', generate306090Analysis);
+wireQuickAction('qaProbRes', generateProblemResolutionSummary);
 // Exporting the session stays on the ⋮ menu (btnExport) — it was listed in both places.
-if ($('qaJira')) $('qaJira').onclick = openJiraReview;
+wireQuickAction('qaJira', openJiraReview);
 
 $('btnNew').onclick = createNewCase;
 
@@ -16659,6 +16692,8 @@ if ($('moreDropdown')) {
 
 window.onclick = () => {
     $('moreDropdown').style.display = 'none';
+    // Quick Options now overlays the chat, so a click anywhere else means "put it away".
+    if (typeof setQuickActionsOpen === 'function') setQuickActionsOpen(false);
 };
 
 $('btnSettings').onclick = () => {

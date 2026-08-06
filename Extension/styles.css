@@ -656,10 +656,32 @@ body {
 }
 
 /* Quick Actions dropdown at the top of the chat (visible while chatting) */
+/* The pinned strip under the case tabs. position:relative anchors the dropdown body,
+   and a z-index above the panels keeps the open list on top of whatever it covers. */
+.qa-bar {
+    position: relative;
+    flex-shrink: 0;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    z-index: 40;
+}
+
 .qa-panel {
     flex-shrink: 0;
     border-bottom: 1px solid var(--border);
     background: var(--bg1);
+}
+/* Inside the bar the panel is the whole strip — its own bottom border would double
+   up with the bar's, and the list floats rather than pushing the app down. */
+.qa-bar .qa-panel { border-bottom: none; }
+.qa-bar .qa-pb {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg1);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, .45);
 }
 .qa-ph {
     padding: 8px 12px;

@@ -62,6 +62,13 @@
     
     <div class="tab-bar" id="tabBar"></div>
 
+    <!-- Where Quick Options goes ONCE A CONVERSATION HAS STARTED. On the welcome screen the
+         panel lives in the home panel below (nothing has scrolled yet, so pinning a strip
+         here would only cost screen); updateQuickActionsPanel() moves the single #qaPanel
+         node in here the moment the welcome screen goes away, so it can never scroll out of
+         reach mid-chat. Empty and hidden until then. -->
+    <div class="qa-bar" id="qaBar" style="display:none"></div>
+
     <div class="layout">
         <!-- Case Information (Collapsible) -->
         <aside class="panel-left collapsed" id="panelL">
@@ -282,6 +289,9 @@
                      welcome block, not a child), so Quick Options and Meeting Notes never
                      become unreachable mid-conversation. -->
                 <div class="home-panel" id="homePanel">
+                    <!-- Quick Options starts HERE, under "How to get started". Once the chat
+                         begins, updateQuickActionsPanel() relocates this exact node into the
+                         pinned #qaBar above — one panel, two homes, never a duplicate id. -->
                     <div class="qa-panel" id="qaPanel">
                         <div class="qa-ph" id="qaToggle">
                             <div class="qa-ph-left">⚡ Quick Options</div>
