@@ -369,7 +369,18 @@ async function expandFeedPosts(root, feed) {
     await sleep(900);
 }
 
-function getFieldValue(labelEl) {
+/*
+ * `exact` skips cleanFieldValue's action-word surgery. That surgery exists to cut the
+ * "Open"/"Edit"/"Preview" button text Salesforce jams onto LOOKUP values, but it also
+ * fires on a picklist whose own value ENDS in one of those words: a Case Status of
+ * "Case Closed" comes back as "Case", "Ready to Close" as "Ready to", "Awaiting Edit"
+ * as "Awaiting". (Values where the word is the whole string, like "Closed", survive —
+ * the split only wins when there is text in front of it.) Passing exact is safe
+ * precisely when a specific value element was found, because then there is no button
+ * text on the end to strip. The container fallbacks below still clean, since that is
+ * the case the cleaning was written for.
+ */
+function getFieldValue(labelEl, exact = false) {
     const fieldComponent = labelEl.closest('records-record-layout-item, lightning-output-field, .slds-form-element');
     if (fieldComponent) {
         // Try the most specific value element first
@@ -384,7 +395,9 @@ function getFieldValue(labelEl) {
             'slot[name="outputField"] lightning-formatted-text'
         );
         if (valueEl) {
-            return cleanFieldValue(valueEl.textContent);
+            return exact
+                ? (valueEl.textContent || '').replace(/\s{2,}/g, ' ').trim()
+                : cleanFieldValue(valueEl.textContent);
         }
 
         // Broader container fallback
@@ -409,6 +422,7 @@ async function scrapeSalesforce(options = {}) {
     const { loadFullFeed = true } = options;
     const data = {
         caseNumber: '',
+        caseStatus: '',
         contactName: '',
         accountName: '',
         subject: '',
@@ -442,6 +456,11 @@ async function scrapeSalesforce(options = {}) {
         const text = label.textContent.trim().toLowerCase();
         if (text.includes('case number') && !data.caseNumber) {
             data.caseNumber = getFieldValue(label);
+        }
+        // Matched EXACTLY: a case layout is full of other "… Status" labels (Sub Status,
+        // Escalation Status, Approval Status), and any of them would win a loose match.
+        if ((text === 'status' || text === 'case status') && !data.caseStatus) {
+            data.caseStatus = getFieldValue(label, true);
         }
         if ((text === 'contact name' || text === 'contact') && !data.contactName) {
             data.contactName = getFieldValue(label);

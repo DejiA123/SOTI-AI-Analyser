@@ -90,6 +90,23 @@
                     </div>
                     <div class="subsec-pb" id="bodyCaseDetails" style="display:none">
                 <div class="fld"><span class="flbl">Case Number</span><input class="finput" id="caseNum" placeholder="e.g. 0012345678"></div>
+                <!-- The Salesforce Case Status picklist. A synced value that is NOT one of these
+                     is added as an option by applyCaseStatus() rather than dropped, so a status
+                     added to the picklist later still shows up instead of blanking the field. -->
+                <div class="fld"><span class="flbl">Case Status</span>
+                    <select class="fsel" id="caseStatus">
+                        <option value="">— Select —</option>
+                        <option>New</option>
+                        <option>Waiting on customer response</option>
+                        <option>Waiting on SOTI response</option>
+                        <option>Waiting on Development</option>
+                        <option>Cloud Upgrade</option>
+                        <option>Meeting Scheduled</option>
+                        <option>Workaround Provided</option>
+                        <option>Closed</option>
+                        <option>Close 3x Process</option>
+                    </select>
+                </div>
                 <div class="fld" style="display: none;"><span class="flbl">Account Scrub</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
                 <div class="fld" style="display: none;"><span class="flbl">Customer Scrub</span><input class="finput" id="scrubCustomer" placeholder="e.g. John Doe"></div>
                 <div class="fld"><span class="flbl">Product</span>

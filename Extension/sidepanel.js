@@ -770,7 +770,7 @@ function meetingNotesAreEmpty(value) {
 
 function getDefaultCI() {
     return {
-        caseNum: '', sotiVer: '', jiraNum: '', platform: '', agentVer: '', caseAge: '',
+        caseNum: '', caseStatus: '', sotiVer: '', jiraNum: '', platform: '', agentVer: '', caseAge: '',
         enviro: '', dsCfg: '', affDev: '',
         scrubAccount: '', scrubCustomer: '',
         // The headings only — the worked example is shown behind them by the ghost layer
@@ -1008,6 +1008,7 @@ function dropDerivedLogCaches(l) {
 function buildCaseCiFromForm() {
     return {
         caseNum: $('caseNum').value,
+        caseStatus: $('caseStatus').value,
         sotiVer: $('sotiVer').value,
         jiraNum: $('jiraNum').value,
         platform: $('platform').value,
@@ -1362,6 +1363,9 @@ function switchCase(id) {
 
         // Update UI Fields
         $('caseNum').value = c.ci.caseNum || '';
+        // Through the helper, not a bare .value: a case stored with a status outside the
+        // picklist would otherwise restore blank, because a fresh DOM has no such option.
+        applyCaseStatus(c.ci.caseStatus);
         $('sotiVer').value = c.ci.sotiVer || '';
         $('jiraNum').value = c.ci.jiraNum || '';
         $('platform').value = c.ci.platform || '';
@@ -10930,6 +10934,24 @@ function updateFieldValidation(id) {
     if (id === 'jiraNum') syncJiraLink();
 }
 
+// Case Status is a picklist, so a value has to exist as an <option> before it can be
+// selected — setting .value to an unknown string silently selects NOTHING. Salesforce
+// picklists gain values over time and differ per layout, so an unrecognised status is
+// added to the list rather than thrown away: the case keeps saying what it actually says.
+// Matched case-insensitively, then normalised to the canonical option text.
+function applyCaseStatus(value) {
+    const sel = $('caseStatus');
+    if (!sel) return;
+    const v = (value || '').trim();
+    if (!v) { sel.value = ''; return; }
+    const match = Array.from(sel.options || []).find(o => (o.text || '').trim().toLowerCase() === v.toLowerCase());
+    if (match) { sel.value = match.value; return; }
+    const opt = document.createElement('option');
+    opt.textContent = v;
+    sel.appendChild(opt);
+    sel.value = v;
+}
+
 // The JIRA Number field doubles as a link to the ticket. ONLY a value shaped like a
 // real issue key is ever turned into a URL, so the link cannot point anywhere except a
 // browse page on the SOTI JIRA host — a pasted "n/a", a half-typed key or anything
@@ -10974,7 +10996,7 @@ function syncJiraLink() {
 
 function updateAllValidations() {
     [
-        'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
+        'caseNum', 'caseStatus', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
         'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
         'issueSummary', 'meetingNotes', 'emailChain',
         'jiraExpected', 'jiraImpact', 'jiraRepro'
@@ -14955,6 +14977,7 @@ function exportSession() {
     txt += `------------------------------------------\n\n`;
     txt += `CASE INFORMATION:\n`;
     txt += `Case Number: ${$('caseNum').value || 'N/A'}\n`;
+    txt += `Case Status: ${$('caseStatus').value || 'N/A'}\n`;
     txt += `Account: ${$('scrubAccount').value || 'N/A'}\n`;
     txt += `Customer: ${$('scrubCustomer').value || 'N/A'}\n`;
     txt += `SOTI Version: ${$('sotiVer').value || 'N/A'}\n`;
@@ -14985,7 +15008,7 @@ $('chatIn').oninput = function() { this.style.height = 'auto'; this.style.height
 $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
 
 [
-    'caseNum', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
+    'caseNum', 'caseStatus', 'scrubAccount', 'scrubCustomer', 'product', 'sotiVer', 'jiraNum',
     'agentVer', 'caseAge', 'platform', 'enviro', 'dsCfg', 'affDev',
     'issueSummary', 'meetingNotes', 'emailChain',
     'jiraExpected', 'jiraImpact', 'jiraRepro', 'jiraPriority'
@@ -15042,8 +15065,9 @@ $('btnSyncSF').onclick = async () => {
             await new Promise(r => setTimeout(r, 500));
             data = await chrome.tabs.sendMessage(tab.id, { action: "GET_SALESFORCE_DATA" });
         }
-        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge || data.jiraNumber)) {
+        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge || data.jiraNumber || data.caseStatus)) {
             if (data.caseNumber) $('caseNum').value = data.caseNumber;
+            if (data.caseStatus) applyCaseStatus(data.caseStatus);
             if (data.jiraNumber) $('jiraNum').value = data.jiraNumber;
             if (data.accountName) $('scrubAccount').value = data.accountName;
             if (data.contactName) $('scrubCustomer').value = data.contactName;
