@@ -4963,10 +4963,13 @@ async function computeSnippetBudget(numFiles, overheadChars = 0) {
 // email_chain is intentionally EXCLUDED here — it is the live state of the case, so it is
 // surfaced separately as a dedicated, prominent, plain-text [EMAIL CHAIN] section (see
 // buildEmailChainSection) instead of being buried and JSON-escaped inside this blob.
+// jira_details is excluded for exactly the same reason: it is a multi-KB engineering thread
+// and JSON-escaping it into one giant string value is how a section stops being read. It
+// rides in the plain-text [JIRA ISSUE] section (see buildJiraSection).
 function buildCaseContextForPrompt(ci, small) {
     if (!ci) return {};
     if (!small) {
-        const { email_chain, ...rest } = ci;
+        const { email_chain, jira_details, ...rest } = ci;
         return rest;
     }
     const out = {};
@@ -4974,8 +4977,9 @@ function buildCaseContextForPrompt(ci, small) {
     // always injected separately as [ISSUE SUMMARY], and duplicating ~0.5K inside [CASE]
     // just spends budget the email chain and research need.
     // mc_hosted is two words and decides who can collect the logs — it earns its place in even
-    // the tightest small-model budget.
-    for (const k of ['case_number', 'product', 'soti_version', 'platform', 'agent_version', 'case_age_days', 'mc_hosted']) {
+    // the tightest small-model budget. case_status is three words and decides who the case is
+    // waiting on, which is the single fact a "what's next" answer most often gets wrong.
+    for (const k of ['case_number', 'case_status', 'product', 'soti_version', 'platform', 'agent_version', 'case_age_days', 'mc_hosted']) {
         if (ci[k]) out[k] = ci[k];
     }
     const mn = ci.meeting_notes;
@@ -4983,6 +4987,96 @@ function buildCaseContextForPrompt(ci, small) {
         out.meeting_notes = mn.length > 1500 ? mn.slice(0, 1500) + ' …[trimmed for context budget]' : mn;
     }
     return out;
+}
+
+// ============================ CASE STATUS → PROMPT ============================
+// The Salesforce Case Status is the support workflow's OWN answer to "who is this case
+// waiting on" — the one fact a "what's next" answer most often gets backwards. The chain
+// signals stay in charge of what people actually said; this states the recorded status and
+// spells out its consequence, because "Waiting on customer response" only constrains the
+// answer if the model is told what it implies.
+function buildCaseStatusDirective(ci) {
+    const status = ((ci && ci.case_status) || '').trim();
+    if (!status) return '';
+    const s = status.toLowerCase();
+    let meaning = '';
+    if (s.includes('waiting on customer')) {
+        meaning = 'SOTI has already replied — the ball is with the CUSTOMER. Do not write next steps that chase SOTI, and never say we owe them a reply.';
+    } else if (s.includes('waiting on soti')) {
+        meaning = 'the customer has replied — the ball is with SOTI. The next action is OURS, not a chase-up of the customer.';
+    } else if (s.includes('waiting on development')) {
+        meaning = 'the case sits with SOTI Development. The next action belongs to the engineering ticket, not to the customer — chase the JIRA, not them.';
+    } else if (s.includes('meeting scheduled')) {
+        meaning = 'a session is ALREADY in the diary. Never propose booking one; write around the meeting that exists.';
+    } else if (s.includes('workaround provided')) {
+        meaning = 'a workaround has ALREADY been given to the customer. Build on it — never offer it as if it were new.';
+    } else if (s.includes('cloud upgrade')) {
+        meaning = 'the case is tracking a cloud upgrade.';
+    } else if (s.startsWith('closed') || s.includes('close 3x')) {
+        meaning = 'the case is closing. Write closure wording, not a fresh investigation plan.';
+    } else if (s === 'new') {
+        meaning = 'the case has just been raised — nothing has been actioned on it yet.';
+    }
+    // Deliberately NOT "overrides the emails": where the newest message has moved past the
+    // recorded status, the honest answer names both rather than silently picking one.
+    const sentence = meaning ? ` ${meaning.charAt(0).toUpperCase()}${meaning.slice(1)}` : '';
+    return `[CASE STATUS — the case's recorded Salesforce workflow status]: ${status}\n` +
+        `Treat this as fact about where the case stands.${sentence} ` +
+        `If the newest email clearly shows the situation has moved past this status, say so explicitly — never contradict it silently.`;
+}
+
+// ============================ JIRA ISSUE → PROMPT ============================
+// The JIRA thread is the ENGINEERING side of the case: what Development actually found,
+// what they asked Support for, which build carries the fix. Like the email chain it is
+// bulky free text, so it gets its own prominent plain-text section rather than being
+// JSON-escaped into the [CASE] blob, where a multi-KB string value reads as noise.
+//
+// Trimming keeps the HEAD whole — status, priority, versions, components and the customer
+// custom fields are what every answer needs — then spends the rest on the NEWEST comments
+// and says out loud how many older ones were dropped. Cutting a thread silently mid-way is
+// what leaves a model inventing the part it never saw.
+function buildJiraSection(ci, small, capOverride) {
+    const raw = ((ci && ci.jira_details) || '').trim();
+    if (!raw) return '';
+    const cap = capOverride || (small ? 3000 : 10000);
+    const label = '[JIRA ISSUE — the SOTI engineering ticket raised for this case. This is Development\'s ' +
+        'own record: use it for what engineering has found, requested or committed to, for the fix ' +
+        'version, and for the customer fields it carries. Comments are NEWEST FIRST]:';
+
+    if (raw.length <= cap) return `${label}\n${raw}`;
+
+    // Split the digest at the comment thread; each comment starts "[when] Who:".
+    const at = raw.search(/^COMMENTS \(/m);
+    const header = (at === -1 ? raw : raw.slice(0, at)).trim();
+    const startRe = /^\[[^\]]*\]\s.*:$/;
+    const items = [];
+    let cur = null;
+    if (at !== -1) {
+        for (const ln of raw.slice(at).split('\n')) {
+            if (startRe.test(ln)) { if (cur !== null) items.push(cur); cur = ln; }
+            else if (cur !== null) cur += '\n' + ln;
+        }
+        if (cur !== null) items.push(cur);
+    }
+    if (!items.length) return `${label}\n${header.slice(0, cap)}`;
+
+    const out = [header.length > cap ? header.slice(0, cap) : header];
+    let used = out[0].length;
+    let kept = 0;
+    for (const item of items) {
+        const t = item.trim();
+        if (used + t.length + 2 > cap) break;
+        out.push('', t);
+        used += t.length + 2;
+        kept++;
+    }
+    const dropped = items.length - kept;
+    out.splice(1, 0, '', `COMMENTS (${kept} of ${items.length} shown, newest first)`);
+    if (dropped > 0) {
+        out.push('', `[${dropped} older comment${dropped === 1 ? '' : 's'} omitted for context budget — ` +
+            `the ${kept} newest are above. Do NOT infer anything about the omitted ones.]`);
+    }
+    return `${label}\n${out.join('\n').trim()}`;
 }
 
 // ============================ EMAIL CHAIN → PROMPT ============================
@@ -14003,6 +14097,12 @@ async function send(overrideText = null, silent = false, opts = {}) {
 
     const ci = {
         case_number: $('caseNum').value,
+        // Who the case is waiting on, straight from the Salesforce workflow — see
+        // buildCaseStatusDirective, which also spells out what each status implies.
+        case_status: $('caseStatus').value,
+        // The engineering ticket. Rides in its own [JIRA ISSUE] section (buildJiraSection),
+        // NOT in the [CASE] JSON blob — see buildCaseContextForPrompt.
+        jira_details: $('jiraDetails').value,
         soti_version: $('sotiVer').value,
         platform: $('platform').value,
         agent_version: $('agentVer').value,
@@ -14397,6 +14497,15 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             // (DD/MM vs MM/DD) and the model has misread it as August 7.
             liveDataLines.push(`[CURRENT DATE & TIME — right now, NOT the date of any email]: ${new Date().toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`);
             liveDataLines.push(`[CASE]: ${JSON.stringify(buildCaseContextForPrompt(ci, isSmallModel), null, 2)}`);
+            // Recorded workflow status + what it implies for "who acts next".
+            const caseStatusDirective = buildCaseStatusDirective(ci);
+            if (caseStatusDirective) liveDataLines.push(caseStatusDirective);
+            // The engineering ticket, in full where budget allows. Placed AFTER the email
+            // chain and [CASE] but BEFORE the research blocks: on a small model the end-trim
+            // eats the tail, and Development's own findings outrank community search results.
+            const jiraSection = buildJiraSection(ci, isSmallModel,
+                (fixItTurn || rnTurn) ? 1600 : (opts.jiraCap || undefined));
+            if (jiraSection) liveDataLines.push(jiraSection);
             // WHO COLLECTS THE EVIDENCE. Cloud → the agent pulls it from the backend; On-Prem →
             // it must be requested from the customer (with a screen-share to capture it properly).
             // Injected on every turn, not just the quick actions, because "what should I ask the
@@ -14407,7 +14516,9 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
                 liveDataLines.push(buildLogAccessDirective('summary', isSmallModel));
             }
             // Which MCMR codes (if any) this turn is allowed to cite — see buildMcmrCitationRule.
-            liveDataLines.push(buildMcmrCitationRule(`${ci.issue_summary || ''}\n${ci.meeting_notes || ''}\n${ci.email_chain || ''}`));
+            // jira_details is included: the ticket's OWN key (and any MCMR it links) is a code
+            // the case legitimately carries, so quoting it must not read as an invented citation.
+            liveDataLines.push(buildMcmrCitationRule(`${ci.issue_summary || ''}\n${ci.meeting_notes || ''}\n${ci.email_chain || ''}\n${ci.jira_details || ''}`));
 
             if (VERSIONS.length > 0) {
                 liveDataLines.push(`[LATEST MOBICONTROL VERSION]: ${VERSIONS[0]}`);
@@ -14869,7 +14980,10 @@ ${imgContext}`;
             try {
                 const allowedMcmr = new Set(VERIFIED_MCMR_ENTRIES.map(e => e.code));
                 for (const code of collectMcmrCodes(
-                    `${ci.issue_summary || ''}\n${ci.meeting_notes || ''}\n${ci.email_chain || ''}\n` +
+                    // jira_details MUST be in this allow-list. The synced ticket is MCMR-nnnnn
+                    // itself and its comments cite sibling MCMRs — without it the guard deletes
+                    // the very codes the case is about and leaves a "removed" note in their place.
+                    `${ci.issue_summary || ''}\n${ci.meeting_notes || ''}\n${ci.email_chain || ''}\n${ci.jira_details || ''}\n` +
                     `${knownFixesSection}\n${supportingRefSection}\n` +
                     c.msgs.filter(m => m.role === 'assistant').map(m => m.content || '').join('\n')
                 )) allowedMcmr.add(code);
@@ -16298,7 +16412,7 @@ async function draftCustomerEmail() {
     const prompt = `Draft the email that I (the SOTI support engineer handling this case) should send to the customer RIGHT NOW, matching the CURRENT state of the case.
 
 STRICT RULES:
-- Ground EVERY statement ONLY in the case information, issue summary, email chain, meeting notes, any log analysis in this conversation, and our chat history. NEVER invent facts, findings, links, dates, or commitments.${peopleLine}
+- Ground EVERY statement ONLY in the case information, issue summary, email chain, meeting notes, the [JIRA ISSUE] section if one is provided, any log analysis in this conversation, and our chat history. NEVER invent facts, findings, links, dates, or commitments.${peopleLine}
 - The email chain is ordered NEWEST FIRST — continue the conversation from the MOST RECENT messages; never re-answer something the chain shows is already settled.
 - Professional, warm SOTI support tone. Keep it concise — short paragraphs, no filler.
 ${NO_SCAFFOLD_PROMPT_RULE}
@@ -16426,7 +16540,7 @@ async function generate306090Analysis() {
     const prompt = `Produce a 30/60/90 case analysis for management review of this aging support case. Use EXACTLY the template layout below — same headers, same order — and output nothing before or after it.
 
 RULES:
-- Ground EVERY statement ONLY in the case information, issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs/analysis in this conversation, our chat history, and any release-notes / Pulse research provided. NEVER invent facts, versions, dates, or links — if something decisive is unknown, say so in a short phrase.
+- Ground EVERY statement ONLY in the case information, issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, the [JIRA ISSUE] section if one is provided, any attached logs/analysis in this conversation, our chat history, and any release-notes / Pulse research provided. NEVER invent facts, versions, dates, or links — if something decisive is unknown, say so in a short phrase.
 - The email chain is ordered NEWEST FIRST — the current state comes from the most recent messages.
 - CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER; anyone who signs off as "Technical Support, SOTI" is a SOTI SUPPORT ENGINEER, not the customer. Never swap these roles.
 - "30/60/90:" MUST be ${milestoneDirective}.
@@ -16479,7 +16593,7 @@ async function generateProblemResolutionSummary() {
     const prompt = `Write a brief INTERNAL Problem & Resolution summary for this case. Use EXACTLY the two-section layout below and output nothing else.
 
 STRICT RULES:
-- Ground BOTH sections ONLY in the case information, issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any log analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — this is an internal record and must be 100% accurate.
+- Ground BOTH sections ONLY in the case information, issue summary, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, the [JIRA ISSUE] section if one is provided, any log analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — this is an internal record and must be 100% accurate.
 - The email chain is ordered NEWEST FIRST — the resolution comes from the MOST RECENT messages.
 - CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER; anyone who signs off as "Technical Support, SOTI" is a SOTI SUPPORT ENGINEER. Never state a SOTI engineer had the issue.
 - If the case is NOT actually resolved yet, say so plainly under "Solution:" and give the current status / plan — do NOT fabricate a resolution.
@@ -17765,6 +17879,7 @@ $('btnGenerateJira').onclick = async () => {
         return;
     }
     const caseNum    = $('caseNum').value || 'N/A';
+    const caseStatus = $('caseStatus').value || 'N/A';
     const account    = $('scrubAccount').value || 'N/A';
     const customer   = $('scrubCustomer').value || 'N/A';
     const sotiVer    = $('sotiVer').value || 'N/A';
@@ -18057,8 +18172,18 @@ ${getJiraL3SmeSection()}`;
 - PRESERVE ALL MARKUP: Keep {color}, h1., h3., and {code:java} blocks exactly as they are in the template.
 - YOUR RESPONSE MUST START WITH: "h3. *Description of Issue:*"`;
 
+    // An already-synced engineering ticket is BACKGROUND for a new filing, never a source to
+    // copy — labelled and capped so it grounds the facts without becoming the answer.
+    const linkedJira = ($('jiraDetails').value || '').trim();
+    const linkedJiraBlock = linkedJira
+        ? `\n- EXISTING LINKED JIRA (background ONLY — use it for facts already established by ` +
+          `Development; do NOT copy its wording and do NOT output it as the new ticket):\n` +
+          linkedJira.slice(0, 6000) + '\n'
+        : '';
+
     const userPrompt = `### SOURCE DATA FOR ANALYSIS:
 - Case Number: ${caseNum}
+- Case Status: ${caseStatus}
 - Account/Customer: ${account} / ${customer}
 - Product: ${product}
 - Mc Version: ${sotiVer}
@@ -18070,7 +18195,7 @@ ${getJiraL3SmeSection()}`;
 - Priority: ${priority}
 - Repro Steps${repro !== 'N/A' ? " (engineer's DRAFT — rewrite professionally, do not copy verbatim)" : ''}: ${repro}
 - Notes: ${notes}
-
+${linkedJiraBlock}
 ${parsedLogFacts}
 
 - Conversation History:
