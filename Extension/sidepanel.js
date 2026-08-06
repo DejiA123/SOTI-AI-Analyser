@@ -15695,6 +15695,10 @@ $('btnAnalyse').onclick = async () => {
         toast('No logs attached to analyse', 'e');
         return;
     }
+    // Logs are evidence FOR a case, and the report they produce is written into one.
+    // Gated before the progress bar and the panel collapse below, so a refused click
+    // leaves the Logs section exactly as the user left it.
+    if (!requireCaseNumber('Analyse Now')) return;
 
     // Update Progress Indicator
     const pWrap = $('progWrap');
