@@ -8027,7 +8027,13 @@ const COVERAGE_SEMANTICS = {
     pendingRequest: /\brequest(?:ed|ing|s)?\b|\bask(?:ed|ing)\b|\bprovide\b|\bawait\w*|\byet to (?:provide|send|share)\b|\bnot (?:yet )?(?:provided|sent|supplied|received)\b|\boutstanding\b|\bstill needs?\b/i,
     recurrence: /\bagain\b|\brecurr\w*|\bre-?appear\w*|\bre-?occur\w*|\bcame? back\b|\bhas returned\b|\bstill (?:not|un)\w*|\bpersist\w*|\bnot (?:fully )?(?:resolved|fixed)\b/i,
     urgency: /\burgen\w*|\bpriorit\w*|\bescalat\w*|\bexpedite\w*|\basap\b|\bcritical\b|\bimmediate\w*|\bimportance\b|\bas soon as\b|\bquickly\b/i,
-    impact: /\bproduction\b|\bbusiness[- ](?:impact|critical)\b|\bimpact\w*|\baffect\w*|\boutage\b|\bwidespread\b|\ball (?:their |the )?(?:windows |enrolled )?(?:machines|devices)\b|\bcannot (?:assist|serve|work|support)\b/i,
+    // Deliberately NOT a bare \bimpact\w*|\baffect\w*: "logs from the affected devices" and "the
+    // impacted device group" are how every support summary describes WHICH devices are involved,
+    // and matching them declared the BUSINESS IMPACT already carried on a summary that never
+    // mentioned it — so the customer's "store staff cannot assist customers … now hitting
+    // production" was measured as present and never restored. Impact needs the CONSEQUENCE: who
+    // or what is stopped, not which devices show the fault.
+    impact: /\bproduction\b|\bbusiness[- ](?:impact|critical)\b|\b(?:business|operational|customer|service|revenue)[- ]impact\w*|\bimpact(?:s|ed|ing)?\s+(?:on\s+)?(?:production|operations?|business|customers?|users?|staff|stores?)\b|\baffect(?:s|ed|ing)?\s+(?:production|operations?|business|customers?|users?|staff|stores?)\b|\boutage\b|\bwidespread\b|\bat a standstill\b|\ball (?:their |the )?(?:windows |enrolled )?(?:machines|devices)\b|\b(?:cannot|can'?t|unable to) (?:assist|serve|work|support|operate|help)\b|\bstaff\b[^.\n]{0,30}\b(?:cannot|can'?t|unable)\b/i,
     unverified: /\b(?:not|n'?t|never|unable|cannot|can'?t|yet to|awaiting|pending|still)\b[^.\n]{0,45}\b(?:confirm\w*|verif\w*|test\w*|validat\w*|establish\w*|know\w*|report\w*)\b|\bunconfirmed\b|\bunverified\b|\bnot (?:yet )?(?:known|confirmed|verified|established|reported)\b|\boutcome not reported\b/i,
     blocker: /\bblock\w*|\bprevent\w*|\bheld up\b|\bstuck\b|\bcannot proceed\b|\bderail\w*|\bgetting in the way\b|\bbefore (?:the |any )?(?:CPU |high[- ]CPU )?(?:issue|test\w*|verification)\b/i,
     // A summary that merely says the customer "compared it to a previous case" has NOT carried the
@@ -8135,9 +8141,17 @@ function checkCaseSummaryCoverage(text, info) {
         });
     }
     if (sig.unverified) {
+        // BOTH directions of the fabrication, because the chain says the outcome is UNKNOWN and
+        // either invented answer is equally wrong. The original pattern only knew the negative one
+        // ("confirmed … no change"), so "the customer confirmed the fix resolved the high CPU
+        // issue" survived — and the repair then appended "…has not been able to confirm that
+        // outcome yet", leaving the summary contradicting itself in consecutive sentences.
+        // The gap is 60 rather than 40 characters because the real sentences overrun it: "confirmed
+        // the fix resolved the high CPU issue with no change to the remaining behaviour" puts 41
+        // characters between the two halves and slipped through by one.
         falseClaims.push({
             why: 'reported a confirmed test result the customer said could not be confirmed',
-            re: /\b(?:confirmed|verified|validated)\b[^.\n]{0,40}\b(?:no change|no difference|did not (?:fix|resolve|help)|does not (?:fix|resolve|help)|unchanged|persists?)\b/i
+            re: /\b(?:confirmed|verified|validated)\b[^.\n]{0,60}\b(?:no change|no difference|did not (?:fix|resolve|help)|does not (?:fix|resolve|help)|unchanged|persists?)\b|\b(?:confirmed|verified|validated)\b[^.\n]{0,60}\b(?:fixed|resolved|corrected|no longer (?:occurs?|occurring|happening|reproduc\w*)|has stopped|working (?:correctly|as expected)|successful(?:ly)?)\b/i
         });
     }
     // A spam/phishing banner is stamped on by a mail GATEWAY, and a confidentiality footer by the
@@ -8176,6 +8190,13 @@ function checkCaseSummaryCoverage(text, info) {
 
     // 1c. REWRITE any step that books a session the chain shows is already in the diary.
     if (lc.state !== 'closure') src = rewriteBookedMeetingSteps(src, sig.meetingBooked, applied);
+
+    // 1d. DELETE any step that closes a case the chain shows is still OPEN. Pass 1 strikes the
+    //    closure CLAIM, but only inside "Summary:" — so on a case whose newest message is the
+    //    customer reporting the fault has come back, "1. Proceed with closure of the case" was
+    //    left standing as the engineer's first action. A CONDITIONAL closure ("close once the
+    //    customer confirms") is legitimate on an open case and is deliberately left alone.
+    if (lc.state !== 'closure') src = stripClosureSteps(src, applied);
 
     // 2. STRIKE OUT any point-in-time status the case has moved past. detectChainSignals keeps
     //    these out of the prompt, but the model reads the raw chain too, so the claim can still
@@ -8303,6 +8324,44 @@ function stripBoilerplateLines(text, applied, lc, gatewayBoilerplate) {
     if (!removed) return src;
     if (applied) applied.push(`removed ${removed} line${removed === 1 ? '' : 's'} written about mail-system boilerplate`);
     return renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
+}
+
+// A next step that CLOSES a case the chain shows is still open. The [CASE STATE] directive
+// forbids it and pass 1 strikes the same claim out of "Summary:", but that pass is confined to
+// the Summary section by design, so the instruction survived where it does the most damage: as
+// the engineer's first action on a case whose newest message is the customer reporting the fault
+// has returned.
+//
+// A CONDITIONAL closure is a different sentence and stays: "close the case once the customer
+// confirms the fix" is a perfectly good final step on an open case, and deleting it would strip
+// the legitimate end of a plan. Only the unconditional instruction — close it, now — is removed.
+const CLOSURE_STEP_RE = /^\s*(?:[-*•]|\d+[.)])\s*(?:please\s+)?(?:proceed(?:ing)?\s+(?:with|to)\s+(?:the\s+)?(?:soft\s+)?closure|initiate\s+(?:the\s+)?(?:soft\s+)?closure|move\s+(?:the\s+)?case\s+(?:in)?to\s+closure|close\s+(?:out\s+)?(?:the\s+)?case|mark\s+(?:the\s+)?case\s+(?:as\s+)?(?:closed|resolved)|set\s+(?:the\s+)?case\s+(?:status\s+)?to\s+(?:closed|resolved))\b/i;
+const CLOSURE_CONDITION_RE = /\b(?:once|after|when|if|provided|pending|subject to|upon|following|assuming|unless)\b/i;
+function stripClosureSteps(text, applied) {
+    const lines = String(text || '').split('\n');
+    const out = [];
+    let inNextSteps = false, removed = 0, stepsLeft = 0, lastStepIdx = -1;
+    for (const line of lines) {
+        if (FORWARD_SECTION_RE.test(line)) { inNextSteps = true; out.push(line); lastStepIdx = out.length - 1; continue; }
+        if (HISTORICAL_SECTION_RE.test(line)) { inNextSteps = false; out.push(line); continue; }
+        if (inNextSteps && CLOSURE_STEP_RE.test(line) && !CLOSURE_CONDITION_RE.test(line)) { removed++; continue; }
+        out.push(line);
+        // Count what survives in THIS section only. Counting list items across the whole answer
+        // reads the "Troubleshoots done" bullets as surviving steps, and the emptiness guard below
+        // then never fires — which is exactly how the first version of this function handed back a
+        // "Next steps:" heading with nothing under it.
+        if (inNextSteps && /^\s*(?:[-*•]|\d+[.)])\s+\S/.test(line)) { stepsLeft++; lastStepIdx = out.length - 1; }
+    }
+    if (!removed) return text;
+    // Removing the wrong instruction must not leave an empty plan. The case being OPEN is a
+    // verified fact here (the caller gates on lc.state), so the replacement states that and hands
+    // the engineer the one action it licenses — nothing about the technical fault is invented.
+    if (!stepsLeft && lastStepIdx >= 0) {
+        out.splice(lastStepIdx + 1, 0, '1. Do not close this case yet — the chain shows it is still open. Reply to the customer\'s most recent message and agree the next action with them before any closure.');
+    }
+    const rebuilt = renumberOrderedSteps(out.join('\n')).replace(/\n{3,}/g, '\n\n');
+    if (applied) applied.push(`removed ${removed} step${removed === 1 ? '' : 's'} closing a case the chain shows is still open`);
+    return rebuilt;
 }
 
 // A next step that books a session the chain shows is ALREADY BOOKED. The signals block forbids
@@ -16330,10 +16389,83 @@ async function generateCaseSummary() {
     // history, and only then the log-access routing and the symptom checklist, which degrade the
     // answer's usefulness rather than its truthfulness if they are the part that is lost.
     const buildPrompt = async (setLabel) => {
+        // HOW MUCH OF THIS MESSAGE THE MODEL WILL ACTUALLY READ.
+        // completions.create trims the whole payload down to getPromptCharBudget(), and the
+        // system message keeps only a ~1.5K floor, so everything past that in THIS message is
+        // built and then thrown away. On a 79-message case at the small-model budget that was
+        // 8,951 characters — the entire [CASE HISTORY] block, the [LOG ACCESS] routing and the
+        // symptom checklist — discarded after ~37 minutes were spent condensing the history that
+        // fed it, and the cut landed mid-word inside a quoted signal. Sizing the blocks here
+        // against the real budget is what turns that into whole blocks kept or whole blocks
+        // dropped, and what stops the condensation pass running for an answer nobody reads.
+        const SYSTEM_FLOOR = 1700;    // the system message's own trim floor + the trim notice
+        const room = await (async () => {
+            try { const b = await getPromptCharBudget(); return b > 0 ? Math.max(2500, b - SYSTEM_FLOOR) : Infinity; }
+            catch (e) { return Infinity; }
+        })();
+
+        // Blocks in the order they are SACRIFICED when the budget cannot hold them all. The
+        // symptom checklist goes first (it enriches "Next steps" but invents nothing the case
+        // does not already imply), then the language directive (it only matters on a non-English
+        // chain), and the log-access routing last of the three. The CASE STATE and the DECISIVE
+        // SIGNALS are never dropped: they are what decide whether the answer is TRUE, and a
+        // signals block cut in half is worse than one that is whole — the observed failure was
+        // exactly that, the trimmer stopping mid-word inside the customer's quoted impact
+        // statement ("This is now hitting produc") and taking the unverified-outcome and blocker
+        // signals with it. Whole blocks in or out; never half of one.
+        let usePlaybook = playbook, useLang = langDirective, useLogAccess = logAccess;
+
+        const render = (chronology) => {
+            // Referring the model to "[CASE HISTORY]" when the block is not there points it at
+            // nothing. But "no correspondence exists" and "the correspondence would not fit" are
+            // DIFFERENT facts, and telling the model the first when the second is true is a lie it
+            // acts on: on a 79-message case at the small-model budget it produced a summary with no
+            // "Troubleshoots done" section at all and "Next steps: No specific next steps are
+            // provided in the case history" — a blank answer about a case with 79 messages in it.
+            const historyRule = chronology
+                ? '- The [CASE HISTORY] block below lists EVERY message in this case in exact order. Read it end to end before you write: the summary must account for the WHOLE case, not only its newest and oldest messages.'
+                : (chainEntryCount > 0
+                    ? `- This case HAS correspondence — ${chainEntryCount} messages — but the full per-message list does not fit this model's context window, so it is not printed below. Build "Troubleshoots done" from the decisive signals below, the [EMAIL CHAIN] extract, the issue description, the meeting notes and this conversation. You are FORBIDDEN from writing that the case has no history, that no actions were taken, or that no next steps can be determined: the evidence is there, it is simply summarised rather than listed.`
+                    : '- There is no email correspondence synced for this case: work from the issue description, the meeting notes and this conversation only, and do not imply correspondence you cannot see.');
+            const historyRef = chronology ? 'the [CASE HISTORY] below' : 'the case data provided';
+            return renderSummaryPrompt({ historyRule, historyRef, chronology, stateDirective, signalsBlock, langDirective: useLang, logAccess: useLogAccess, playbook: usePlaybook, hosted, peopleLine });
+        };
+
+        // Cost of everything EXCEPT the case history, measured rather than estimated, so the
+        // figure stays right when any of these blocks is reworded.
+        const dropped = [];
+        let fixed = render('').length;
+        if (fixed > room && usePlaybook) { usePlaybook = ''; dropped.push('symptom checklist'); fixed = render('').length; }
+        if (fixed > room && useLang) { useLang = ''; dropped.push('chain-language directive'); fixed = render('').length; }
+        if (fixed > room && useLogAccess) { useLogAccess = ''; dropped.push('log-access routing'); fixed = render('').length; }
+        if (dropped.length) console.warn(`[Case summary] Prompt budget is ${room} chars — dropped ${dropped.join(', ')} so the case state and decisive signals arrive whole.`);
+
+        // A closure case carries neither the [LOG ACCESS] routing nor the symptom checklist (both
+        // are only built while isOpen), and it runs no research — roughly 3.4KB on a small model,
+        // 5KB otherwise, that simply is not in the prompt. Left unclaimed, that room was wasted
+        // while the case history rolled up its 36 oldest messages into one line — and those are
+        // exactly the messages that record what was actually tried, which is what "Troubleshoots
+        // done" is made of. The freed budget goes to the history instead.
+        const closedBonus = isOpen ? 0 : (small ? 3400 : 4900);
+        // The 4,600/11,000 ceiling exists to keep PREFILL fast on a CPU-bound model at the default
+        // 'auto' context — it is a speed choice, not a limit on how much history is useful. An
+        // engineer who has raised Context Size in Settings has deliberately bought that time back,
+        // and on a long case the history is what "Troubleshoots done" is made of, so the room they
+        // paid for goes to it rather than being left unspent: on the 79-message case the ceiling
+        // was the binding constraint at 34 of 79 messages even with 21K characters free.
+        const explicitCtx = !!(LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto');
+        const historyCeiling = explicitCtx ? Infinity : (small ? 4600 : 11000) + closedBonus;
+        const chronologyBudget = Math.max(0, Math.min(historyCeiling, room - fixed));
+
+        // The condensation pass costs one model call per batch — ~37 minutes on a 79-message
+        // chain on a CPU-bound model — and its ONLY consumer is the chronology below. Running it
+        // to fill a block that cannot fit, or that has room for a handful of lines, spends the
+        // engineer's afternoon on text the model never sees. MIN_CONDENSE_ROOM is about 20 lines.
+        const MIN_CONDENSE_ROOM = 1800;
         let historyLines = new Map();
         // Worth the extra model calls only when the chain is long enough that the deterministic
         // gists would actually lose content; short chains go straight through as before.
-        if (chainEntryCount >= 8) {
+        if (chainEntryCount >= 8 && chronologyBudget >= MIN_CONDENSE_ROOM) {
             try {
                 historyLines = await buildCaseHistoryLines(ciForChain, {
                     lc,
@@ -16347,49 +16479,18 @@ async function generateCaseSummary() {
                 if (e && e.name === 'AbortError') throw e;
                 historyLines = new Map();
             }
+        } else if (chainEntryCount >= 8) {
+            console.warn(`[Case summary] Skipped chain condensation: only ${chronologyBudget} chars of prompt budget left for [CASE HISTORY] — the condensed lines could not have reached the model.`);
         }
         setLabel('Building case summary...');
-        // A closure case carries neither the [LOG ACCESS] routing nor the symptom checklist (both
-        // are only built while isOpen), and it runs no research — roughly 3.4KB on a small model,
-        // 5KB otherwise, that simply is not in the prompt. Left unclaimed, that room was wasted
-        // while the case history rolled up its 36 oldest messages into one line — and those are
-        // exactly the messages that record what was actually tried, which is what "Troubleshoots
-        // done" is made of. The freed budget goes to the history instead.
-        const closedBonus = isOpen ? 0 : (small ? 3400 : 4900);
-        const chronology = buildChainChronology(ciForChain, 'grounding', {
-            lc,
-            budget: (small ? 4600 : 11000) + closedBonus,
-            lineFor: (e, i) => historyLines.get(i) || ''
-        });
-        // Referring the model to "[CASE HISTORY]" when no chain is synced points it at a block
-        // that is not there — on those cases the rule names the sources that DO exist.
-        const historyRule = chronology
-            ? '- The [CASE HISTORY] block below lists EVERY message in this case in exact order. Read it end to end before you write: the summary must account for the WHOLE case, not only its newest and oldest messages.'
-            : '- There is no email correspondence synced for this case: work from the issue description, the meeting notes and this conversation only, and do not imply correspondence you cannot see.';
-        const historyRef = chronology ? 'the [CASE HISTORY] below' : 'the case data provided';
-
-        return `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
-
-RULES:
-- Use ONLY facts from the issue description, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — if something decisive is unknown, say so in one short phrase.
-${historyRule}
-- The email chain is ordered NEWEST FIRST: the current state comes from the most recent messages, which OVERRIDE the original issue description if the situation has moved on.
-- NEVER state an OUTCOME the chain does not state. If someone was asked to test, upgrade, reboot or re-enrol, report only what the chain says actually happened: if the result was never reported, or the customer said they could not confirm it, say exactly that. Writing "the customer tested it and confirmed no change" when the chain says "we haven't been able to confirm it yet" is a FABRICATION and the worst possible error in this answer.
-- Never state or imply that the case is closed, closing, resolved or in closure unless the CASE STATE directive below says so.
-- Refer to people by name (e.g. "Ayodeji"), never by internal message numbers. Do NOT output a dated timeline.${peopleLine}
-- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as SOTI Support, or with a SOTI support job title (e.g. "Technical Support, SOTI", "Senior Technical Support Specialist", "Technical Account Manager"), or who writes [INTERNAL] notes / [CALL LOG] entries, is SOTI-side — NEVER write that they are experiencing the issue or that they reported it. If no customer name is given, say "the customer".
-- ONE PERSON, ONE NAME: the same human appears in the case record under different forms of their name (a contact record, a mail display name, a surname-first form, with or without their company). Never present two forms of one name as two different people, and never give them different roles.
-${NO_SCAFFOLD_PROMPT_RULE}
-${NO_BOILERPLATE_PROMPT_RULE}
-- Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
-
-Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported (including the exact symptom in their words, any EARLIER case they compared it to by number, and how they said this one DIFFERS from it), how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
-
-Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
-
-Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
-
-${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
+        const chronology = chronologyBudget > 0
+            ? buildChainChronology(ciForChain, 'grounding', {
+                lc,
+                budget: chronologyBudget,
+                lineFor: (e, i) => historyLines.get(i) || ''
+            })
+            : '';
+        return render(chronology);
     };
 
     await runQuickAIAction('Building case summary...', 'Case summary ready', buildPrompt, {
@@ -16417,6 +16518,42 @@ ${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '
             gatewayBoilerplate: (() => { try { return chainHasGatewayBoilerplate(chainRaw); } catch (e) { return false; } })()
         }
     });
+}
+
+// The Case Summary prompt itself. Extracted from generateCaseSummary so the builder can RENDER
+// it more than once — first without the case history to measure what the rest of it costs, then
+// again with a history sized to whatever budget is actually left.
+//
+// BLOCK ORDER MATTERS. On a tight context the per-request trimmer in completions.create cuts the
+// largest message from its END, so the blocks are ordered by how much the answer's CORRECTNESS
+// depends on them: task/format, then the verified CASE STATE (open vs closing — it decides what
+// "Next steps" may even contain), then the decisive signals, then the case history, and only then
+// the log-access routing and the symptom checklist, which degrade the answer's usefulness rather
+// than its truthfulness if they are the part that is lost.
+function renderSummaryPrompt(p) {
+    const { historyRule, historyRef, chronology, stateDirective, signalsBlock, langDirective, logAccess, playbook, hosted, peopleLine } = p;
+    return `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
+
+RULES:
+- Use ONLY facts from the issue description, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — if something decisive is unknown, say so in one short phrase.
+${historyRule}
+- The email chain is ordered NEWEST FIRST: the current state comes from the most recent messages, which OVERRIDE the original issue description if the situation has moved on.
+- NEVER state an OUTCOME the chain does not state. If someone was asked to test, upgrade, reboot or re-enrol, report only what the chain says actually happened: if the result was never reported, or the customer said they could not confirm it, say exactly that. Writing "the customer tested it and confirmed no change" when the chain says "we haven't been able to confirm it yet" is a FABRICATION and the worst possible error in this answer.
+- Never state or imply that the case is closed, closing, resolved or in closure unless the CASE STATE directive below says so.
+- Refer to people by name (e.g. "Ayodeji"), never by internal message numbers. Do NOT output a dated timeline.${peopleLine}
+- CRITICAL ROLE RULE: the person who REPORTED the problem is the CUSTOMER. Anyone who signs off as SOTI Support, or with a SOTI support job title (e.g. "Technical Support, SOTI", "Senior Technical Support Specialist", "Technical Account Manager"), or who writes [INTERNAL] notes / [CALL LOG] entries, is SOTI-side — NEVER write that they are experiencing the issue or that they reported it. If no customer name is given, say "the customer".
+- ONE PERSON, ONE NAME: the same human appears in the case record under different forms of their name (a contact record, a mail display name, a surname-first form, with or without their company). Never present two forms of one name as two different people, and never give them different roles.
+${NO_SCAFFOLD_PROMPT_RULE}
+${NO_BOILERPLATE_PROMPT_RULE}
+- Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
+
+Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported (including the exact symptom in their words, any EARLIER case they compared it to by number, and how they said this one DIFFERS from it), how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
+
+Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
+
+Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
+
+${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
 }
 
 // Draft the next email the support engineer should send the customer, from the LIVE case
