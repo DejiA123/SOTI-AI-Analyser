@@ -632,6 +632,41 @@ function stripPromptScaffold(text) {
     return renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
 }
 
+// A whole DIRECTIVE BLOCK echoed back at the end of the answer, rather than a reference to one
+// inside a sentence. stripPromptScaffold only knows the second shape: it recognises a block by
+// its BRACKETS, or unbracketed only when a structural noun follows ("the LOG ACCESS directive").
+// A model that copies the block out drops the brackets and keeps the heading — "CASE STATE:",
+// "RECURRENCE — the customer reported…" — which matches neither, so the guard ran and changed
+// nothing. Observed on 3 of 5 drafted emails, appended UNDER "Technical Support, SOTI" in output
+// labelled "ready to paste into the email client": the engineer would have sent the customer
+// SOTI's internal case assessment, quoted lines and all.
+const DIRECTIVE_DUMP_HEAD_RE = /^\s*(?:\*\*|##\s*)?(?:CASE STATE|LOG ACCESS|CHAIN LANGUAGE|DECISIVE CASE SIGNALS|CASE SIGNALS|MCMR RULE|CASE HISTORY|SOTI CHECKS|RECURRENCE|URGENCY|BUSINESS IMPACT|NOT YET VERIFIED|UNVERIFIED|BLOCKED|OPEN QUESTION|PENDING REQUEST|ALREADY PROMISED|A LIVE SESSION HAS ALREADY BEEN OFFERED|HOW THIS CASE DIFFERS|MANDATORY)\b[^\n]{0,120}?(?:\*\*)?\s*(?:[:—–]|$)/;
+// The proof lines those blocks carry: `- Elena Fischer wrote on 2h ago: "…"`.
+const DIRECTIVE_QUOTE_LINE_RE = /^\s*[-*•]?\s*[^\n]{0,80}\b(?:wrote|said)\b[^\n]{0,40}:\s*["“]/;
+// The prose BETWEEN a block's heading and its quotes — "The email chain shows NO confirmed
+// resolution and NO closure agreement — this case is STILL OPEN." Recognised by the directives'
+// own voice rather than by their exact wording, which would break the moment one is reworded:
+// these blocks SHOUT their emphasis, and neither a customer email nor a case summary does.
+// Matched on this vocabulary alone, so an ordinary product acronym (SOTI, DS.log, MCMR, CPU)
+// can never make a real sentence look like scaffold.
+const DIRECTIVE_SHOUT_RE = /\b(?:NO|NOT|NEVER|MUST|ONLY|STILL|OPEN|FORBIDDEN|MANDATORY|EXACT|EXACTLY|EVERY|ALWAYS|CRITICAL|VERIFIED|FACT|SAME|AGAIN)\b/;
+function stripEchoedDirectiveBlocks(text) {
+    const src = String(text || '');
+    const lines = src.split('\n');
+    const start = lines.findIndex(l => DIRECTIVE_DUMP_HEAD_RE.test(l));
+    if (start <= 0) return src;                      // never at index 0 — that would be the answer
+    const tail = lines.slice(start).filter(l => l.trim());
+    if (!tail.length) return src;
+    // Only a genuine DUMP is cut. A single sentence that happens to open with one of these words
+    // is left alone: real content mixed into the tail keeps the tail.
+    const directiveish = tail.filter(l =>
+        DIRECTIVE_DUMP_HEAD_RE.test(l) || DIRECTIVE_QUOTE_LINE_RE.test(l) || /^\s*[-*•]\s/.test(l)
+        || DIRECTIVE_SHOUT_RE.test(l)).length;
+    if (directiveish / tail.length < 0.7) return src;
+    const head = lines.slice(0, start).join('\n').replace(/\s+$/, '');
+    return head ? head + '\n' : src;
+}
+
 function sanitizeAssistantResponse(text) {
     if (!text) return "";
     
@@ -7283,19 +7318,58 @@ function detectChainLanguages(entries) {
     return [...new Set(found)].slice(0, 3);
 }
 
+// The language the case is being CONDUCTED in, and therefore the language every answer about it
+// is written in. detectChainLanguages reports what a chain CONTAINS — including a script name
+// ("Cyrillic script (Russian/Ukrainian and related languages)") that is a fine label for a fact
+// block but not something you can tell a model to write in. This maps a detection onto a language
+// you can actually be instructed to write, and returns '' for an English chain.
+const CHAIN_SCRIPT_WRITING_LANGUAGE = {
+    'Cyrillic script (Russian/Ukrainian and related languages)': 'Russian',
+    'Arabic script': 'Arabic'
+};
+function chainWritingLanguage(entries) {
+    const langs = detectChainLanguages(entries);
+    if (!langs.length) return '';
+    const first = langs[0];
+    return CHAIN_SCRIPT_WRITING_LANGUAGE[first] || first;
+}
+
+// The greeting and sign-off a support engineer actually writes in each language. Supplied rather
+// than left to the model: a small model asked to "write the email in German" keeps the English
+// "Hi Elena," / "Warm regards," it was shown in the layout, because a concrete template beats an
+// abstract instruction every time. Languages absent here fall back to an instruction.
+const EMAIL_SALUTATIONS = {
+    German: { hi: 'Hallo', regards: 'Mit freundlichen Grüßen' },
+    French: { hi: 'Bonjour', regards: 'Cordialement' },
+    Spanish: { hi: 'Hola', regards: 'Un cordial saludo' },
+    Portuguese: { hi: 'Olá', regards: 'Com os melhores cumprimentos' },
+    Italian: { hi: 'Buongiorno', regards: 'Cordiali saluti' },
+    Dutch: { hi: 'Beste', regards: 'Met vriendelijke groet' },
+    Russian: { hi: 'Здравствуйте,', regards: 'С уважением' },
+    Japanese: { hi: '', regards: 'よろしくお願いいたします' }
+};
+
 // kind: 'summary' | 'email' | 'fix'. `entries` = getCleanChainEntries output.
 function buildChainLanguageDirective(entries, kind = 'summary') {
     const langs = detectChainLanguages(entries);
     if (!langs.length) return '';
     const list = langs.length === 1 ? langs[0] : `${langs.slice(0, -1).join(', ')} and ${langs[langs.length - 1]}`;
+    const write = chainWritingLanguage(entries);
     const lines = [
-        `[CHAIN LANGUAGE — FACT, measured from the message text itself: part of this correspondence is written in ${list}.]`,
+        `[CHAIN LANGUAGE — FACT, measured from the message text itself: this case is being conducted in ${list}.]`,
         '- Those messages are ordinary case content written by the people on this case. READ them and use what they actually say — they carry the same weight as the English ones, and on a chain like this the newest one is very often where the case now stands.',
         '- You are FORBIDDEN from describing a message as unreadable, unclear, foreign, suspicious or untrustworthy because of the language it is written in, and from treating the language itself as an event on the case.'
     ];
+    // A case conducted in the customer's language is answered in that language — the summary and
+    // its next steps as well as the email, because the engineer reading them is the one corresponding
+    // with that customer. The three SECTION HEADERS stay in English on purpose: the deterministic
+    // repair that restores dropped facts, deletes fabricated outcomes and strips closure steps
+    // finds its sections by matching those exact English words, so translating them would silently
+    // switch off every one of those guards while looking like it had worked.
     lines.push(kind === 'email'
-        ? `- Write the email in the language SOTI Support has been using with this customer in the chain. Anything you take from a ${list} message must be understood and answered on its substance, never echoed back untranslated.`
-        : `- Write your ENTIRE answer in English. Translate anything you take from a ${list} message into English — never quote a sentence in the original language without stating what it means.`);
+        ? `- Write the ENTIRE email in ${write}, including the subject line, the greeting and the sign-off. The customer wrote to SOTI in ${write} and must be answered in ${write} — replying in English to a case conducted in ${write} is an error.`
+        : `- Write your ENTIRE answer in ${write} — every sentence of the summary, every "Troubleshoots done" bullet and every numbered next step. This case is conducted in ${write} and the engineer reading this answer is corresponding in ${write}.
+- ONE EXCEPTION: keep the three section headers exactly as "Summary:", "Troubleshoots done:" and "Next steps:" in English. They are labels the case record is indexed by. Everything you write UNDER them must be in ${write}.`);
     return lines.join('\n');
 }
 
@@ -7963,6 +8037,9 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
     // answer arrives. It runs again here so a case-writing answer is covered even if it reached
     // this function by a route that did not stream through sanitizeAssistantResponse.
     try { out = stripPromptScaffold(out); } catch (e) { console.warn('Scaffold leak guard failed', e); }
+    // Runs AFTER the inline pass: that one rewrites references inside sentences, this one cuts a
+    // whole directive block the model copied out wholesale, which the inline pass cannot see.
+    try { out = stripEchoedDirectiveBlocks(out); } catch (e) { console.warn('Directive-dump guard failed', e); }
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
     try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
     try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
@@ -16360,6 +16437,11 @@ async function generateCaseSummary() {
     const langDirective = (() => {
         try { return buildChainLanguageDirective(cleanEntries, 'summary'); } catch (e) { return ''; }
     })();
+    // The language the answer is WRITTEN in, threaded into the task spec itself so the budget
+    // fit loop can never drop it. '' on an English chain, which leaves the prompt as it was.
+    const writeLang = (() => {
+        try { return chainWritingLanguage(cleanEntries); } catch (e) { return ''; }
+    })();
     const signalsBlock = (() => {
         try { return signals ? buildCaseSignalsBlock(signals, 'summary', undefined, lc) : ''; }
         catch (e) { return ''; }
@@ -16422,14 +16504,19 @@ async function generateCaseSummary() {
 
         // Blocks in the order they are SACRIFICED when the budget cannot hold them all. The
         // symptom checklist goes first (it enriches "Next steps" but invents nothing the case
-        // does not already imply), then the language directive (it only matters on a non-English
-        // chain), and the log-access routing last of the three. The CASE STATE and the DECISIVE
+        // does not already imply), then the log-access routing. The CASE STATE and the DECISIVE
         // SIGNALS are never dropped: they are what decide whether the answer is TRUE, and a
         // signals block cut in half is worse than one that is whole — the observed failure was
         // exactly that, the trimmer stopping mid-word inside the customer's quoted impact
         // statement ("This is now hitting produc") and taking the unverified-outcome and blocker
         // signals with it. Whole blocks in or out; never half of one.
-        let usePlaybook = playbook, useLang = langDirective, useLogAccess = logAccess;
+        //
+        // The CHAIN LANGUAGE directive is dropped LAST, after everything else, because it does not
+        // enrich the answer — it decides what LANGUAGE the answer is written in. Sacrificing it
+        // second (as this list first did) cost nothing measurable on an English case and produced
+        // a perfectly good English summary of a German case for a German-speaking engineer, which
+        // is not a degraded answer but an unusable one. It costs about 800 characters.
+        let usePlaybook = playbook, useLogAccess = logAccess, useLang = langDirective;
 
         const render = (chronology) => {
             // Referring the model to "[CASE HISTORY]" when the block is not there points it at
@@ -16444,7 +16531,7 @@ async function generateCaseSummary() {
                     ? `- This case HAS correspondence — ${chainEntryCount} messages — but the full per-message list does not fit this model's context window, so it is not printed below. Build "Troubleshoots done" from the decisive signals below, the [EMAIL CHAIN] extract, the issue description, the meeting notes and this conversation. You are FORBIDDEN from writing that the case has no history, that no actions were taken, or that no next steps can be determined: the evidence is there, it is simply summarised rather than listed.`
                     : '- There is no email correspondence synced for this case: work from the issue description, the meeting notes and this conversation only, and do not imply correspondence you cannot see.');
             const historyRef = chronology ? 'the [CASE HISTORY] below' : 'the case data provided';
-            return renderSummaryPrompt({ historyRule, historyRef, chronology, stateDirective, signalsBlock, langDirective: useLang, logAccess: useLogAccess, playbook: usePlaybook, hosted, peopleLine });
+            return renderSummaryPrompt({ historyRule, historyRef, chronology, stateDirective, signalsBlock, langDirective: useLang, logAccess: useLogAccess, playbook: usePlaybook, hosted, peopleLine, writeLang });
         };
 
         // Cost of everything EXCEPT the case history, measured rather than estimated, so the
@@ -16452,8 +16539,8 @@ async function generateCaseSummary() {
         const dropped = [];
         let fixed = render('').length;
         if (fixed > room && usePlaybook) { usePlaybook = ''; dropped.push('symptom checklist'); fixed = render('').length; }
-        if (fixed > room && useLang) { useLang = ''; dropped.push('chain-language directive'); fixed = render('').length; }
         if (fixed > room && useLogAccess) { useLogAccess = ''; dropped.push('log-access routing'); fixed = render('').length; }
+        if (fixed > room && useLang) { useLang = ''; dropped.push('chain-language directive'); fixed = render('').length; }
         if (dropped.length) console.warn(`[Case summary] Prompt budget is ${room} chars — dropped ${dropped.join(', ')} so the case state and decisive signals arrive whole.`);
 
         // A closure case carries neither the [LOG ACCESS] routing nor the symptom checklist (both
@@ -16547,10 +16634,27 @@ async function generateCaseSummary() {
 // the log-access routing and the symptom checklist, which degrade the answer's usefulness rather
 // than its truthfulness if they are the part that is lost.
 function renderSummaryPrompt(p) {
-    const { historyRule, historyRef, chronology, stateDirective, signalsBlock, langDirective, logAccess, playbook, hosted, peopleLine } = p;
+    const { historyRule, historyRef, chronology, stateDirective, signalsBlock, langDirective, logAccess, playbook, hosted, peopleLine, writeLang } = p;
+    // The LANGUAGE DECISION lives here, in the task spec, and not only in the [CHAIN LANGUAGE]
+    // block — because that block is droppable and this is not. Sized against the small-model
+    // budget, the summary prompt is over its room before any optional block is added, so the
+    // fit loop dropped the language directive and the model produced a flawless ENGLISH summary
+    // of a German case. One line that cannot be dropped costs ~180 characters and settles it;
+    // the [CHAIN LANGUAGE] block below keeps its other job (do not call a foreign message
+    // suspicious) and may still be sacrificed under pressure.
+    const languageRule = writeLang
+        ? `\n- WRITE YOUR ENTIRE ANSWER IN ${writeLang.toUpperCase()}. This case is conducted in ${writeLang} and the engineer reading this is corresponding in ${writeLang}. Every sentence, every bullet and every numbered step must be in ${writeLang} — the ONLY exception is the three section headers "Summary:", "Troubleshoots done:" and "Next steps:", which stay in English exactly as written below.`
+        : '';
+    // Repeated ON each section, not only once at the top. With the rule stated only in the RULES
+    // block, the model wrote "Summary:" and "Troubleshoots done:" in the case's language and then
+    // switched to English for "Next steps:" — that section's spec is the longest and most
+    // prescriptive English text in the prompt ("name the exact log file, the server role, the
+    // exact time window"), and the model followed the language it was reading rather than the
+    // language it was told. Naming the language again at the point of use is what holds it.
+    const inLang = writeLang ? ` WRITE THIS SECTION IN ${writeLang.toUpperCase()}.` : '';
     return `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
 
-RULES:
+RULES:${languageRule}
 - Use ONLY facts from the issue description, email chain (INCLUDING [CALL LOG] and [INTERNAL] entries), meeting notes, any attached logs or earlier analysis in this conversation, and our chat history. NEVER invent, assume, or embellish — if something decisive is unknown, say so in one short phrase.
 ${historyRule}
 - The email chain is ordered NEWEST FIRST: the current state comes from the most recent messages, which OVERRIDE the original issue description if the situation has moved on.
@@ -16563,11 +16667,11 @@ ${NO_SCAFFOLD_PROMPT_RULE}
 ${NO_BOILERPLATE_PROMPT_RULE}
 - Output EXACTLY these three sections, in this order, and NOTHING else. Do NOT add a "Key Details", "Case Timeline", or "Current Status" section:
 
-Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported (including the exact symptom in their words, any EARLIER case they compared it to by number, and how they said this one DIFFERS from it), how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.
+Summary: 3-6 sentences — the customer/account, product and versions, platform/environment${hosted ? ` (this deployment is ${hosted}-hosted — state that)` : ''}, what the customer originally reported (including the exact symptom in their words, any EARLIER case they compared it to by number, and how they said this one DIFFERS from it), how the case has developed since (the phases it went through — what was tried, what changed, what came back), and where it stands RIGHT NOW from the newest message (name who said it and when). "Where it stands right now" is the case's TRAJECTORY, not merely its last line: if the issue was fixed, came BACK, and was fixed again, all three belong here — a summary that reports only the latest "resolved" hides the fact that the fix has already failed once. Any recurrence, any explicit urgency, any business/production impact, any second problem now blocking progress, and anything the customer said could NOT be confirmed MUST be carried into this section even when an older message sounds more final.${inLang}
 
-Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".
+Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".${inLang}
 
-Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".
+Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".${inLang}
 
 ${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
 }
@@ -16614,6 +16718,20 @@ async function draftCustomerEmail() {
     const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('email', isSmallLocalModel());
     const customerFirst = (lc.customerSender || '').split(/\s+/)[0] || '';
     const caseNum = ($('caseNum').value || '').trim();
+    // The layout below is the strongest instruction in this prompt — it is shown, not described,
+    // and it ends with "use exactly this layout". Left hardcoded in English it BEAT the language
+    // directive: on a case where SOTI Support had written German throughout, the draft came back
+    // "Hi Elena, … Warm regards," with an English body, ready to send to a customer who has never
+    // received an English word on that case. So the greeting and sign-off are localised HERE, in
+    // the layout, where the model actually reads them.
+    const emailLang = (() => { try { return chainWritingLanguage(emailEntries); } catch (e) { return ''; } })();
+    const sal = EMAIL_SALUTATIONS[emailLang];
+    const greeting = sal
+        ? (sal.hi ? `${sal.hi} ${customerFirst || '<customer first name from the chain>'},` : `${customerFirst || '<customer first name from the chain>'} 様`)
+        : `Hi ${customerFirst || '<customer first name from the chain>'},`;
+    const signOff = sal ? `${sal.regards},` : 'Warm regards,';
+    const subjectLine = `Subject: <short subject${caseNum ? ` referencing Case ${caseNum}` : ''} and the topic${emailLang ? `, written in ${emailLang}` : ''}>`;
+    const bodyLine = `<the email body${emailLang ? `, written in ${emailLang}` : ''}>`;
     const peopleLine = (lc.customerSender || lc.agentSender)
         ? `\n- PEOPLE (exact, from the chain): ${[lc.customerSender && `${lc.customerSender} is the CUSTOMER (the recipient)`, lc.agentSender && `${lc.agentSender} is the SOTI SUPPORT ENGINEER (the sender — me)`].filter(Boolean).join('; ')}. Never swap these roles.`
         : '';
@@ -16628,13 +16746,13 @@ ${NO_SCAFFOLD_PROMPT_RULE}
 ${NO_BOILERPLATE_PROMPT_RULE}
 - Output ONLY the email in PLAIN TEXT — no markdown symbols like ** or ##, no emojis, no preamble such as "Here is the draft", and no commentary after it. Ready to paste into the email client.
 - Use exactly this layout:
-Subject: <short subject${caseNum ? ` referencing Case ${caseNum}` : ''} and the topic>
+${subjectLine}
 
-Hi ${customerFirst || '<customer first name from the chain>'},
+${greeting}
 
-<the email body>
+${bodyLine}
 
-Warm regards,
+${signOff}
 ${lc.agentSender || '<my name — the SOTI support engineer from the chain>'}
 Technical Support, SOTI
 
