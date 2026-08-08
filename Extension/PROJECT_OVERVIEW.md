@@ -59,7 +59,7 @@ File	Size	What it does
 `knowledge/*.md`	—	Product knowledge in two layers. (1) Small "log signature" cheat-sheets injected during analysis: `MobiControl.md`, `Connect.md`, `XSight.md`. (2) The RAG corpus searched by `PulseKB`: `PulseKnowledge.md` (a 24 MB MobiControl scrape, ~10,000 articles) plus the curated, source-referenced `Connect_Knowledge.md` and `XSight_Knowledge.md`. Extend a product by appending `# Title` / `Source:` / body articles to its corpus file, or add a file to `PulseKB.KB_FILES`.
 `setup_local_ai.ps1` / `.bat`	—	One-click installer: installs Ollama, pulls the model, and sets Ollama's environment variables (CORS + speed). The `.bat` just launches the `.ps1`.
 `power.js`	~830 lines	The Power & Resource Governor. Profiles the machine, derives a memory budget for it, measures heap and main-thread lag, hands out throttle settings, reclaims memory under pressure, and keeps the internal AI performance log. Loaded **before** `sidepanel.js`. Section 9.
-`tests/`	—	`power.test.js` (51 unit tests, `node tests/power.test.js`), `run.js` (112 case-answer and multilingual checks, `node tests/run.js`, loading the real `sidepanel.js` through `harness.js`; fixtures in `tests/fixtures/`) and `browser.e2e.js` (55 checks driving the real panel in Chromium). No test framework — plain Node, no `npm install` for the unit tests. Sections 5.11 and 9.
+`tests/`	—	Removed from the repository. Section 5.11 explains how a change is verified now, and how to restore the suite from git history if it is wanted back.
 `lib/`	—	Tesseract.js OCR engine and its WASM/model data.
 ---
 5. The core subsystems (deep dives)
@@ -391,16 +391,21 @@ normally live. An issue-summary recurrence is flagged `fromIssueSummary` and ren
 weaker wording than a chain one, because "I hit this again" in an opening report usually means
 the customer has met the fault before — not that a fix on *this* case regressed.
 ---
-5.11 The test suite — `node tests/run.js`
-`tests/harness.js` evaluates the real `sidepanel.js` inside a Node `vm` context with the
-browser surface stubbed by a self-returning Proxy, then exposes the top level (including
-`const` bindings, read back through `vm.runInContext`). Nothing is copied out of the source:
-the checks run the shipping code, so a red test means the extension is wrong.
-112 checks in four groups — chain parsing, multilingual signals, case C01720260 end to end, and
-English regressions. Two are structural rather than behavioural and guard the trap above: no
-`_ML_RE` may contain `\w`, and every one must carry the `u` flag. Note that a regex built inside
-the vm has the vm's `RegExp` as its prototype, so `instanceof RegExp` is false in the suite —
-duck-type with `typeof re.test === 'function'` instead.
+5.11 Verifying a change
+The `tests/` folder has been removed from the repository. There is no automated suite in the
+tree, so a change to `sidepanel.js` is verified by hand:
+
+1. `node --check sidepanel.js` — this is not optional. A regex assembled at runtime
+   (`new RegExp(...)`) parses fine and throws on LOAD, so an unbalanced bracket in one
+   multilingual cue takes the whole side panel down with no warning until you open it.
+2. Reload the extension and exercise the path you touched with a real case.
+
+The two structural traps the removed suite used to guard still apply and now have nothing
+watching them: no `_ML_RE` may contain `\w` (ASCII-only — it silently fails on Cyrillic, and
+that exact mistake has already been made once), and every one must carry the `u` flag.
+
+The suite is recoverable from git history if it is ever wanted back:
+`git checkout 68e9f63 -- Extension/tests` restores it with all 254 checks.
 ---
 6. Key design decisions & trade-offs (the "why X not Y" summary)
 Decision	Chosen	Rejected alternative	Why
@@ -675,12 +680,11 @@ responsiveness only and uses the conservative `minimal` profile. It degrades rat
 disabling itself.
 9.11 Verifying and tuning it
 ```bash
-node tests/power.test.js      # 51 unit tests — budget maths, pressure, knobs, reclaim, perf log
-node tests/browser.e2e.js     # 55 checks driving the real panel in a real Chromium
+node --check power.js         # syntax only — the suites were removed with tests/
 ```
-The unit tests drive the real module through an injected synthetic machine and clock, so the
-budget for each hardware class above is pinned. The browser suite loads the actual panel with
-a realistic session (4 cases, 12 files, 48 MB of log text) and measures the result:
+The suites that used to pin this down are gone with `tests/`. Verify by hand instead: open the
+Power Monitor (the pill in the top bar) on a realistic session — several cases, a dozen files,
+tens of MB of log text — and read the result off the panel:
 ```
 Idle heap after boot:   119.2 MB  ->  8.5 MB     (92.9% lower)
 Forced reclaim:         123.6 MB  ->  12.4 MB
@@ -689,7 +693,7 @@ After a full workout:   12.4 MB of a 975 MB budget
 To tune: the constants live in one block at the top of `power.js` (`RAM_FRACTION`,
 `CORE_FACTOR_STEPS`, `HEAP_LIMIT_SHARE`, the tier and threshold tables). They are re-exported
 for the tests, so changing one produces a **visible failing test naming the machine class you
-changed** rather than silent drift. Run `node tests/power.test.js` after any edit.
+changed** rather than silent drift. Re-check the Power Monitor readings by hand after any edit — the unit suite was removed with `tests/`.
 ---
 10. Glossary (plain definitions)
 Token — a chunk of text the model works in (~¾ of a word for English; ~2.5
@@ -734,20 +738,20 @@ values in `OllamaAI.completions.create` (answer length).
 Change what counts as "analyse" vs a question → `wantsLogAnalysis()`.
 Change how much memory the app allows itself → the constants block at the top of `power.js`
 (`RAM_FRACTION`, `CORE_FACTOR_STEPS`, `HEAP_LIMIT_SHARE`, the tier and threshold tables).
-They are re-exported for the tests, so run `node tests/power.test.js` afterwards — a change
+They were re-exported for the removed suite, so re-check them by hand afterwards — a change
 that moves any machine class shows up as a named failing test rather than silent drift.
 Change what gets sacrificed under pressure → the `Power.registerReclaimer({...})` blocks
 near the bottom of `sidepanel.js`. Lower `priority` = given up first. Never register
 anything whose loss would destroy the user's work.
 Add a language, or a phrase in one already covered → the `_ML_RE` cue tables in
-`sidepanel.js` (section 5.10), then `node tests/run.js`. Use `\p{L}`, never `\w`, and never a
+`sidepanel.js` (section 5.10), then verify by hand (section 5.11). Use `\p{L}`, never `\w`, and never a
 leading `\b` before non-Latin text — both are ASCII-only and fail silently.
-Golden rule: after any edit to `sidepanel.js`, run a syntax check and the suites before
-reloading: `node --check sidepanel.js`, then `node tests/run.js` and `node tests/power.test.js`.
-The syntax check catches typos that would otherwise break the whole panel; the suites catch the
-ones it cannot see, because a regex assembled at runtime (`new RegExp(...)`) parses fine and
-throws on load — an unbalanced bracket in one multilingual cue takes the whole side panel down,
-and only loading the file finds it.
+Golden rule: after any edit to `sidepanel.js`, run `node --check sidepanel.js` before reloading,
+then actually LOAD the panel. The syntax check catches typos that would otherwise break the
+whole panel, but it cannot catch a regex assembled at runtime (`new RegExp(...)`): that parses
+fine and throws on load, so an unbalanced bracket in one multilingual cue takes the whole side
+panel down and only loading the file finds it. With `tests/` removed there is nothing else
+standing between such an edit and a dead panel.
 Reload the extension at `chrome://extensions` → Reload, then open the side panel and press
 F12 (choose the side-panel document) to see the console — the `[Ollama Request]` line
 shows the exact `num_ctx` / sizes for each call.

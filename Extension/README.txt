@@ -86,9 +86,9 @@ Local AI installer (optional — for first-time Ollama setup):
   setup_local_ai.bat      Automated Ollama + model installer for Windows
   setup_local_ai.ps1      PowerShell implementation of the above installer
 
-Tests (optional — developers only, not needed to run the extension):
-  tests/power.test.js     51 unit tests for the governor:  node tests/power.test.js
-  tests/browser.e2e.js    55 checks driving the real panel in Chromium (needs Playwright)
+Tests:
+  Removed from the repository. After editing sidepanel.js run "node --check sidepanel.js"
+  and then load the panel — see PROJECT_OVERVIEW.md section 5.11.
 
 Repo files:
   README.txt              This file
