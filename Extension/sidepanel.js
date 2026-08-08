@@ -19081,16 +19081,38 @@ $('btnGenerateJira').onclick = async () => {
     // The "Keyword for better formatting" block is the grep-able error tokens from the
     // evidence, topped up with the strongest issue terms that actually appear in it.
     let keywordContent = extractLogAnalysisKeywords(logAnalysisContent);
-    if (primary && primary.matchedTerms && primary.matchedTerms.length) {
-        const evidenceLow = logAnalysisContent.toLowerCase();
-        const kws = keywordContent ? keywordContent.split('\n') : [];
+    {
+        const kws = keywordContent ? keywordContent.split('\n').filter(Boolean) : [];
         const seenKw = new Set(kws.map(k => k.toLowerCase()));
-        for (const t of primary.matchedTerms) {
-            if (kws.length >= 8) break;
-            const k = t.term.toLowerCase();
-            if (t.weight >= 3 && evidenceLow.includes(k) && !seenKw.has(k)) {
-                seenKw.add(k);
-                kws.push(t.term);
+        const push = (term) => {
+            const t = String(term || '').trim();
+            if (!t || kws.length >= 8 || seenKw.has(t.toLowerCase())) return;
+            seenKw.add(t.toLowerCase());
+            kws.push(t);
+        };
+
+        // LAYER 2 — error-shaped tokens from the WHOLE case, not just the one file the ticket
+        // quotes. The block used to be seeded only from the primary log's evidence, so when the
+        // primary file was a device report (no exception classes in it) the case's actual grep
+        // token never appeared: an observed block read "Connected / 2A7C-D0A19F / D0A19F / ROT /
+        // ROT-DC1 / DC1 / SQL / CA" on a case whose defining string is SocketException. The
+        // forensic analysis names the failure, so it is mined before any generic term is.
+        const errorShapedSource = [forensicRoot, triageContent, logAnalysisContent, issueSummaryDraft, notes, chatCtx]
+            .filter(Boolean).join('\n');
+        for (const k of deriveJiraKeywordsFromCase(errorShapedSource, [...seenKw])) push(k);
+
+        // LAYER 3 — the issue terms that actually occur in the evidence, as filler only. These
+        // are ordinary words and identifiers from the case text, so they must never displace a
+        // token from the layers above; and a short bare acronym ("ROT", "DC1", "SQL") is a site
+        // or component label, not something anyone greps a log for, so filler has to be either
+        // reasonably long or carry a digit to qualify.
+        if (primary && primary.matchedTerms && primary.matchedTerms.length) {
+            const evidenceLow = logAnalysisContent.toLowerCase();
+            for (const t of primary.matchedTerms) {
+                if (kws.length >= 8) break;
+                const term = String(t.term || '');
+                const greppable = term.length >= 6 || /\d/.test(term);
+                if (t.weight >= 3 && greppable && evidenceLow.includes(term.toLowerCase())) push(term);
             }
         }
         keywordContent = kws.join('\n');
