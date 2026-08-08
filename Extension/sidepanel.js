@@ -8379,6 +8379,27 @@ function stripNames(line, aliases) {
     return s;
 }
 
+// WHO OWES WHOM. When the newest message on the case is a question the customer asked and
+// nobody has answered, the case is waiting on SOTI — full stop. Answers kept inverting that:
+// a drafted email replied to "do we go ahead on 21 August or do we hold?" with "we need your
+// definitive decision on whether you wish to proceed", and a 30/60/90 recorded the state as
+// "awaiting customer confirmation". Both hand the customer's own question back to them, which
+// is the one thing this case's newest message explicitly refused ("I need a yes or a no, not
+// 'we will let you know'"). Flagged rather than rewritten: the sentence around it is usually
+// fine and only its direction is wrong, and inventing a commitment in its place would be worse.
+const OWED_INVERSION_RES = [
+    /\bwe\s+(?:need|require|await|are\s+awaiting|would\s+need)\s+(?:your|the\s+customer'?s?)\s+(?:definitive\s+|written\s+|formal\s+)?(?:decision|confirmation|answer|response|approval|sign[- ]?off)/i,
+    /\b(?:awaiting|pending|await)\s+(?:the\s+)?customer(?:'s)?\s+(?:confirmation|decision|answer|response|approval|sign[- ]?off)/i,
+    /\bwe\s+need\s+the\s+customer\s+to\s+(?:confirm|decide|advise|tell\s+us|answer)/i,
+    /\b(?:please\s+)?confirm\s+(?:to\s+us\s+)?whether\s+(?:you|the\s+customer)\s+(?:wish|want|intend)/i
+];
+function flagOwedDirection(text, hasUnansweredCustomerQuestion) {
+    const src = String(text || '');
+    if (!src.trim() || !hasUnansweredCustomerQuestion) return src;
+    if (!OWED_INVERSION_RES.some(re => re.test(src))) return src;
+    return src + `\n\n*Check: the newest message on this case is a question from the customer that nobody has answered, so the case is waiting on SOTI — but the text above asks the CUSTOMER to supply a decision or confirmation. Reverse it: answer what they asked, or say plainly what you still need before you can and by when.*`;
+}
+
 function flagLogAccessMismatch(text, hosted) {
     const src = String(text || '');
     if (!src.trim() || !hosted) return src;
@@ -8416,6 +8437,14 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
         const ac = cases.find(x => x.id === activeCaseId);
         out = stripRequestsForHeldEvidence(out, (ac && ac.logs || []).map(l => l && l.name));
     } catch (e) { console.warn('Held-evidence check failed', e); }
+    try {
+        const chain = ($('emailChain') && $('emailChain').value) || '';
+        if (chain.trim()) {
+            const lc = detectCaseLifecycleState({ email_chain: chain });
+            const sig = detectChainSignals(getCleanChainEntries(chain), lc, ($('issueSummary') && $('issueSummary').value) || '');
+            out = flagOwedDirection(out, !!(sig && sig.openQuestion));
+        }
+    } catch (e) { console.warn('Owed-direction check failed', e); }
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
     try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
     try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
