@@ -6279,6 +6279,27 @@ function questionsIn(text) {
             && !PLEASANTRY_QUESTION_RE.test(s) && !PLEASANTRY_QUESTION_ML_RE.test(s));
 }
 
+// An ask does not need a question mark. "Please confirm in writing whether the keep-alive value of
+// 240 seconds that we applied is supported." was the third of three things case C01745392's
+// customer said they needed IN WRITING, and it reached nothing at all, because every extractor
+// downstream looked only for sentences ending in "?".
+// Anchored on the imperative, so a narrative mention of an ask ("I asked Stefan to confirm it")
+// is not mistaken for one being made now.
+const WRITTEN_ASK_RE = /^(?:please\s+|kindly\s+)?(?:confirm|clarify|advise|specify|tell\s+(?:me|us)|let\s+(?:me|us)\s+know)\b/i;
+// The customer saying, in so many words, that they want an answer on the record.
+const ASK_IN_WRITING_RE = /\b(?:i|we)\s+(?:need|require|would\s+like|want)\b[^.?!]{0,80}\bin\s+writing\b/i;
+
+// Everything the customer is waiting on in one message, in the order they wrote it: the questions
+// they asked and the answers they demanded. Kept separate from questionsIn, whose other callers
+// mean questions literally.
+function customerAsksIn(text) {
+    return chainSentences(text).filter(s => {
+        if (s.length < 8 || s.length > 240) return false;
+        if (PLEASANTRY_QUESTION_RE.test(s) || PLEASANTRY_QUESTION_ML_RE.test(s)) return false;
+        return QUESTION_MARK_RE.test(s) || s.startsWith('¿') || WRITTEN_ASK_RE.test(s) || ASK_IN_WRITING_RE.test(s);
+    });
+}
+
 // What SOTI asked the customer to do or supply. Anchored on the ASK, not on the artefact, so it
 // works the same for logs, a screenshot, a version number or a meeting slot.
 const SUPPORT_REQUEST_RE = /\b(?:please\s+(?:provide|send|share|upload|attach|collect|confirm|check|run|try|reproduce|enable|raise|book|schedule)|could you\s|can you\s|would you\s|kindly\s+(?:provide|send|share|confirm|book)|we\s+(?:will\s+)?(?:need|require)\b|we would need\b|let (?:me|us) know\b)/i;
@@ -6902,12 +6923,18 @@ function detectChainSignals(entries, lc, issueText) {
     // been answered by the messages that follow it, and claiming otherwise would be a fabrication.
     const newestSubstantive = entries.find(e => !isOooAutoReply(e) && !isChainLifecycleRow(e) && String(e.body || '').trim());
     if (newestSubstantive && isCustomer(newestSubstantive)) {
-        const qs = questionsIn(newestSubstantive.body);
+        // Every ask in that message, not the first two. A customer who enumerates what they need
+        // ("Three things I need from SOTI now, and I would like them in writing: 1… 2… 3…") is
+        // telling you the whole of what the case owes them, and carrying one of the three forward
+        // produces a plan that answers a third of the message. Two of C01745392's three never
+        // reached this block at all.
+        const qs = customerAsksIn(newestSubstantive.body);
         if (qs.length) {
             out.openQuestion = {
                 sender: (newestSubstantive.sender || 'the customer').trim(),
                 time: (newestSubstantive.time || '').trim(),
-                quote: qs.slice(0, 2).join(' ').slice(0, 300)
+                quote: qs.slice(0, 4).join(' ').slice(0, 700),
+                count: Math.min(qs.length, 4)
             };
         }
     }
@@ -7026,7 +7053,10 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     // customer asking something, that question IS the current state and answering it IS the next
     // step — no amount of correct troubleshooting detail makes up for a summary that misses it.
     if (sig.openQuestion) {
-        lines.push(`- UNANSWERED QUESTION FROM THE CUSTOMER — this is the NEWEST message on the case, so nobody has replied to it yet. ${q(sig.openQuestion)}`);
+        // Plural when the customer enumerated their asks. A directive that says "that question"
+        // over a quote holding three of them invites an answer to one.
+        const many = (sig.openQuestion.count || 1) > 1;
+        lines.push(`- UNANSWERED QUESTION${many ? 'S' : ''} FROM THE CUSTOMER — this is the NEWEST message on the case, so nobody has replied to ${many ? 'them' : 'it'} yet. ${many ? 'EVERY ask quoted here is outstanding and each one needs its own answer. ' : ''}${q(sig.openQuestion)}`);
     }
     // On a case that is CLOSING, an evidence request from earlier is history: chasing it would
     // contradict the CASE STATE directive, which allows closure actions and nothing else.
@@ -7144,7 +7174,7 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         if (asks.length) lines.push(`MANDATORY FOR "Summary:" — state ${asks.join('; ')}. Use the customer's own terms and do not soften or drop any of them.`);
         if (sig.openQuestion) lines.push(closing
             ? 'The customer\'s question above is still unanswered — state it in "Summary:". What "Next steps:" may contain is decided by the CASE STATE directive, not by this signal.'
-            : 'MANDATORY FOR "Next steps:" — step 1 MUST be replying to the customer with the answer to that question. Nothing may come before it.');
+            : `MANDATORY FOR "Next steps:" — step 1 MUST be replying to the customer with the answer to ${(sig.openQuestion.count || 1) > 1 ? 'EVERY ask quoted above; a reply that settles some of them and leaves the rest unmentioned does not count' : 'that question'}. Nothing may come before it.`);
         if (sig.pendingRequest && !closing) lines.push('MANDATORY — the outstanding request above has ALREADY been sent: put it under "Troubleshoots done" as the request that was made, and in "Next steps:" chase EXACTLY the artefacts it names. Naming a different log file or a different collection method than the one already asked for is FORBIDDEN.');
         if (sig.meetingBooked && !closing) lines.push('MANDATORY — the live session above is already BOOKED. Booking it is FORBIDDEN as a next step; the steps are to HOLD it at the stated time and to be ready for it — which log level is raised on which server role beforehand, what is reproduced on the call, and which named artefacts are captured.');
         else if (sig.meetingProposed && !closing) lines.push('MANDATORY — the live session above was ALREADY offered. Do NOT write "arrange a session" as a next step; write CONFIRMING it — give concrete availability, get it booked, and say which log level is raised on which server role and which named artefacts are captured on the call.');
@@ -7158,7 +7188,7 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
             // instructions demanding different first steps is worse than one softened one.
             lines.push('MANDATORY FOR "Summary:" — the customer\'s question quoted above has not been answered; say so, and say what they asked in plain English. "Next steps:" is governed by the CASE STATE directive: do NOT add a reply step that contradicts it.');
         } else if (sig.openQuestion) {
-            lines.push('MANDATORY — the unanswered question above is WHERE THIS CASE STANDS RIGHT NOW. "Summary:" MUST end by stating that the case is waiting on SOTI to answer it, naming who asked and when, and saying what they asked in plain English (translate it if it was not written in English). "Next steps:" MUST open with replying to them with that answer, spelling out what the reply has to contain to actually settle the question — nothing may be listed before it. Writing a plan that leaves the customer\'s newest question unanswered is the worst error you can make on this case.');
+            lines.push(`MANDATORY — the unanswered ${(sig.openQuestion.count || 1) > 1 ? 'asks' : 'question'} above ${(sig.openQuestion.count || 1) > 1 ? 'are' : 'is'} WHERE THIS CASE STANDS RIGHT NOW. "Summary:" MUST end by stating that the case is waiting on SOTI to answer ${(sig.openQuestion.count || 1) > 1 ? 'them — all of them' : 'it'}, naming who asked and when, and saying what they asked in plain English (translate it if it was not written in English). "Next steps:" MUST open with replying to them with that answer, spelling out what the reply has to contain to actually settle ${(sig.openQuestion.count || 1) > 1 ? 'EACH ask — one numbered step per ask, in the order the customer listed them' : 'the question'} — nothing may be listed before it. Writing a plan that leaves the customer\'s newest ${(sig.openQuestion.count || 1) > 1 ? 'asks' : 'question'} unanswered is the worst error you can make on this case.`);
         }
         if (sig.pendingRequest && !closing) {
             lines.push('MANDATORY — the outstanding request above was ALREADY SENT to the customer. Record it under "Troubleshoots done" as the request that was made (with what was asked for), and in "Next steps:" chase EXACTLY the artefacts, server role and collection method it names. You are FORBIDDEN from replacing them with your own choice of log file, tool or procedure, and from asking the customer for the same thing twice under a different name.');
