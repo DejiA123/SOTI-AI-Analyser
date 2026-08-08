@@ -17456,6 +17456,43 @@ const JIRA_KEYWORD_STOPWORDS = new Set([
 // engineer would grep for (an exception class, an error constant, a quoted error value).
 // Feeds the JIRA "Keyword for better formatting and visibility" block. Deterministic: one
 // keyword per row, de-duplicated, order preserved. Returns "" when nothing matches.
+// The same extraction, run over the CASE TEXT rather than the log evidence. The keyword block
+// used to be fed from attached logs alone, so a ticket raised without logs — most of them —
+// shipped its "Keyword for better formatting and visibility" block EMPTY, and the prompt forbade
+// the model from filling it. The tokens an engineer greps for are usually written in the issue
+// summary and the correspondence too ("Removal Failed", "0x80072746", "SqlException"), so they
+// are mined from there before the model is asked for anything.
+function deriveJiraKeywordsFromCase(text, exclude, max = 8) {
+    const src = String(text || '');
+    if (!src.trim()) return [];
+    const seen = new Set((exclude || []).map(k => String(k).toLowerCase()));
+    const out = [];
+    const take = (kw) => {
+        const k = String(kw || '').trim().replace(/[.,;:)\]]+$/, '');
+        if (!k || k.length < 3 || seen.has(k.toLowerCase()) || JIRA_KEYWORD_STOPWORDS.has(k)) return;
+        seen.add(k.toLowerCase());
+        out.push(k);
+    };
+    // Highest signal first, same order of preference as the log extractor.
+    const patterns = [
+        /\b([a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+\.[A-Z][A-Za-z0-9]+)\b/g,                       // java.lang.IllegalStateException
+        /\b([A-Z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+\.[A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout))\b/g,
+        /\b(0x[0-9A-Fa-f]{6,8})\b/g,                                                            // 0x80072746
+        /\b([A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+)\b/g,                                              // OUT_OF_KEYS_PERMANENT_ERROR
+        /\b([A-Z][A-Za-z0-9]*(?:Exception|Error|Failure|Fault|Timeout|Denied|Refused))\b/g,      // SqlException
+        /\b((?:MCMR|MCPR)-\d{3,6})\b/g,                                                          // MCMR-45821
+        /\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)?\s(?:Failed|Failure|Error|Timeout))\b/g                 // Removal Failed
+    ];
+    for (const rx of patterns) {
+        rx.lastIndex = 0;
+        for (const m of src.matchAll(rx)) {
+            if (out.length >= max) return out;
+            if (m && m[1]) take(m[1]);
+        }
+    }
+    return out;
+}
+
 function extractLogAnalysisKeywords(logAnalysisContent) {
     if (!logAnalysisContent) return "";
 
@@ -18000,8 +18037,41 @@ function dropRepeatJiraKeywordBlocks(jira, fromIndex) {
 //  - the "Keyword for better formatting and visibility" block (forced to the extracted keywords,
 //    with any duplicate of the list the model echoed around it removed)
 //  - the L3/SME "Analysis:" field (forced to TBC — an engineer fills it, not the AI)
-function enforceJiraKeywordBlock(jira, keywordContent) {
+// Keep the keywords the MODEL wrote, but only the ones the case actually contains. Used when both
+// deterministic passes found nothing: the alternative was an empty block, and an empty block is
+// what shipped on every ticket raised without logs. Grounding is what makes accepting model text
+// here safe — a keyword that appears nowhere in the source data is dropped, so the block can gain
+// a real token the extractor's patterns missed but never an invented one.
+function groundedModelKeywords(block, groundingText, max = 8) {
+    const hay = String(groundingText || '').toLowerCase();
+    if (!hay) return '';
+    const out = [];
+    const seen = new Set();
+    for (const raw of String(block || '').split('\n')) {
+        const line = raw.trim()
+            .replace(/^[-*•]\s*/, '')          // a bullet the model added anyway
+            .replace(/^\d+[.)]\s*/, '')        // a number the model added anyway
+            .replace(/[.,;:]+$/, '');
+        if (!line || line.length < 3 || line.length > 60) continue;
+        if (/^\[AI:/i.test(line) || /\{code/i.test(line)) continue;
+        if (line.split(/\s+/).length > 4) continue;                 // a sentence, not a keyword
+        if (seen.has(line.toLowerCase())) continue;
+        if (!hay.includes(line.toLowerCase())) continue;            // not in the case — drop it
+        seen.add(line.toLowerCase());
+        out.push(line);
+        if (out.length >= max) break;
+    }
+    return out.join('\n');
+}
+
+function enforceJiraKeywordBlock(jira, keywordContent, opts = {}) {
     if (!jira) return jira;
+    // Nothing deterministic to force: take what the model wrote, keep only what the case supports.
+    if (!String(keywordContent || '').trim() && opts.allowModel) {
+        const rxFind = /Keyword for better formatting and visibility\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}([\s\S]*?)\{code\}/;
+        const found = jira.match(rxFind);
+        keywordContent = groundedModelKeywords(found ? found[1] : '', opts.groundingText);
+    }
     const block = `${JIRA_KEYWORD_HEADING}\n{code:java}\n${keywordContent || ''}\n{code}`;
     const keys = jiraKeywordKeySet(keywordContent);
     const rx = /Keyword for better formatting and visibility\s*\r?\n\{code(?::[a-zA-Z0-9]+)?\}[\s\S]*?\{code\}/;
@@ -18588,6 +18658,23 @@ $('btnGenerateJira').onclick = async () => {
         keywordContent = kws.join('\n');
     }
 
+    // SECOND SOURCE: the case text. The block above only sees ATTACHED LOGS, so a ticket raised
+    // without them — which is most of them — reached the engineer with its keyword block empty,
+    // and instruction 2a told the model never to touch it. The tokens worth grepping for are
+    // usually written in the issue summary, the notes and the repro steps as well, so they are
+    // mined from there by the same deterministic patterns before the model is asked for anything.
+    if (!keywordContent.trim()) {
+        const caseText = [issueSummaryDraft, notes, repro, expected, impact, chatCtx].filter(Boolean).join('\n');
+        const derived = deriveJiraKeywordsFromCase(caseText, []);
+        if (derived.length) keywordContent = derived.join('\n');
+    }
+    // THIRD SOURCE: the model. Only when both deterministic passes found nothing — a case with no
+    // logs and no error tokens written down anywhere. The block is then a placeholder the model
+    // fills, and what it returns is checked against the source data before it is accepted, so an
+    // invented keyword still cannot reach the ticket.
+    const keywordsFromAI = !keywordContent.trim();
+    const keywordGroundingText = [issueSummaryDraft, notes, repro, expected, impact, chatCtx, logAnalysisContent].filter(Boolean).join('\n');
+
     const prefilledAgentVer = agentVer !== 'N/A' ? agentVer : 'TBC';
     const prefilledSotiVer = sotiVer !== 'N/A' ? sotiVer : 'TBC';
     const prefilledPlatform = platform !== 'N/A' ? platform : 'TBC';
@@ -18698,7 +18785,7 @@ ${logAnalysisContent}
 
 Keyword for better formatting and visibility
 {code:java}
-${keywordContent}
+${keywordsFromAI ? '[AI: list 3-8 short grep-able keywords for this issue, ONE PER LINE, taken WORD-FOR-WORD from the Source Data — exception names, error codes, status strings, component or service names. No sentences, no bullets, no explanation.]' : keywordContent}
 {code}
 
 ${getJiraL3SmeSection()}`;
@@ -18708,7 +18795,9 @@ ${getJiraL3SmeSection()}`;
 ### CRITICAL INSTRUCTIONS:
 1. Replace all placeholders (like "[AI: ...]") with intelligent, detailed technical text generated from the notes, case summary, conversation history, and repro steps.
 2. DO NOT modify or remove the pre-filled values in the template (such as SQL Version, Server OS Version, Agent Version, Name of the log file, or the raw log snippets inside the code block) unless you have more specific information to update them with.
-2a. The "Log Analysis:" {code:java} block AND the "Keyword for better formatting and visibility" {code:java} block are VERBATIM pre-filled evidence. Reproduce BOTH exactly as given. NEVER replace the Log Analysis block with a case summary, a chat answer, or prose, and NEVER edit the keyword list. The keyword list appears ONCE, inside its {code:java} fence — do NOT repeat those keywords after the closing {code}, and do NOT restate them anywhere else in the ticket. After the keyword block's closing {code}, the very next line is the "*----*" separator of the L3/SME Engineer section.
+2a. The "Log Analysis:" {code:java} block is VERBATIM pre-filled evidence — reproduce it exactly as given, and NEVER replace it with a case summary, a chat answer, or prose. ${keywordsFromAI
+        ? 'The "Keyword for better formatting and visibility" {code:java} block contains an [AI: ...] instruction: REPLACE it with 3-8 short grep-able keywords, ONE PER LINE, nothing else. Every keyword must appear WORD-FOR-WORD somewhere in the Source Data — an exception or error class, an error code, a status string, a failing component, service or log name. Do NOT invent a keyword, do NOT write sentences, bullets, numbering or explanation, and do NOT leave the block empty.'
+        : 'The "Keyword for better formatting and visibility" {code:java} block is VERBATIM pre-filled evidence too — reproduce it exactly and NEVER edit the keyword list.'} The keyword list appears ONCE, inside its {code:java} fence — do NOT repeat those keywords after the closing {code}, and do NOT restate them anywhere else in the ticket. After the keyword block's closing {code}, the very next line is the "*----*" separator of the L3/SME Engineer section.
 2b. ALWAYS reproduce the entire "L3/SME Engineer" section (heading, Name, Analysis, and the "Otherwise, why was L3/SME not consulted" line). Leave its "Analysis:" field EXACTLY as "Analysis: TBC" — do NOT write an analysis there and do NOT drop the section; an L3 engineer fills it, not you.
 3. For Description of Issue: The ISSUE SUMMARY in the Source Data is the SOURCE OF TRUTH for this section. Rewrite it into a comprehensive, well-written, in-depth technical description of the failure behavior, action, and components — keep every fact the summary states, enrich it with specifics from the case details and conversation, and never contradict it or invent facts. Do NOT copy the summary word-for-word. Only if no Issue Summary is provided, generate the description from the case details, conversation, and notes.
 4. For Justification of Priority: Write a professional justification of why this issue is classified under the selected priority level based on business impact.
@@ -18885,7 +18974,8 @@ ${JIRA_TEMPLATE}`;
         //  - Keyword block to the extracted error tokens.
         //  - L3/SME Analysis back to TBC.
         filled = enforceJiraLogAnalysis(filled, logAnalysisContent);
-        filled = enforceJiraKeywordBlock(filled, keywordContent);
+        filled = enforceJiraKeywordBlock(filled, keywordContent,
+            { allowModel: keywordsFromAI, groundingText: keywordGroundingText });
         filled = enforceJiraLogName(filled, prefilledLogNames);
         filled = ensureJiraL3Section(filled);
         // Strip any boilerplate the model re-added (preamble, Background heading, log-size notes,
