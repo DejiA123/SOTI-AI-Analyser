@@ -8316,6 +8316,69 @@ function collectActionableLines(text) {
     return out;
 }
 
+// Asking the customer to collect a file that is ALREADY attached to this case, and that this
+// very conversation has already analysed, is the single most obviously wrong thing an answer can
+// say — it tells the customer nobody looked. It kept happening because nothing downstream of the
+// model knew which files the case holds. This deletes such a request outright rather than
+// annotating it: unlike a Cloud/On-Prem routing mistake, there is no version of "please send me
+// the log I am holding" that is worth showing the engineer.
+const EVIDENCE_REQUEST_VERB_RE = /\b(?:collect|provide|send|share|upload|supply|obtain|gather|export|attach|forward|furnish|请提供)\b/i;
+function stripRequestsForHeldEvidence(text, heldNames) {
+    const src = String(text || '');
+    const aliases = (heldNames || []).flatMap(heldEvidenceAliases).filter(a => a.length >= 5);
+    if (!src.trim() || !aliases.length) return src;
+
+    const lines = src.split('\n');
+    const kept = [];
+    let removed = 0;
+    for (const line of lines) {
+        const low = line.toLowerCase();
+        const here = aliases.filter(a => low.includes(a.toLowerCase()));
+        // Only a REQUEST is cut, and only when every artefact the line names is already held —
+        // a line that also asks for something we do NOT have is still a real instruction.
+        if (here.length && EVIDENCE_REQUEST_VERB_RE.test(line) && !OTHER_ARTEFACT_RE.test(stripNames(line, here))) {
+            removed++;
+            continue;
+        }
+        kept.push(line);
+    }
+    if (!removed) return src;
+    const out = renumberOrderedSteps(kept.join('\n')).replace(/\n{3,}/g, '\n\n');
+    return out + `\n\n*Check: ${removed === 1 ? 'a step' : `${removed} steps`} above asked the customer for ${removed === 1 ? 'a log file' : 'log files'} already attached to this case and already analysed here, so ${removed === 1 ? 'it has' : 'they have'} been removed. Ask only for evidence the case does not already hold.*`;
+}
+// Any OTHER named artefact in the same line — if the request also covers something we do not
+// hold, the line survives and only its wording is imperfect.
+const OTHER_ARTEFACT_RE = /\b[\w.-]+\.(?:log|txt|zip|json|xml|har|csv|evtx|cab)\b|\bDevice Debug Report\b|\bProfile Execution Status\b|\bDeployment Server log\b|\bevent log\b/i;
+
+// A held file is referred to two ways: by its file name, and in prose by what it IS
+// ("DeviceDebugReport_2A7C-D0A19F.txt" / "the Device Debug Report"). Both forms have to be
+// recognised, or a line naming the same artefact twice looks like it also asks for something we
+// do not have, and the request survives.
+function heldEvidenceAliases(name) {
+    const base = String(name || '').split(/[\\/]/).pop().trim();
+    if (!base) return [];
+    const out = [base];
+    const stem = base.replace(/\.[A-Za-z0-9]{1,5}$/, '');
+    // Split CamelCase and separators into words: DeviceDebugReport_2A7C → "Device Debug Report"
+    const words = stem
+        .replace(/[_\-.]+/g, ' ')
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .split(/\s+/)
+        .filter(w => /^[A-Za-z]{3,}$/.test(w));
+    if (words.length >= 2) out.push(words.join(' '));
+    return out;
+}
+
+function stripNames(line, aliases) {
+    let s = String(line || '');
+    for (const a of aliases) {
+        if (!a) continue;
+        try { s = s.replace(new RegExp(a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'gi'), ' '); }
+        catch (e) { s = s.split(a).join(' '); }
+    }
+    return s;
+}
+
 function flagLogAccessMismatch(text, hosted) {
     const src = String(text || '');
     if (!src.trim() || !hosted) return src;
@@ -8349,6 +8412,10 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
     try { out = stripEchoedDirectiveBlocks(out); } catch (e) { console.warn('Directive-dump guard failed', e); }
     try { out = stripPromptScaffold(out); } catch (e) { console.warn('Scaffold leak guard failed', e); }
     try { out = dedupeAnswerBullets(out); } catch (e) { console.warn('Bullet dedupe failed', e); }
+    try {
+        const ac = cases.find(x => x.id === activeCaseId);
+        out = stripRequestsForHeldEvidence(out, (ac && ac.logs || []).map(l => l && l.name));
+    } catch (e) { console.warn('Held-evidence check failed', e); }
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
     try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
     try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
