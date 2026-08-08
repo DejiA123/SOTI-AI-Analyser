@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.7.0 — a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks (node tests/run.js) run the shipping code and pin all of it down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks (node tests/run.js) pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.7.0 — a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks (node tests/run.js) run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks (node tests/run.js) pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -640,7 +640,12 @@ function stripPromptScaffold(text) {
 // nothing. Observed on 3 of 5 drafted emails, appended UNDER "Technical Support, SOTI" in output
 // labelled "ready to paste into the email client": the engineer would have sent the customer
 // SOTI's internal case assessment, quoted lines and all.
-const DIRECTIVE_DUMP_HEAD_RE = /^\s*(?:\*\*|##\s*)?(?:CASE STATE|LOG ACCESS|CHAIN LANGUAGE|DECISIVE CASE SIGNALS|CASE SIGNALS|MCMR RULE|CASE HISTORY|SOTI CHECKS|RECURRENCE|URGENCY|BUSINESS IMPACT|NOT YET VERIFIED|UNVERIFIED|BLOCKED|OPEN QUESTION|PENDING REQUEST|ALREADY PROMISED|A LIVE SESSION HAS ALREADY BEEN OFFERED|HOW THIS CASE DIFFERS|MANDATORY)\b[^\n]{0,120}?(?:\*\*)?\s*(?:[:—–]|$)/;
+// The leading "\[?" matters: the heading a model copies out is usually STILL BRACKETED — the
+// observed 30/60/90 answer ended with a verbatim "[CASE HISTORY — OLDEST FIRST]" and nine of the
+// block's own rows, including the mail confidentiality footer presented to the engineer as a
+// case event. Without the bracket this pattern matched neither that heading nor (once the inline
+// pass had reworded it) anything else, so the dump survived both guards.
+const DIRECTIVE_DUMP_HEAD_RE = /^\s*(?:\*\*|##\s*)?\[?(?:CASE STATE|LOG ACCESS|CHAIN LANGUAGE|DECISIVE CASE SIGNALS|CASE SIGNALS|MCMR RULE|CASE HISTORY|SOTI CHECKS|RECURRENCE|URGENCY|BUSINESS IMPACT|NOT YET VERIFIED|UNVERIFIED|BLOCKED|OPEN QUESTION|PENDING REQUEST|ALREADY PROMISED|A LIVE SESSION HAS ALREADY BEEN OFFERED|HOW THIS CASE DIFFERS|MANDATORY)\b[^\n]{0,120}?(?:\*\*)?\s*(?:[:\]—–]|$)/;
 // The proof lines those blocks carry: `- Elena Fischer wrote on 2h ago: "…"`.
 const DIRECTIVE_QUOTE_LINE_RE = /^\s*[-*•]?\s*[^\n]{0,80}\b(?:wrote|said)\b[^\n]{0,40}:\s*["“]/;
 // The prose BETWEEN a block's heading and its quotes — "The email chain shows NO confirmed
@@ -681,10 +686,17 @@ function sanitizeAssistantResponse(text) {
         .replace(/<\/?\|?think\|?>/gi, '')
         .trim();
 
-    // The prompt's own scaffolding, out — before anything else reads the text. A step whose
-    // object is one of those blocks is deleted; every other reference is reworded into English
-    // so the sentence around it survives. Runs on the streaming text too, so the engineer never
-    // watches "[MCMR RULE]" appear in an answer they are about to copy into Salesforce.
+    // ORDER MATTERS. A whole block copied out of the prompt is cut FIRST, while its heading is
+    // still the bracketed ALL-CAPS name the dump guard recognises. Running the inline reword
+    // first — as this did — rewrote "[CASE HISTORY — OLDEST FIRST]" to "the case history", which
+    // then matched nothing, so the guard that exists to delete the dump silently laundered it
+    // into what read like real output and kept every row.
+    try { cleaned = stripEchoedDirectiveBlocks(cleaned); } catch (e) { console.warn('Directive-dump guard failed', e); }
+
+    // Then the prompt's own scaffolding, out. A step whose object is one of those blocks is
+    // deleted; every other reference is reworded into English so the sentence around it
+    // survives. Runs on the streaming text too, so the engineer never watches "[MCMR RULE]"
+    // appear in an answer they are about to copy into Salesforce.
     try { cleaned = stripPromptScaffold(cleaned); } catch (e) { console.warn('Scaffold leak guard failed', e); }
 
     // The underscore / no-space spellings of the same labels, which the guard above does not
@@ -1472,6 +1484,8 @@ function switchCase(id) {
         renderLogs();
         updateAllValidations();
         updateQuickActionsPanel();
+        // The Send button belongs to the tab now on screen, not to whatever ran last.
+        syncSendEnabled();
 
         // Update tab highlight
         document.querySelectorAll('.tab-item').forEach(t =>
@@ -1569,8 +1583,25 @@ function renderTabs() {
 
     const usedIds = new Set();
 
+    // Two tabs opened on the SAME case number rendered as two identical "Case C01745392"
+    // labels with nothing to tell them apart — and since each tab holds its own chat, logs
+    // and analysis, picking the wrong one silently puts the work in the wrong place. Number
+    // the duplicates in tab order so they stay distinguishable.
+    const numCounts = new Map();
+    cases.forEach(c => {
+        const n = (c.ci.caseNum || '').trim();
+        if (n) numCounts.set(n, (numCounts.get(n) || 0) + 1);
+    });
+    const numSeen = new Map();
+
     cases.forEach((c, i) => {
-        const label = c.ci.caseNum ? `Case ${c.ci.caseNum}` : c.name;
+        const caseNum = (c.ci.caseNum || '').trim();
+        let label = caseNum ? `Case ${caseNum}` : c.name;
+        if (caseNum && numCounts.get(caseNum) > 1) {
+            const nth = (numSeen.get(caseNum) || 0) + 1;
+            numSeen.set(caseNum, nth);
+            label += ` (${nth})`;
+        }
         let t = existingMap.get(c.id);
 
         if (!t) {
@@ -1957,6 +1988,25 @@ async function precomputeLogIntel(log) {
     }
 }
 
+
+// The SHAPE of a log line, with everything instance-specific removed: timestamps, hex session
+// ids, device serials, GUIDs, paths and every number collapse to "#". Two lines with the same
+// signature are the same EVENT happening to different objects, which is what lets the evidence
+// digest show a pattern twice instead of fifteen times. Deliberately crude — it only has to group
+// lines a human would call "the same message", never to parse them.
+function logLineSignature(text) {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/\b[0-9a-f]{2}(?::[0-9a-f]{2}){3,}\b/gi, '#')       // mac addresses
+        .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '#') // guids
+        .replace(/\b[a-z0-9]{2,8}-[a-z0-9]{4,}\b/gi, '#')            // device ids, e.g. 2A7C-D0A19F
+        .replace(/\b0x[0-9a-f]+\b/gi, '#')                            // hex handles/sessions
+        .replace(/[a-z]:\\[^\s"']+|\/(?:[\w.-]+\/){2,}[\w.-]+/gi, '#') // file paths
+        .replace(/\d+/g, '#')
+        .replace(/[^a-z#]+/g, ' ')
+        .trim()
+        .slice(0, 160);
+}
 
 const LOG_SIGNAL_RULES = [
     { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|SQL transaction|transaction (?:log|deadlock|rollback|aborted)|database schema|schema (?:upgrade|migration|deployment) (?:failed|error)|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|duplicate key)\b/i },
@@ -4957,7 +5007,24 @@ async function buildFileManifest(logs, lastSentAt = 0, opts = {}) {
 // generous output room), but we only FILL ~4K tokens of prompt. The Log-Intelligence pre-analysis
 // (manifest + incident index) keeps the high-signal evidence even at this smaller size, so the
 // answer quality holds while the analysis goes from ~5 minutes to ~2.
-const SMALL_PROMPT_BUDGET_CTX = 6144;
+// 6144 was too small to hold a real case and the overflow was SILENT: on a 24K-char email
+// chain plus a 15K-char issue summary the trimmer cut the system prompt off mid-rule and threw
+// the entire chain and the meeting notes away, then told the model "the full per-message list
+// does not fit". The model duly invented a comparison to a case that does not exist and wrote
+// next steps out of the prompt's own scaffolding. A budget that quietly discards the evidence
+// is worse than a slower answer, so the floor is now a size a real case actually fits in.
+const SMALL_PROMPT_BUDGET_CTX = 16384;
+
+// Where a prompt's RULES stop and its DATA begins. Every data section this app builds opens a
+// line with a bracketed ALL-CAPS name ("[CASE]", "[EMAIL CHAIN — …]", "[DIAGNOSTIC DATA — …]"),
+// and the rules never do — they only MENTION those names mid-sentence, which is why the match
+// is anchored to the start of a line. Returns -1 when the text is rules only, i.e. there is
+// nothing in it that may be sacrificed to the context window.
+const PROMPT_DATA_SECTION_RE = /^\[[A-Z][A-Z0-9 &/()'’,.…—-]{2,}/m;
+function firstPromptDataSectionIdx(text) {
+    const m = String(text || '').match(PROMPT_DATA_SECTION_RE);
+    return m ? m.index : -1;
+}
 async function getPromptCharBudget() {
     if (!LOCAL_AI_MODEL) return Math.floor(650000 * 2.5); // cloud path (legacy generous budget)
     const { hardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
@@ -5254,9 +5321,51 @@ const MAIL_GATEWAY_BANNER_RES = [
 const LEGAL_FOOTER_RES = [
     /(?:^|\n)[ \t]*(?:CONFIDENTIALITY|PRIVACY|LEGAL)\s+NOTICE\s*:[\s\S]*$/i,
     /(?:^|\n)[ \t]*УВЕДОМЛЕНИЕ\s+О\s+КОНФИДЕНЦИАЛЬНОСТИ[\s\S]*$/i,
-    /(?:This|The)\s+(?:e-?mail|message)\s+and\s+any\s+(?:files|attachments|documents)[\s\S]{0,700}?(?:delete it\.?|delete (?:this|the) (?:e-?mail|message)[^.\n]{0,80}\.?|notify the sender[^.\n]{0,90}\.?)/gi,
+    // Singular "attachment" is as common as the plural in real footers ("This message and any
+    // attachment are confidential") and the plural-only class missed it, so the whole block
+    // survived cleaning and reached the model as case content.
+    /(?:This|The)\s+(?:e-?mail|message)\s+and\s+any\s+(?:files?|attachments?|documents?)[\s\S]{0,700}?(?:delete it\.?|delete (?:this|the) (?:e-?mail|message)[^.\n]{0,80}\.?|notify the sender[^.\n]{0,90}\.?)/gi,
     /Это электронное сообщение[\s\S]{0,900}?(?:удалите сообщение\.?|уничтожьте (?:его|сообщение)\.?)/gi
 ];
+
+// A chain PART that OPENS with a confidentiality block is the mail system's trailer, not a
+// message: no human starts an email with their own legal disclaimer. The Salesforce Feed
+// scrape ends with exactly this, and without the test it became the OLDEST "email" on the
+// case — so the chronology's first line was a legal footer attributed to an unknown sender,
+// and the urgency detector quoted "please notify the sender immediately" back as the CUSTOMER
+// demanding priority. Matched against the head only: a real message that QUOTES a disclaimer
+// at the bottom still counts as a message (cleanEmailBody strips the footer off it instead).
+const LEGAL_FOOTER_OPENER_RE = new RegExp(
+    '^[\\s>]*(?:'
+    + '(?:CONFIDENTIALITY|PRIVACY|LEGAL)\\s+NOTICE\\b'
+    + '|(?:This|The)\\s+(?:e-?mail|message|transmission)\\s+(?:and\\s+any\\s+(?:files?|attachments?|documents?)\\s+)?(?:is|are)\\b[^\\n]{0,60}\\bconfidential\\b'
+    + '|(?:This|The)\\s+(?:e-?mail|message)\\s+and\\s+any\\s+(?:files?|attachments?|documents?)\\s+(?:transmitted|sent)\\b'
+    + '|УВЕДОМЛЕНИЕ\\s+О\\s+КОНФИДЕНЦИАЛЬНОСТИ'
+    + '|Это электронное сообщение'
+    + ')', 'i');
+
+function isMailSystemTrailerPart(part) {
+    const s = String(part || '').trim();
+    if (!s) return true;
+    return LEGAL_FOOTER_OPENER_RE.test(s.slice(0, 400));
+}
+
+// The block of "Subject: … / Account: … / Case Owner: … / Opened: …" lines a scrape puts ABOVE
+// the first message is the case's header, not an email. Left in, it became "Message 1 of 9"
+// with no author and no date — an extra, unattributed message at the top of every chronology.
+// The test is deliberately narrow: EVERY non-empty line must be a "Label: value" line, which no
+// real message body ever is (a body always has at least one line of prose), and the part must
+// carry no routing header of its own.
+const METADATA_LINE_RE = /^[A-Z][A-Za-z/&' -]{1,24}:\s*\S/;
+function isChainMetadataPart(part) {
+    const s = String(part || '').trim();
+    if (!s || s.length > 800) return false;
+    const h = readRoutingHeader(s);
+    if (h.sender || h.time) return false;
+    const lines = s.split('\n').map(l => l.trim()).filter(Boolean);
+    if (!lines.length || lines.length > 10) return false;
+    return lines.every(l => METADATA_LINE_RE.test(l));
+}
 
 // Does this RAW chain carry gateway boilerplate the model could mistake for case content? Used to
 // arm the answer-side repair: a summary may only be scrubbed of "phishing/spam" talk when the
@@ -5662,10 +5771,58 @@ function cleanEmailBody(body, sender, cutReplyTail) {
 // The result is returned in TRUE chronological order (newest first) — see
 // orderChainEntriesNewestFirst — because the Salesforce feed order is not reliably
 // chronological and every caller here treats position as chronology.
+// Read the routing header a mail client writes above a message — "From: … Sent: …" in any of
+// the languages REPLY_*_LABEL_SRC covers — and return just the sender name and the timestamp.
+//
+// This logic used to be inline in the single-blob branch below, in hardcoded English, and
+// NOWHERE else. A chain that arrives as ==== -separated parts (what the Salesforce Feed scrape
+// produces as soon as a case has more than one email) therefore went to the scraper-format
+// branch, failed its bracketed-header match, and fell through to `{ time: '', sender: '' }` on
+// EVERY entry. Everything downstream then saw a fully populated 9-message case as nine undated
+// messages from nobody: [CASE HISTORY] printed "undated — unknown" nine times under a header
+// promising "the dates, order, and authors here are EXACT"; role detection could not separate
+// the customer from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI's own
+// product setting was supported; and with no agent name to use, that draft signed off
+// "[Your Name]". Reading the header once, here, is what fixes all of it.
+function readRoutingHeader(part) {
+    // A routing header sits at the very top. Bounding the search also keeps a quoted header
+    // deeper in the body from being read as if it were this message's own.
+    const head = String(part || '').slice(0, 600);
+    const FROM = `(?:${REPLY_FROM_LABEL_SRC})`;
+    const SENT = `(?:${REPLY_SENT_LABEL_ANY_SRC})`;
+    const AFTER_SENT = `(?:${MAIL_TO_LABEL_SRC}|${MAIL_SUBJECT_LABEL_SRC}|Cc|CC|Bcc|BCC)`;
+
+    let sender = '';
+    const fm = head.match(new RegExp(`(?:^|\\n)[ \\t]*${FROM}[ \\t]?:[ \\t]*([^\\n]{0,120})`, 'i'));
+    if (fm) {
+        sender = fm[1] || '';
+        // Apple Mail and Outlook-for-Mac put the name on the line BELOW the label, which is why
+        // the value on the label's own line can legitimately be blank.
+        if (!sender.trim()) {
+            const nl = head.slice(fm.index + fm[0].length).match(/^[\r\n]+[ \t]*([^\n]{1,120})/);
+            sender = nl ? nl[1] : '';
+        }
+        sender = sender.split('<')[0];                                        // "Name <addr>"
+        sender = sender.split(new RegExp(`\\b${SENT}[ \\t]?:`, 'i'))[0];      // one-line form
+        sender = sender.replace(/["']/g, '').replace(/[;,]\s*$/, '').trim();
+        if (sender.length > 80) sender = '';
+    }
+
+    let time = '';
+    const sm = head.match(new RegExp(`(?:^|\\n)[ \\t]*${SENT}[ \\t]?:[ \\t]*([^\\n]{4,120})`, 'i'));
+    if (sm) {
+        time = sm[1].split(new RegExp(`\\b${AFTER_SENT}[ \\t]?:`, 'i'))[0].trim();
+        if (time.length > 60) time = time.slice(0, 60).trim();
+    }
+    return { sender, time };
+}
+
 function parseEmailChainEntries(raw, opts = {}) {
     const HEADER_RE = /^\s*\[([^\][]{4,80})\]\s*(\[[A-Z][A-Z ]{2,20}\]\s*)?([^:\n]{1,80}):\s?/;
     const order = (list) => opts.keepFeedOrder ? list : orderChainEntriesNewestFirst(list, opts);
-    const parts = raw.split(/\n?={20,}\n?/).map(p => p.trim()).filter(Boolean);
+    const parts = raw.split(/\n?={20,}\n?/)
+        .map(p => p.trim())
+        .filter(p => p && !isMailSystemTrailerPart(p) && !isChainMetadataPart(p));
     if (parts.length === 1 && !HEADER_RE.test(parts[0])) {
         // Single pasted blob: split into messages at quoted-reply headers (Outlook style,
         // newest first — same order as the scraper) instead of treating them as one body.
@@ -5673,23 +5830,26 @@ function parseEmailChainEntries(raw, opts = {}) {
         const pieces = parts[0].split(splitRe).map(p => p.trim()).filter(Boolean);
         if (pieces.length > 1) {
             return order(pieces.map(p => {
-                // Sender/date sit on their own lines in the two-line header form; both patterns
-                // stop at the newline, so they read the correct field without bleeding across.
-                const m = p.match(/^From:\s?([^\n<]{1,80}?)\s*(?:<|\bSent:|\n|$)/i);
-                const sm = p.match(/\bSent:\s?([^\n]{4,60}?)(?=\s+To:|\s+Cc:|\s+Subject:|\n|$)/i);
-                return { time: sm ? sm[1].trim() : '', type: '', sender: m ? m[1].trim() : '', body: p };
+                const h = readRoutingHeader(p);
+                return { time: h.time, type: '', sender: h.sender, body: p };
             }));
         }
     }
     return order(parts.map(p => {
         const m = p.match(HEADER_RE);
-        if (!m) return { time: '', type: '', sender: '', body: p };
-        return {
-            time: m[1].trim(),
-            type: (m[2] || '').trim(),
-            sender: m[3].trim(),
-            body: p.slice(m[0].length)
-        };
+        if (m) {
+            return {
+                time: m[1].trim(),
+                type: (m[2] || '').trim(),
+                sender: m[3].trim(),
+                body: p.slice(m[0].length)
+            };
+        }
+        // No bracketed scraper header — but a ==== -separated part still normally carries the
+        // mail client's own "From:/Sent:" block, and reading it is the entire difference
+        // between a dated, attributed chain and a wall of "undated — unknown".
+        const h = readRoutingHeader(p);
+        return { time: h.time, type: '', sender: h.sender, body: p };
     }));
 }
 
@@ -6334,6 +6494,26 @@ const ISSUE_CONTRAST_RE = /\b(?:unlike|in contrast to|contrary to|different(?:ly
 // di + il = "del". Written as the bare dictionary form ("a diferencia de", "contrairement à")
 // the cue misses the way people actually write the sentence, which is exactly how five of these
 // eleven languages were silently unsupported.
+// Proof that a DIFFERENT case is actually being referred to: its number, or the customer naming
+// it in words. Without one of these, a contrast sentence is a contrast between two things INSIDE
+// this case (two devices, two versions, two sites) and says nothing about an earlier case.
+const EARLIER_CASE_REF_RE = new RegExp(
+    '\\b(?:C0\\d{6,}|0\\d{7,})\\b'                                     // Salesforce case number
+    + '|\\b(?:SR|TT|INC|REQ)[- ]?\\d{4,}\\b'                            // other ticket ids
+    + '|\\b(?:previous|earlier|prior|former|last|another|other|old|original)\\s+'
+    + '(?:soti\\s+)?(?:case|ticket|issue|incident|sr|request)\\b'
+    + '|\\bcase\\s+(?:number\\s+)?[#]?\\s*(?:C0\\d{6,}|0\\d{7,})\\b'
+    // Cyrillic needs an explicit range: JavaScript's \w is ASCII-only, so "предыдущего кейса"
+    // never matched a \w-based stem and the Russian fixture regressed the moment this gate landed.
+    + '|(?:предыдущ|прежн|прошл|друг|перв)[а-яё]*\\s+(?:кейс|дел|обращени|случа|тикет)[а-яё]*'
+    + '|(?:vorherig|vorherge|früher|letzt|alt|ander)[a-zäöüß]*\\s+(?:fall|ticket|vorgang|anfrage)'
+    + '|(?:cas|ticket|dossier)\\s+pr[ée]c[ée]dent'
+    + '|(?:caso|ticket|incidencia|chamado)\\s+(?:anterior|precedente)'
+    + '|(?:vorige|eerdere)\\s+(?:case|zaak|melding|ticket)'
+    + '|(?:前回|以前)の(?:ケース|案件|問い合わせ)'
+    + '|(?:之前|上一个)的?(?:案例|工单|案件)'
+    + '|(?:이전|지난)\\s*(?:케이스|사례|티켓)', 'i');
+
 const ISSUE_CONTRAST_ML_RE = mlCue(
     'в отличие от|в противоположность|в этот раз|на этот раз|но в данном случае|однако (?:сейчас|в этом случае)' +
     '|im gegensatz zu\\p{L}*|anders als|diesmal|in diesem fall jedoch' +
@@ -6364,9 +6544,37 @@ function scanIssueSummarySignals(out, issueText) {
     // evidence is the second would invent an earlier fix on a case that never had one, so the
     // two are rendered with different wording and a chain hit always supersedes this.
     const rec = matchEarliest(text, SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE);
-    if (rec) out.recurrence = { ...src, quote: quoteAround(text, rec.index, rec[0].length), fromIssueSummary: true };
+    if (rec) {
+        // "recurrence" / "recurring" as a BARE NOUN is the writer CHARACTERISING the fault, not
+        // the customer reporting a repeat. On a summary whose only hit was "…the same temporary
+        // restoration and the same recurrence" the directive still announced "THE CUSTOMER OPENED
+        // THIS CASE SAYING THEY HAVE HIT THIS PROBLEM AGAIN", and the answer opened by describing
+        // the customer's own reboot workaround as if it were the reported problem. Only when a
+        // real repeat cue ("the same error again", "it has come back", "started again") is present
+        // somewhere in the text does the stronger claim hold.
+        const DESCRIPTIVE_ONLY_RE = /\bre-?(?:occurr?|curr)(?:ed|ing|ence|ences)\b/gi;
+        const bare = /^re-?(?:occurr?|curr)(?:ed|ing|ence|ences)$/i.test(rec[0]);
+        const strongElsewhere = bare
+            ? !!matchEarliest(text.replace(DESCRIPTIVE_ONLY_RE, ' '), SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE)
+            : true;
+        out.recurrence = {
+            ...src,
+            quote: quoteAround(text, rec.index, rec[0].length),
+            fromIssueSummary: true,
+            descriptiveOnly: bare && !strongElsewhere
+        };
+    }
+    // Only a contrast with an EARLIER CASE. The signal's whole text tells the model to explain
+    // "how this case DIFFERS FROM THE ONE THE CUSTOMER COMPARED IT TO", so firing it when no
+    // other case exists does not merely add noise — it instructs the model to write about a case
+    // that was never mentioned. On a summary whose only contrast was between two DEVICES ("an
+    // upgraded device showed 420 seconds, WHEREAS a device that had not yet been upgraded showed
+    // 240") that is exactly what happened: the answer opened "This differs from a previous
+    // case where…", inventing the comparison the directive had promised was there.
     const con = matchEarliest(text, ISSUE_CONTRAST_RE, ISSUE_CONTRAST_ML_RE);
-    if (con) out.issueContrast = { ...src, quote: quoteAround(text, con.index, con[0].length) };
+    if (con && EARLIER_CASE_REF_RE.test(text)) {
+        out.issueContrast = { ...src, quote: quoteAround(text, con.index, con[0].length) };
+    }
 }
 
 // Try the English pattern and its multilingual twin, and take whichever matches EARLIEST — the
@@ -6778,7 +6986,12 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     } else if (sig.meetingProposed && !closing) {
         lines.push(`- A LIVE SESSION HAS ALREADY BEEN OFFERED and the chain does not show it has been held yet. ${q(sig.meetingProposed)}`);
     }
-    if (sig.recurrence && sig.recurrence.fromIssueSummary) {
+    if (sig.recurrence && sig.recurrence.descriptiveOnly) {
+        // The text calls the fault recurring without anyone reporting a repeat. Still decisive —
+        // a workaround that only holds for a few days is not a resolution — but it says nothing
+        // about the customer having met this before, so the directive must not claim that.
+        lines.push(`- THE SYMPTOM COMES BACK — the case data describes this fault as recurring rather than one-off, so any action that only restores service temporarily is a workaround and not a resolution. Carry that into the Summary. Do NOT write that the customer reopened this case, that they had hit this problem before, or that a fix on THIS case failed, unless the chain says so separately. ${q(sig.recurrence)}`);
+    } else if (sig.recurrence && sig.recurrence.fromIssueSummary) {
         // Deliberately weaker than the chain form below: "again" in an opening report usually
         // means the customer has met this fault before — often on the case they go on to name —
         // not that a fix on THIS case failed. Claiming the latter would invent a fix that never
@@ -6900,7 +7113,9 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         } else if (sig.meetingProposed && !closing) {
             lines.push('MANDATORY — the live session above has ALREADY been offered, so proposing one is NOT a next step and belongs under "Troubleshoots done" as an offer already made. The step is to CONFIRM it: give the customer concrete availability (honouring any constraint they stated about timing), get it booked, and state what will be done ON the session — which log level is raised, on which server role, what is reproduced, and which named artefacts are captured. Any step that reads as arranging the session from scratch is wrong.');
         }
-        if (sig.recurrence && sig.recurrence.fromIssueSummary) {
+        if (sig.recurrence && sig.recurrence.descriptiveOnly) {
+            lines.push('MANDATORY FOR "Summary:" — say that the fault RECURS: it returns after whatever has been done so far, so nothing done to date is a resolution. State the reported problem itself first; a workaround the customer applies to get a device working again is not what the case is about, and must never be presented as the issue they reported. You are FORBIDDEN from writing that the customer reopened this case, hit this problem before, or that a fix on THIS case failed.');
+        } else if (sig.recurrence && sig.recurrence.fromIssueSummary) {
             lines.push('MANDATORY FOR "Summary:" — state that the customer opened this case reporting they had hit this problem AGAIN, and say what they compared it to. You are FORBIDDEN from turning that into a claim that a fix delivered on THIS case failed or regressed: nothing in the record says so.');
         } else if (sig.recurrence) {
             lines.push('MANDATORY FOR "Summary:" — the recurrence is the single most decisive fact on this case and MUST be stated there, with who reported it and when. A newer message saying the issue was fixed does NOT cancel it: report BOTH, and say plainly that the problem has now returned once after an earlier fix, so any current "resolved" status is provisional.');
@@ -8010,6 +8225,71 @@ const DEVICE_SIDE_EVIDENCE_RE = /\b(device[- ]side|agent log|device log|Device D
 const CUSTOMER_LOG_REQUEST_RE = /\b(?:ask|asking|request|requesting|have|get|obtain)\b(?:[^.\n]|\.(?!\s)){0,60}\bcustomer\b(?:[^.\n]|\.(?!\s)){0,120}\blogs?\b|\bcustomer\s+to\s+(?:provide|send|share|upload|collect|export|gather)\b(?:[^.\n]|\.(?!\s)){0,100}\blogs?\b/i;
 const AGENT_BACKEND_PULL_RE = /\b(?:pull|retrieve|collect|access|obtain|download)\b(?:[^.\n]|\.(?!\s)){0,60}\b(?:from|on|in|via)\s+the\s+(?:cloud\s+)?backend\b|\bbackend access\b/i;
 
+// "Merge duplicates" is in the prompt, and a small model does not reliably obey it: one
+// "Troubleshoots done" listed the SAME mitigation three times — as bullet 1, bullet 2 and again,
+// at greater length, as bullet 8 — and the plan under it repeated one step three times with only
+// the date changed. Restating one action as three makes a case look three times as worked as it
+// was, so the merge is done here instead of being asked for.
+//
+// Two bullets are the same when the shorter one's content words are ~80% contained in the
+// longer's. The LONGER text is kept (it is the more complete telling) at the position of the
+// FIRST occurrence, so nothing moves and nothing informative is lost.
+const DUP_BULLET_STOPWORDS = new Set(('a an the and or but of to in on at for from with by as is are was were be been being ' +
+    'this that these those it its their they them we our us i he she his her which who whom whose ' +
+    'has have had do does did will would shall should can could may might must not no nor so than then ' +
+    'there here when while after before during into onto over under again further also very more most ' +
+    'other some such only own same too s t just now').split(' '));
+
+function _bulletContentWords(line) {
+    return new Set(String(line || '')
+        .toLowerCase()
+        .replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '')
+        .match(/[a-z0-9][a-z0-9.\-_/]{1,}/g) || []
+    );
+}
+
+function _bulletsAreDuplicates(a, b) {
+    const wa = _bulletContentWords(a), wb = _bulletContentWords(b);
+    const small = wa.size <= wb.size ? wa : wb;
+    const big = wa.size <= wb.size ? wb : wa;
+    if (small.size < 4) return false;                 // too short to judge
+    let hit = 0;
+    for (const w of small) if (big.has(w)) hit++;
+    return hit / small.size >= 0.8;
+}
+
+const BULLET_LINE_RE = /^\s*(?:[-*•]|\d+[.)])\s+\S/;
+
+function dedupeAnswerBullets(text) {
+    const src = String(text || '');
+    if (!src.trim()) return src;
+    const lines = src.split('\n');
+    const out = [];
+    let block = [];                                    // indices into `out` for the current run
+    const flush = () => { block = []; };
+    for (const line of lines) {
+        if (!BULLET_LINE_RE.test(line)) {
+            // A blank line inside a list does not end it; any other prose does.
+            if (line.trim()) flush();
+            out.push(line);
+            continue;
+        }
+        const dupAt = block.find(i => _bulletsAreDuplicates(out[i], line));
+        if (dupAt === undefined) {
+            out.push(line);
+            block.push(out.length - 1);
+            continue;
+        }
+        // Keep whichever telling is fuller, in the slot the first one already holds.
+        if (line.replace(/\s+/g, ' ').trim().length > out[dupAt].replace(/\s+/g, ' ').trim().length) {
+            const marker = (out[dupAt].match(/^\s*(?:[-*•]|\d+[.)])\s+/) || [''])[0];
+            out[dupAt] = marker + line.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '');
+        }
+    }
+    const joined = out.join('\n');
+    return joined === src ? src : renumberOrderedSteps(joined).replace(/\n{3,}/g, '\n\n');
+}
+
 // Everything except the explicitly-historical sections — i.e. the parts of the answer that
 // tell the engineer what to DO. Text with no section headers at all (a drafted email) is
 // forward-looking in its entirety.
@@ -8052,10 +8332,11 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
     // Idempotent, and normally a no-op: the streaming sanitizer clears the scaffold as the
     // answer arrives. It runs again here so a case-writing answer is covered even if it reached
     // this function by a route that did not stream through sanitizeAssistantResponse.
-    try { out = stripPromptScaffold(out); } catch (e) { console.warn('Scaffold leak guard failed', e); }
-    // Runs AFTER the inline pass: that one rewrites references inside sentences, this one cuts a
-    // whole directive block the model copied out wholesale, which the inline pass cannot see.
+    // Dump-cut BEFORE the inline reword, for the same reason as in sanitizeAssistantResponse: the
+    // inline pass renames a block heading, and a renamed heading is one this guard cannot find.
     try { out = stripEchoedDirectiveBlocks(out); } catch (e) { console.warn('Directive-dump guard failed', e); }
+    try { out = stripPromptScaffold(out); } catch (e) { console.warn('Scaffold leak guard failed', e); }
+    try { out = dedupeAnswerBullets(out); } catch (e) { console.warn('Bullet dedupe failed', e); }
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
     try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
     try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
@@ -10753,8 +11034,25 @@ async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weigh
             let used = 0;
             for (const file of fileOrder) {
                 if (used >= phase1Budget) break;
+                // Near-duplicates are capped BEFORE the per-file slice. One event that hits 15
+                // devices logs 15 lines that differ only by device id and timestamp, all scoring
+                // identically — and they took every slot: a management-service log contributed
+                // eleven copies of "presence flag left as CONNECTED …" and not one of the DISTINCT
+                // lines that explained why (the idle sweep, the un-notified teardown, the
+                // keep-alive default the upgrade changed, the state flip to OFFLINE). Two copies
+                // prove the pattern; the rest only prove it again.
+                const DUP_PER_SIGNATURE = 2;
+                const sigCount = new Map();
+                let suppressed = 0;
                 const rows = byFile.get(file).rows
                     .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
+                    .filter(h => {
+                        const sig = logLineSignature(h.text);
+                        const n = (sigCount.get(sig) || 0) + 1;
+                        sigCount.set(sig, n);
+                        if (n > DUP_PER_SIGNATURE) { suppressed++; return false; }
+                        return true;
+                    })
                     .slice(0, maxLinesPerFile)
                     .sort((a, b) => a.lineNum - b.lineNum); // chronological within the chosen top lines
                 let seg = `\n### ${file}\n`;
@@ -10767,6 +11065,11 @@ async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weigh
                     const row = `Line ${h.lineNum}${h.ts ? ` @ ${h.ts}` : ""}: ${text}\n`;
                     if (used + seg.length + row.length > phase1Budget) break;
                     seg += row; any = true;
+                }
+                // The suppressed copies are still FACTS about scale — how many devices/objects the
+                // same event hit — so their count is stated rather than silently dropped.
+                if (any && suppressed > 0) {
+                    seg += `(+${suppressed} more line${suppressed === 1 ? '' : 's'} in this file identical in form to ones above, differing only in device/id/timestamp — the same events repeating across the estate.)\n`;
                 }
                 if (any) { body += seg; used += seg.length; digestedFrom.add(logs.find(l => (l.name || "Attached log") === file) || {}); }
             }
@@ -13468,9 +13771,16 @@ function isSmallLocalModel() {
 // warm. num_predict still varies per task (it does NOT trigger a reload).
 async function getSessionCtx(model) {
     const { hardMax } = await getHardCtxMax(model);
-    const small = /(0\.5b|1\.5b|1b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(model || '');
     if (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto') return hardMax;
-    return small ? Math.min(8192, hardMax) : Math.min(32768, hardMax);
+    // Auto used to clamp every "small" model to 8192 REGARDLESS of what it supports. On
+    // gemma4:e2b — whose /api/show reports a 131072 window — that produced a request logged as
+    // "modelMax: 131072, hardMax: 65536, set num_ctx: 8192", and the prompt trimmer then had to
+    // destroy the prompt to fit a window the model never needed. num_ctx costs KV-cache memory,
+    // NOT prefill time (prefill scales with prompt tokens — that is what SMALL_PROMPT_BUDGET_CTX
+    // is for), so starving it bought no speed and cost the answer its evidence. Auto now gives
+    // every model the same working window it can actually hold, which also keeps ONE num_ctx
+    // across the session so Ollama never reloads the model between turns.
+    return Math.max(8192, Math.min(32768, hardMax));
 }
 
 // Preload the model at the session num_ctx so the user's FIRST query is already warm
@@ -13810,11 +14120,16 @@ const OllamaAI = {
                     let minKeep = 1500;
                     if (manifestEnd >= 0) minKeep = Math.min(manifestEnd + 30, 7000);
                     if (chronoIdx >= 0) minKeep = Math.min(Math.max(minKeep, chronoIdx), 9000);
-                    // System message: never cut into the rules block itself — the data section
-                    // starts at [ISSUE SUMMARY], so keep at least everything before it (capped).
+                    // System message: never cut into the rules block itself. The data sections are
+                    // the bracketed ALL-CAPS blocks, so the rules are everything before the FIRST
+                    // one — found generically rather than by looking for [ISSUE SUMMARY], which
+                    // only exists on some paths. On the case-summary path it does not, minKeep
+                    // stayed at its 1500 default, and the rules were cut mid-word inside rule 5:
+                    // the model lost every rule after it and answered without them.
                     if (bigIdx === 0 && m.role === 'system') {
-                        const dataStart = content.indexOf('[ISSUE SUMMARY');
-                        if (dataStart > 0) minKeep = Math.max(minKeep, Math.min(dataStart, 4500));
+                        const rulesEnd = firstPromptDataSectionIdx(content);
+                        if (rulesEnd < 0) { atFloor.add(bigIdx); continue; }  // all rules, no data — never cut
+                        minKeep = Math.max(minKeep, rulesEnd);
                         // Keep the compact [CONVERSATION SO FAR] memory digest whole — it is the
                         // model's reliable record of earlier turns and is deliberately tiny, so
                         // protecting it costs little and is what preserves chat memory once the
@@ -13822,10 +14137,15 @@ const OllamaAI = {
                         const convoEnd = content.indexOf('[END CONVERSATION SO FAR]');
                         if (convoEnd > 0) minKeep = Math.max(minKeep, Math.min(convoEnd + 26, 7000));
                     }
-                    const newLen = Math.max(minKeep, content.length - over - 150);
+                    let newLen = Math.max(minKeep, content.length - over - 150);
                     // A cut the appended notice would cancel out frees no space — floor reached.
                     if (newLen >= content.length - 200) { atFloor.add(bigIdx); continue; }
-                    m.content = content.slice(0, newLen) + "\n\n[Evidence trimmed to fit the context window — the manifest and primary findings above are complete.]";
+                    // Land the cut on a line boundary. A raw slice ended prompts mid-word — the
+                    // last thing one model was told was `the business impact I have been asked to
+                    // quant` — which reads to the model as corrupted input rather than a boundary.
+                    const nl = content.lastIndexOf('\n', newLen);
+                    if (nl > minKeep - 200 && nl > newLen - 400) newLen = nl;
+                    m.content = content.slice(0, newLen).replace(/\s+$/, '') + "\n\n[Evidence trimmed to fit the context window — the manifest and primary findings above are complete.]";
                     totalChars = messages.reduce((acc, x) => acc + (x.content ? x.content.length : 0), 0);
                     console.warn(`[Ollama Request] Trimmed message #${bigIdx} to ${newLen} chars to fit context`);
                 }
@@ -14340,6 +14660,20 @@ ${body}
 //     Both options are currently UNUSED: the Email Chain In-depth Analysis (QA) button that set
 //     them was removed from the UI. A typed "summarise the email chain" still reaches the digest
 //     through isEmailChainSummaryRequest, which is why that path keeps working.
+// Point the ONE Send button at whichever case the user is actually looking at. busyMap is
+// per-case precisely so a second case can be worked while the first streams, but the button was
+// switched off globally the moment ANY case started and back on when it finished. On a second
+// tab that owns no request, Send was dead: the click did nothing, no toast, the typed question
+// just sat in the box. (Enter still worked, because the keydown handler calls send() directly —
+// which is how the per-case design was reachable at all.) Called wherever busy state or the
+// active case changes, so the button always agrees with the tab on screen.
+function syncSendEnabled() {
+    const btn = $('btnSend');
+    if (!btn) return;
+    btn.disabled = !!busyMap.get(activeCaseId);
+    btn.title = btn.disabled ? 'This case is still generating — its answer is on the way' : '';
+}
+
 async function send(overrideText = null, silent = false, opts = {}) {
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) {
@@ -14361,8 +14695,8 @@ async function send(overrideText = null, silent = false, opts = {}) {
 
     if (!txt && c.logs.length === 0 && c.imgs.length === 0) return;
     busyMap.set(c.id, true);
-    $('btnSend').disabled = true;
-    
+    syncSendEnabled();
+
     if (typeof overrideText !== 'string') {
         $('chatIn').value = ''; 
         $('chatIn').style.height = '';
@@ -15345,6 +15679,14 @@ ${imgContext}`;
             } catch (e) { console.warn('Case summary repair failed', e); }
         }
 
+        // A caller-supplied deterministic repair, for facts the CALLER already knows and the
+        // model is only being asked to copy. Anything computed in the app should never depend on
+        // the model reproducing it — see repair306090Header.
+        if (typeof opts.repairAnswer === 'function') {
+            try { finalAnswer = opts.repairAnswer(finalAnswer) || finalAnswer; }
+            catch (e) { console.warn('Answer repair failed', e); }
+        }
+
         // STILL cut off after the continuation rounds — say so. Silently presenting a report that
         // stops mid-sentence as if it were the finished analysis is the worst outcome: the agent
         // reads a verdict that was never written. Make the gap explicit and actionable instead.
@@ -15374,7 +15716,9 @@ ${imgContext}`;
         busyMap.set(c.id, false);
         streamControllers.delete(c.id);
         streamingElements.delete(c.id); // Clean up the live element reference
-        $('btnSend').disabled = false;
+        // Re-enables only if the case that just finished is the one on screen; a different tab
+        // that is still generating keeps its own button disabled.
+        syncSendEnabled();
         // Clear images after sending so they don't hang around for the next prompt
         if (c && c.imgs) {
             c.imgs = [];
@@ -17014,6 +17358,31 @@ Deliver the fix with full confidence, grounded 100% in the case facts and the re
     });
 }
 
+// Fill the two 30/60/90 headers the APP already knows the answer to. The prompt states both as
+// hard facts ("30/60/90:" MUST be "30-day"; "Date of Update:" MUST be …), and the model still
+// returned "30/60/90:" with nothing after it — a management-review document whose first line was
+// blank. A value the app computed must never depend on the model copying it across, so it is
+// written in deterministically here. Only ever fills a header that is EMPTY or wrong; a correct
+// value the model produced itself is left exactly as written.
+function repair306090Header(text, milestone, todayLabel) {
+    let out = String(text || '');
+    if (!out.trim()) return out;
+    const setHeader = (label, value) => {
+        if (!value) return;
+        const re = new RegExp(`^([ \\t]*${label}[ \\t]*:)([^\\n]*)$`, 'm');
+        const m = out.match(re);
+        if (!m) return;
+        const current = m[2].trim();
+        if (current && current.toLowerCase() === String(value).toLowerCase()) return;
+        // A non-empty header is only corrected when it disagrees with the computed fact.
+        if (current && current.toLowerCase().includes(String(value).toLowerCase())) return;
+        out = out.replace(re, `$1 ${value}`);
+    };
+    setHeader('30/60/90', milestone);
+    setHeader('Date of Update', todayLabel);
+    return out;
+}
+
 // "30/60/90 Case Analysis" — the management-review write-up for an aging case. The 30/60/90
 // milestone is derived DETERMINISTICALLY from the Case Age field (never guessed) and today's
 // date is injected as fact. Open cases get release-notes / Pulse research so Research Links
@@ -17038,9 +17407,10 @@ async function generate306090Analysis() {
     // Milestone is a fact, derived from Case Age (in days) — the model must not invent it.
     const ageRaw = ($('caseAge').value || '').trim();
     const ageNum = parseFloat(ageRaw);
-    let milestoneDirective;
+    let milestoneDirective, milestoneValue = '';
     if (!isNaN(ageNum)) {
         const bucket = ageNum >= 90 ? '90-day' : ageNum >= 60 ? '60-day' : ageNum >= 30 ? '30-day' : 'under 30 days';
+        milestoneValue = bucket;
         milestoneDirective = `"${bucket}" (the case is ${ageNum} days old)`;
     } else {
         milestoneDirective = 'the correct milestone if the case age is stated anywhere in the context, otherwise "Unknown — case age not provided"';
@@ -17079,7 +17449,8 @@ ${chronology ? chronology + '\n\n' : ''}${logAccess ? logAccess + '\n\n' : ''}Ba
         freshContext: true,
         skipResearch: !researchQuery,
         researchQuery,
-        copyKind: 'summary'
+        copyKind: 'summary',
+        repairAnswer: (t) => repair306090Header(t, milestoneValue, today)
     });
 }
 
@@ -18251,6 +18622,12 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts, signa
             facts && facts.platform && facts.platform !== 'N/A' ? `Platform: ${facts.platform}` : '',
             facts && facts.issue ? `Issue Summary: ${String(facts.issue).slice(0, 600)}` : ''
         ].filter(Boolean).join('\n');
+        // The session context — NOT a hardcoded 4096. This pass is small but it is not tiny:
+        // the draft plus the case facts measured 16,705 chars on a real case, roughly 6.7K
+        // tokens, so a 4096 window silently discarded most of the draft it was asked to
+        // rewrite. Reusing the session size also stops Ollama re-allocating the KV cache
+        // (a full model reload, minutes on a CPU) between the report and its refinements.
+        const refineCtx = await getSessionCtx(LOCAL_AI_MODEL);
         const res = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -18264,7 +18641,7 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts, signa
                 stream: false,
                 keep_alive: -1,
                 ...(isThinkingModel ? { think: false } : {}),
-                options: { num_ctx: 4096, temperature: 0.3, top_p: 0.9, repeat_penalty: 1.1, num_predict: 512 }
+                options: { num_ctx: refineCtx, temperature: 0.3, top_p: 0.9, repeat_penalty: 1.1, num_predict: 512 }
             })
         });
         if (!res.ok) return '';
@@ -18389,11 +18766,30 @@ const JiraProgress = {
         if (stage) this.stage = stage;
     },
     _animate() {
-        if (typeof requestAnimationFrame !== 'function') { this._paint(); return; }
         cancelAnimationFrame(this._raf);
+        if (this._tick) { clearInterval(this._tick); this._tick = null; }
+        // requestAnimationFrame is the ONLY thing that used to advance this bar, and a side panel
+        // that is not compositing gets no frames — the panel loses focus, the browser stops
+        // calling back, and the bar sits at "0% — Preparing case data…" for the entire run. That
+        // is exactly what a 33-minute JIRA generation looked like from the outside while the
+        // internal target was already at 87%. A timer keeps the numbers honest whether or not
+        // frames are being produced; rAF still drives the smooth easing when they are.
+        this._tick = setInterval(() => {
+            if (this.shown < this.target || this.shown < this.soft) this._advance(160);
+            this._paint();
+        }, 250);
+        if (typeof requestAnimationFrame !== 'function') { this._paint(); return; }
         this._last = (typeof performance !== 'undefined' ? performance.now() : Date.now());
         const step = (now) => {
             const dt = Math.min(120, now - this._last); this._last = now;
+            this._advance(dt);
+            this._paint();
+            this._raf = requestAnimationFrame(step);
+        };
+        this._raf = requestAnimationFrame(step);
+    },
+    _advance(dt) {
+        {
             if (this.shown < this.target) {
                 // Catch up to real progress with a smooth ease-out (~1.5–2 s to close a big gap, so
                 // the 1%→22% setup phase reads as a visible glide, not a snap) plus a small linear
@@ -18405,10 +18801,7 @@ const JiraProgress = {
                 // ceiling so the bar stays alive without ever passing where the real work actually is.
                 this.shown = Math.min(this.soft, this.shown + (this.soft - this.shown) * (1 - Math.pow(0.6, dt / 1000)));
             }
-            this._paint();
-            this._raf = requestAnimationFrame(step);
-        };
-        this._raf = requestAnimationFrame(step);
+        }
     },
     _paint() {
         const f = $('jiraProgFill'), t = $('jiraProgPct'), s = $('jiraProgStage');
@@ -18418,6 +18811,7 @@ const JiraProgress = {
     },
     close() {
         if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
+        if (this._tick) { clearInterval(this._tick); this._tick = null; }
         $('mGen').style.display = 'none';
     }
 };
@@ -18851,12 +19245,34 @@ ${JIRA_TEMPLATE}`;
         const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
 
         const numPredict = 3072;
-        const estimatedTokens = Math.ceil(userPrompt.length / 3.0);
+        // Size the window against BOTH messages at the same 2.5 chars/token the chat path uses.
+        // Counting only userPrompt (and dividing by an optimistic 3.0) under-read a real request
+        // by ~4K tokens: 40,271 chars of prompt went out with num_ctx 16384 and num_predict 3072,
+        // so the prompt alone filled the window and Ollama had to discard the front of it —
+        // exactly the "system prompt silently dropped" failure the chat path guards against.
+        const CHARS_PER_TOKEN = 2.5;
+        const promptChars = systemPrompt.length + userPrompt.length;
+        const estimatedTokens = Math.ceil(promptChars / CHARS_PER_TOKEN);
         const neededTokens = estimatedTokens + numPredict + 500;
         const { hardMax: jiraHardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
-        const numCtx = Math.max(8192, Math.min(jiraHardMax, Math.ceil(neededTokens / 1024) * 1024));
+        // Never below the session size: staying on one num_ctx for the whole session is what
+        // keeps the model loaded, and dropping to a bespoke smaller window here reloaded it.
+        const jiraSessionCtx = await getSessionCtx(LOCAL_AI_MODEL);
+        const numCtx = Math.min(jiraHardMax, Math.max(jiraSessionCtx, Math.ceil(neededTokens / 1024) * 1024));
 
-        console.log(`[Ollama JIRA Request] Model: ${LOCAL_AI_MODEL}, Chars: ${userPrompt.length}, Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}`);
+        console.log(`[Ollama JIRA Request] Model: ${LOCAL_AI_MODEL}, Chars: ${promptChars} (system ${systemPrompt.length} + user ${userPrompt.length}), Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, sessionCtx: ${jiraSessionCtx}, hardMax: ${jiraHardMax}`);
+
+        // If even the model's largest window cannot hold the source data plus the report, cut the
+        // SOURCE DATA here — on a line boundary, with the cut declared — rather than letting
+        // Ollama drop the front of the prompt, which is where the template and the rules live.
+        let jiraUserPrompt = userPrompt;
+        const jiraMaxPromptChars = Math.floor((numCtx - numPredict - 500) * CHARS_PER_TOKEN) - systemPrompt.length;
+        if (jiraMaxPromptChars > 2000 && jiraUserPrompt.length > jiraMaxPromptChars) {
+            const cut = jiraUserPrompt.lastIndexOf('\n', jiraMaxPromptChars - 200);
+            jiraUserPrompt = jiraUserPrompt.slice(0, cut > 2000 ? cut : jiraMaxPromptChars - 200).replace(/\s+$/, '')
+                + '\n\n[Source data trimmed to fit the context window — everything above is complete. Fill any field this cut leaves unsupported with "TBC" rather than inferring it.]';
+            console.warn(`[Ollama JIRA Request] Source data trimmed to ${jiraUserPrompt.length} chars to fit num_ctx ${numCtx}`);
+        }
 
         // Detect thinking models — disable internal reasoning for Gemma 4, etc. (substring match to support GGUF/custom names)
         const isThinkingModelJira = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
@@ -18910,7 +19326,7 @@ ${JIRA_TEMPLATE}`;
                 model: LOCAL_AI_MODEL,
                 messages: [
                     { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userPrompt }
+                    { role: 'user', content: jiraUserPrompt }
                 ],
                 stream: true,
                 keep_alive: -1,
