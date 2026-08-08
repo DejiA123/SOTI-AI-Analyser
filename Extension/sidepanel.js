@@ -2009,6 +2009,18 @@ function logLineSignature(text) {
 }
 
 const LOG_SIGNAL_RULES = [
+    // A log's most explanatory lines are often not ERRORs at all. They are the line that states
+    // what a setting was CHANGED to, the line that records a state FLIP, and the line that says
+    // the peer was NOT told. On the half-open-socket case the whole mechanism was written down
+    // in exactly three such lines — "previous configuration revision 43 carried
+    // keepAliveIntervalSeconds=240", "presence -> OFFLINE", "device NOT notified (no FIN
+    // observed from peer)" — and every one of them was scored too low to reach the model, which
+    // then had to infer the mechanism and cited a line that does not say it.
+    { category: 'State/Config Transition', weight: 40, regex: /\b(?:previous (?:configuration|config|setting|value)|default (?:changed|is now|was)|(?:changed|updated|reverted|restored) (?:from|to)\s|[A-Za-z]+(?:Seconds|Interval|Timeout|Enabled|Disabled|Mode|Level)\s*=\s*\d+|presence\s*(?:->|=>|:)\s*(?:OFFLINE|ONLINE|CONNECTED|DISCONNECTED)|state\s*(?:->|=>)\s*\w+|transition(?:ed|ing)? (?:to|from)|marked (?:as )?(?:OFFLINE|ONLINE|CONNECTED|DISCONNECTED|stale)|flag left as|idle sweep|reaped|torn down)\b/i },
+    // Negations and silent failures: the peer was never told, nothing was observed, no reply came.
+    // These are the lines that distinguish "it broke loudly" from "it broke and nobody noticed",
+    // which is the difference between a symptom and a root cause.
+    { category: 'Silent Failure', weight: 40, regex: /\b(?:NOT notified|not notified|no FIN|without notifying|no (?:reply|response|acknowledgement|ack|pong|answer) (?:received|observed|seen)|never (?:notified|received|sent|arrived)|no (?:inbound|outbound) (?:frame|data|traffic) for|nothing (?:received|observed|returned)|no matching (?:connection|session|entry)|silently (?:dropped|discarded|closed|ignored)|no error reported)\b/i },
     { category: 'SQL/Database', weight: 42, regex: /\b(SqlException|SqlError|System\.Data\.SqlClient|Microsoft\.Data\.SqlClient|java\.sql\.SQLException|SQL Server|ODBC|JDBC|ADO\.NET|Deadlock|deadlocked|victim|Timeout expired|Execution Timeout|Login failed|Cannot open database|ALTER DATABASE statement is not supported|SET RECOVERY SIMPLE|Connection pool|pooled connection|max pool size|connection string|SQL transaction|transaction (?:log|deadlock|rollback|aborted)|database schema|schema (?:upgrade|migration|deployment) (?:failed|error)|collation|stored procedure|sp_|xp_|DBInstall|database\s+(?:unavailable|offline|locked|corrupt|failed|failure|error|timeout|deadlock|inaccessible)|could not (?:open|connect to) database|invalid object name|invalid column name|could not find stored procedure|primary key|foreign key|duplicate key)\b/i },
     { category: 'SSO/Identity/Redirect', weight: 42, regex: /\b(No SSO entity found|SSO entity (?:is )?not found|invalid_client_configuration|request issuer\s*[:=]|wrong issuer|issuer mismatch|unknown client|client (?:not found|is unknown|is not configured)|relying party (?:not|trust)|audience (?:validation failed|mismatch)|redirect_uri|reply ?URL|ACS URL|invalid redirect|redirect loop|Too many requests|HTTP 429|\b429\b.*(?:request|limit)|IdentityServer|IdpInitiated|SAML response|authoriz(?:ation|e) (?:request )?(?:failed|invalid|error)|invalid_grant|invalid_request|access_denied)\b/i },
     { category: 'Certificate/TLS', weight: 38, regex: /\b(certificate|cert\b|SSL|TLS|handshake failed|X509|trust|chain|CRL|OCSP|SCEP|signing|expired cert|revoked|untrusted|RemoteCertificateNameMismatch|RemoteCertificateChainErrors|AuthenticationException|Schannel|PKIX|certificate verify failed|unable to get local issuer|self-signed|hostname mismatch)\b/i },
