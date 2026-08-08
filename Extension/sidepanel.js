@@ -6203,7 +6203,17 @@ function quoteAround(text, idx, len, max = 240) {
         while (p !== -1 && !isSentenceBoundary(s, p)) p = s.indexOf(ch, p + 1);
         if (p !== -1 && p < end) end = p;
     }
-    return s.slice(start, Math.min(end + 1, start + max)).replace(/\s+/g, ' ').trim();
+    // The cap is a character count, so it lands wherever it lands — "…we were re-enrolling 60-90
+    // dev". These quotes are handed to the model as verbatim FACTS and shown to the engineer, and
+    // one ending in half a word reads as corruption. Back off to the last whole word and mark the
+    // cut. Only when the cap actually bit: a quote that ended at its own full stop is untouched.
+    const capped = Math.min(end + 1, start + max);
+    let out = s.slice(start, capped).replace(/\s+/g, ' ').trim();
+    if (capped < end + 1) {
+        const sp = out.lastIndexOf(' ');
+        if (sp > max * 0.6) out = out.slice(0, sp).replace(/[\s,;:–—-]+$/, '') + '…';
+    }
+    return out;
 }
 
 // A Salesforce lifecycle ROW ("Case created", "Case closed") is a record the portal wrote, not a
@@ -6220,8 +6230,35 @@ function isChainLifecycleRow(e) {
 // CJK writes its terminators full-width (。！？) and never spaces them, and Spanish opens a
 // question with ¿ — split on all of them, or a Japanese message is one 400-character "sentence"
 // and every quote taken from it becomes the whole email.
+// A newline is only a sentence boundary when the sentence actually ended there. Plain-text email
+// is hard-wrapped at about 78 columns, so one sentence routinely spans two or three lines, and
+// splitting on every newline shreds it. On case C01745392 that cost the case its content: of the
+// three things the customer said they needed IN WRITING, the first reached the signals block as
+// the 5-character fragment "date?" — under the length floor, so dropped — and the second as "go
+// ahead with that upgrade or do we hold?" with "Do we" stranded on the line above. The
+// business-impact quote stopped at "…the business impact I have been asked to quantify: each
+// device" for the same reason.
+// A continuation line is one that begins LOWERCASE where the line before it did not finish a
+// sentence. Nothing else is joined, and that is what keeps the estate table, the numbered list of
+// asks and the signature block intact: every one of those starts its lines with a capital, a
+// digit or a bullet.
+const WRAP_CONTINUATION_RE = /^[a-zà-öø-ÿа-яё]/u;
+const SENTENCE_FINISHED_RE = /[.!?:;。！？][")'\]]?$/;
+function unwrapHardWraps(text) {
+    const out = [];
+    for (const line of String(text || '').split('\n')) {
+        const prev = out.length ? out[out.length - 1] : '';
+        if (prev.trim() && !SENTENCE_FINISHED_RE.test(prev.trim()) && WRAP_CONTINUATION_RE.test(line.trim())) {
+            out[out.length - 1] = prev.replace(/\s+$/, '') + ' ' + line.trim();
+        } else {
+            out.push(line);
+        }
+    }
+    return out.join('\n');
+}
+
 function chainSentences(text) {
-    return String(text || '')
+    return unwrapHardWraps(text)
         .split(/\n+|(?<=[.!?])(?=\s|[A-ZА-ЯЁ])|(?<=[。！？])|(?=¿)/u)
         .map(s => s.replace(/\s+/g, ' ').trim())
         .filter(Boolean);
@@ -6651,7 +6688,9 @@ function detectChainSignals(entries, lc, issueText) {
         if (custName && e.sender && sameSenderName(e.sender, custName)) return false;
         return isSotiStaffSender(e.sender, staff) || looksSupportAuthored(e.sigBody || e.body || '');
     };
-    const mk = (e, m) => ({ sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), quote: quoteAround(e.body, m.index, m[0].length) });
+    // `src` is the text the match indices belong to — the UNWRAPPED body, so the quote is cut at a
+    // real sentence end rather than at whatever column the mail client wrapped on.
+    const mk = (e, m, src) => ({ sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim(), quote: quoteAround(src == null ? e.body : src, m.index, m[0].length) });
 
     // Newest-first: the most recent statement of each kind is the one that still stands.
     for (const e of entries) {
@@ -6663,13 +6702,17 @@ function detectChainSignals(entries, lc, issueText) {
         // confidentiality disclaimer. cleanEmailBody now strips those footers; skipping the
         // auto-replies outright means a footer variant it does not know cannot resurrect the bug.
         if (isOooAutoReply(e)) continue;
-        const body = e.body || '';
+        // Unwrapped before matching, not only before quoting. Several of these patterns span a
+        // clause with [^.\n]{0,45} between the two halves, and a newline inside that span stops
+        // them matching at all — so a hard-wrapped "we have not been able to confirm whether the
+        // upgrade fixed it" was not a missed quote, it was a missed SIGNAL.
+        const body = unwrapHardWraps(e.body || '');
         // A dated recurrence from the chain supersedes the issue summary's undated one.
-        if (!out.recurrence || out.recurrence.fromIssueSummary) { const m = matchEarliest(body, SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE); if (m) out.recurrence = mk(e, m); }
-        if (!out.urgency) { const m = matchEarliest(body, SIG_URGENCY_RE, SIG_URGENCY_ML_RE); if (m) out.urgency = mk(e, m); }
-        if (!out.impact) { const m = matchEarliest(body, SIG_IMPACT_RE, SIG_IMPACT_ML_RE); if (m) out.impact = mk(e, m); }
-        if (!out.unverified) { const m = matchEarliest(body, SIG_UNVERIFIED_RE, SIG_UNVERIFIED_ML_RE); if (m) out.unverified = mk(e, m); }
-        if (!out.blocker) { const m = matchEarliest(body, SIG_BLOCKER_RE, SIG_BLOCKER_ML_RE); if (m) out.blocker = mk(e, m); }
+        if (!out.recurrence || out.recurrence.fromIssueSummary) { const m = matchEarliest(body, SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE); if (m) out.recurrence = mk(e, m, body); }
+        if (!out.urgency) { const m = matchEarliest(body, SIG_URGENCY_RE, SIG_URGENCY_ML_RE); if (m) out.urgency = mk(e, m, body); }
+        if (!out.impact) { const m = matchEarliest(body, SIG_IMPACT_RE, SIG_IMPACT_ML_RE); if (m) out.impact = mk(e, m, body); }
+        if (!out.unverified) { const m = matchEarliest(body, SIG_UNVERIFIED_RE, SIG_UNVERIFIED_ML_RE); if (m) out.unverified = mk(e, m, body); }
+        if (!out.blocker) { const m = matchEarliest(body, SIG_BLOCKER_RE, SIG_BLOCKER_ML_RE); if (m) out.blocker = mk(e, m, body); }
         // An issue-summary recurrence does not count as "found" here: the loop must keep going in
         // case a later entry carries the stronger, dated chain form.
         if (out.recurrence && !out.recurrence.fromIssueSummary && out.urgency && out.impact && out.unverified && out.blocker) break;
