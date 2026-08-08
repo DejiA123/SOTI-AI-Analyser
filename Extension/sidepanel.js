@@ -17984,8 +17984,13 @@ function deriveJiraIssueTerms(issueText) {
     for (const m of text.matchAll(/\b[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+){1,5}\b/g)) {
         if (/\d/.test(m[0]) && m[0].length >= 6) add(m[0], 3);
     }
-    // ALL-CAPS acronyms (APN, ADB, SSO, MDM...).
-    for (const m of text.matchAll(/\b[A-Z][A-Z0-9]{1,9}\b/g)) add(m[0], 3);
+    // ALL-CAPS acronyms (APN, ADB, SSO, MDM...). Three characters minimum: at two the class
+    // matches things like "CA" and "DC", which are not terms anybody greps for and which took
+    // real slots in the JIRA keyword block — an observed block read "Connected / ROT / ROT-DC1 /
+    // DC1 / SQL / CA" while the case's actual grep token, SocketException, was not in it.
+    // JIRA_TERM_STOPWORDS already drops the two-letter words it knew about ("os", "id", "ip"),
+    // so the floor is what that list was compensating for.
+    for (const m of text.matchAll(/\b[A-Z][A-Z0-9]{2,9}\b/g)) add(m[0], 3);
     // Long digit runs: device IDs, ICCIDs, MCC/MNC "numeric" values.
     for (const m of text.matchAll(/\b\d{5,20}\b/g)) add(m[0], 1);
     const out = [...terms.values()];
