@@ -7334,6 +7334,22 @@ function chainWritingLanguage(entries) {
     return CHAIN_SCRIPT_WRITING_LANGUAGE[first] || first;
 }
 
+// Placeholders for the answer's shape, written IN the target language. Telling a model to
+// "write Next steps in Japanese" three thousand characters earlier loses to the English it is
+// reading at the moment it writes that section; showing it a Japanese placeholder where the
+// section begins does not. Same fix as the email greeting, applied to the summary's own layout.
+// A language absent here falls back to an English-worded placeholder that names it.
+const OUTPUT_LANG_HINTS = {
+    German: { sentences: '3–6 Sätze auf Deutsch', line: 'eine Zeile pro Aktion, auf Deutsch', step: 'ein Schritt, auf Deutsch' },
+    French: { sentences: '3 à 6 phrases en français', line: 'une ligne par action, en français', step: 'une étape, en français' },
+    Spanish: { sentences: '3–6 frases en español', line: 'una línea por acción, en español', step: 'un paso, en español' },
+    Portuguese: { sentences: '3–6 frases em português', line: 'uma linha por ação, em português', step: 'um passo, em português' },
+    Italian: { sentences: '3–6 frasi in italiano', line: 'una riga per azione, in italiano', step: 'un passaggio, in italiano' },
+    Dutch: { sentences: '3–6 zinnen in het Nederlands', line: 'één regel per actie, in het Nederlands', step: 'één stap, in het Nederlands' },
+    Russian: { sentences: '3–6 предложений на русском языке', line: 'одна строка на действие, на русском языке', step: 'один шаг, на русском языке' },
+    Japanese: { sentences: '日本語で3〜6文', line: '日本語で1行につき1つの対応', step: '日本語で1つの手順' }
+};
+
 // The greeting and sign-off a support engineer actually writes in each language. Supplied rather
 // than left to the model: a small model asked to "write the email in German" keeps the English
 // "Hi Elena," / "Warm regards," it was shown in the layout, because a concrete template beats an
@@ -8147,18 +8163,142 @@ function splitSentences(body) {
 // One short sentence stating a decisive fact the summary dropped, written in the summary's own
 // voice so the repaired paragraph reads as one piece. Derived from the extracted quote — never
 // invented — and deliberately plain: this is the fact the prompt already demanded, restored.
-function repairSentenceFor(key, s) {
+// The restored sentences, per language. A repair that appends English into a German summary
+// produces a paragraph in two languages, which is worse than the gap it closed — on the Japanese
+// case the model wrote a correct Japanese summary and the repair bolted three English sentences
+// onto the end of it. These are the SAME twelve statements the English repair makes, so the
+// deterministic guarantee is unchanged; only the language the fact is stated in follows the case.
+// A language absent here falls back to English, which is the previous behaviour.
+const REPAIR_SENTENCES = {
+    German: {
+        openQuestion: (p) => `Der Fall wartet derzeit darauf, dass SOTI die letzte Nachricht von ${p.who || 'dem Kunden'}${p.when ? ` vom ${p.when}` : ''} beantwortet, in der gefragt wird: „${p.q}“.`,
+        pendingRequest: (p) => `SOTI Support hat die beschriebenen Unterlagen${p.when ? ` am ${p.when}` : ''} bereits angefordert; im Verlauf ist kein Eingang dokumentiert.`,
+        recurrenceFromIssue: () => 'In ihrer ursprünglichen Meldung gab die Kundenseite an, dieses Problem bereits früher erlebt zu haben.',
+        recurrence: () => 'Die Kundenseite hat gemeldet, dass der Fehler erneut auftritt, nachdem er zuvor als behoben galt.',
+        urgency: () => 'Die Kundenseite hat ausdrücklich um vorrangige Bearbeitung gebeten.',
+        impactProduction: () => 'Die Kundenseite gibt an, dass dies den Produktivbetrieb beeinträchtigt.',
+        impactUsers: () => 'Die Kundenseite gibt an, dass ihre eigenen Benutzer betroffen sind.',
+        impact: () => 'Die Kundenseite hat die betrieblichen Auswirkungen geschildert.',
+        unverified: () => 'Die Kundenseite konnte dieses Ergebnis noch nicht bestätigen; es bleibt unbestätigt.',
+        blockerQuoted: (p) => `Ein separates Problem hält diesen Fall auf — die Kundenseite beschreibt es so: „${p.q}“.`,
+        blocker: (p) => `Ein separater Fehler${p.ref ? ` (${p.ref})` : ''} blockiert den Fortschritt in diesem Fall.`,
+        issueContrast: (p) => `In ihrer eigenen Meldung grenzt die Kundenseite diesen Fall vom zuvor genannten ab: „${p.q}“.`
+    },
+    French: {
+        openQuestion: (p) => `Le dossier attend actuellement que SOTI réponde au dernier message de ${p.who || 'le client'}${p.when ? ` du ${p.when}` : ''}, qui demande : « ${p.q} ».`,
+        pendingRequest: (p) => `Le support SOTI a déjà demandé les éléments décrits${p.when ? ` le ${p.when}` : ''} ; rien dans les échanges n'indique leur réception.`,
+        recurrenceFromIssue: () => 'Dans son signalement initial, le client indique avoir déjà rencontré ce problème auparavant.',
+        recurrence: () => 'Le client signale que le problème est réapparu après avoir été considéré comme résolu.',
+        urgency: () => 'Le client a explicitement demandé que ce dossier soit traité en urgence.',
+        impactProduction: () => 'Le client indique que la production est désormais impactée.',
+        impactUsers: () => 'Le client indique que ses propres utilisateurs sont touchés.',
+        impact: () => "Le client a décrit l'impact opérationnel que cela provoque.",
+        unverified: () => "Le client n'a pas encore pu confirmer ce résultat ; il reste non vérifié.",
+        blockerQuoted: (p) => `Un problème distinct bloque ce dossier — le client le décrit ainsi : « ${p.q} ».`,
+        blocker: (p) => `Un incident distinct${p.ref ? ` (${p.ref})` : ''} bloque l'avancement de ce dossier.`,
+        issueContrast: (p) => `Dans son propre signalement, le client distingue ce dossier du précédent qu'il cite : « ${p.q} ».`
+    },
+    Spanish: {
+        openQuestion: (p) => `El caso está a la espera de que SOTI responda al último mensaje de ${p.who || 'el cliente'}${p.when ? ` del ${p.when}` : ''}, que pregunta: «${p.q}».`,
+        pendingRequest: (p) => `El soporte de SOTI ya solicitó la evidencia descrita${p.when ? ` el ${p.when}` : ''}; nada en la correspondencia indica que se haya recibido.`,
+        recurrenceFromIssue: () => 'En su informe original, el cliente indicó que ya había encontrado este problema anteriormente.',
+        recurrence: () => 'El cliente ha informado de que el problema ha vuelto tras haberse dado por resuelto.',
+        urgency: () => 'El cliente ha pedido expresamente que esto se atienda con urgencia.',
+        impactProduction: () => 'El cliente indica que esto está afectando a la producción.',
+        impactUsers: () => 'El cliente indica que sus propios usuarios están afectados.',
+        impact: () => 'El cliente ha descrito el impacto operativo que esto provoca.',
+        unverified: () => 'El cliente aún no ha podido confirmar ese resultado, por lo que sigue sin verificarse.',
+        blockerQuoted: (p) => `Un problema distinto está bloqueando este caso — el cliente lo describe así: «${p.q}».`,
+        blocker: (p) => `Una incidencia distinta${p.ref ? ` (${p.ref})` : ''} está bloqueando el avance de este caso.`,
+        issueContrast: (p) => `En su propio informe, el cliente diferencia este caso del anterior que menciona: «${p.q}».`
+    },
+    Portuguese: {
+        openQuestion: (p) => `O caso aguarda que a SOTI responda à última mensagem de ${p.who || 'o cliente'}${p.when ? ` de ${p.when}` : ''}, que pergunta: «${p.q}».`,
+        pendingRequest: (p) => `O suporte da SOTI já solicitou os elementos descritos${p.when ? ` em ${p.when}` : ''}; nada na correspondência indica a sua receção.`,
+        recurrenceFromIssue: () => 'No relato original, o cliente indicou que já tinha encontrado este problema anteriormente.',
+        recurrence: () => 'O cliente comunicou que o problema voltou depois de ter sido dado como resolvido.',
+        urgency: () => 'O cliente pediu expressamente que este caso seja tratado com urgência.',
+        impactProduction: () => 'O cliente indica que isto está a afetar a produção.',
+        impactUsers: () => 'O cliente indica que os seus próprios utilizadores estão afetados.',
+        impact: () => 'O cliente descreveu o impacto operacional que isto provoca.',
+        unverified: () => 'O cliente ainda não conseguiu confirmar esse resultado, pelo que continua por verificar.',
+        blockerQuoted: (p) => `Um problema distinto está a bloquear este caso — o cliente descreve-o assim: «${p.q}».`,
+        blocker: (p) => `Uma falha distinta${p.ref ? ` (${p.ref})` : ''} está a bloquear o progresso deste caso.`,
+        issueContrast: (p) => `No seu relato, o cliente distingue este caso do anterior que refere: «${p.q}».`
+    },
+    Italian: {
+        openQuestion: (p) => `Il caso è in attesa che SOTI risponda all'ultimo messaggio di ${p.who || 'il cliente'}${p.when ? ` del ${p.when}` : ''}, che chiede: «${p.q}».`,
+        pendingRequest: (p) => `Il supporto SOTI ha già richiesto gli elementi descritti${p.when ? ` il ${p.when}` : ''}; nulla nella corrispondenza ne indica la ricezione.`,
+        recurrenceFromIssue: () => 'Nella segnalazione iniziale il cliente ha indicato di aver già riscontrato questo problema in precedenza.',
+        recurrence: () => 'Il cliente ha segnalato che il problema si è ripresentato dopo essere stato considerato risolto.',
+        urgency: () => 'Il cliente ha chiesto esplicitamente che il caso sia trattato con urgenza.',
+        impactProduction: () => 'Il cliente indica che la produzione è ora impattata.',
+        impactUsers: () => 'Il cliente indica che i propri utenti sono coinvolti.',
+        impact: () => "Il cliente ha descritto l'impatto operativo che questo comporta.",
+        unverified: () => 'Il cliente non ha ancora potuto confermare tale esito, che resta non verificato.',
+        blockerQuoted: (p) => `Un problema distinto sta bloccando questo caso — il cliente lo descrive così: «${p.q}».`,
+        blocker: (p) => `Un guasto distinto${p.ref ? ` (${p.ref})` : ''} sta bloccando l'avanzamento di questo caso.`,
+        issueContrast: (p) => `Nella propria segnalazione il cliente distingue questo caso dal precedente citato: «${p.q}».`
+    },
+    Dutch: {
+        openQuestion: (p) => `De case wacht momenteel op een antwoord van SOTI op het laatste bericht van ${p.who || 'de klant'}${p.when ? ` van ${p.when}` : ''}, waarin wordt gevraagd: “${p.q}”.`,
+        pendingRequest: (p) => `SOTI Support heeft de beschreven gegevens${p.when ? ` op ${p.when}` : ''} al opgevraagd; uit de correspondentie blijkt niet dat deze zijn ontvangen.`,
+        recurrenceFromIssue: () => 'In de oorspronkelijke melding gaf de klant aan dit probleem eerder te hebben meegemaakt.',
+        recurrence: () => 'De klant meldt dat het probleem opnieuw optreedt nadat het als opgelost werd beschouwd.',
+        urgency: () => 'De klant heeft uitdrukkelijk gevraagd dit met spoed op te pakken.',
+        impactProduction: () => 'De klant geeft aan dat dit de productie raakt.',
+        impactUsers: () => 'De klant geeft aan dat de eigen gebruikers hinder ondervinden.',
+        impact: () => 'De klant heeft de bedrijfsimpact hiervan beschreven.',
+        unverified: () => 'De klant heeft dat resultaat nog niet kunnen bevestigen; het blijft ongeverifieerd.',
+        blockerQuoted: (p) => `Een afzonderlijk probleem houdt deze case op — de klant omschrijft het zo: “${p.q}”.`,
+        blocker: (p) => `Een afzonderlijke storing${p.ref ? ` (${p.ref})` : ''} blokkeert de voortgang van deze case.`,
+        issueContrast: (p) => `In de eigen melding onderscheidt de klant deze case van de eerder genoemde: “${p.q}”.`
+    },
+    Russian: {
+        openQuestion: (p) => `Обращение ожидает ответа SOTI на последнее сообщение ${p.who || 'клиента'}${p.when ? ` от ${p.when}` : ''}, в котором задан вопрос: «${p.q}».`,
+        pendingRequest: (p) => `Служба поддержки SOTI уже запросила указанные материалы${p.when ? ` ${p.when}` : ''}; в переписке нет подтверждения их получения.`,
+        recurrenceFromIssue: () => 'В первоначальном обращении клиент указал, что уже сталкивался с этой проблемой ранее.',
+        recurrence: () => 'Клиент сообщил, что проблема возникла снова после того, как считалась устранённой.',
+        urgency: () => 'Клиент прямо просил рассмотреть обращение в приоритетном порядке.',
+        impactProduction: () => 'Клиент указывает, что это влияет на промышленную эксплуатацию.',
+        impactUsers: () => 'Клиент указывает, что затронуты его собственные пользователи.',
+        impact: () => 'Клиент описал последствия для работы бизнеса.',
+        unverified: () => 'Клиент пока не смог подтвердить этот результат, поэтому он остаётся неподтверждённым.',
+        blockerQuoted: (p) => `Отдельная проблема задерживает работу по обращению — клиент описал её так: «${p.q}».`,
+        blocker: (p) => `Отдельная неисправность${p.ref ? ` (${p.ref})` : ''} блокирует продвижение по этому обращению.`,
+        issueContrast: (p) => `В своём обращении клиент отличает этот случай от ранее упомянутого: «${p.q}».`
+    },
+    Japanese: {
+        openQuestion: (p) => `本件は、${p.who || 'お客様'}${p.when ? `（${p.when}）` : ''}の最新のメッセージ「${p.q}」に対するSOTIからの回答待ちの状態です。`,
+        pendingRequest: (p) => `SOTIサポートは${p.when ? `${p.when}に` : ''}記載の資料をすでに依頼していますが、受領を示す記録はメールのやり取りにありません。`,
+        recurrenceFromIssue: () => 'お客様は当初の報告時点で、この問題を以前にも経験していると述べています。',
+        recurrence: () => 'お客様から、いったん解決したとされた後に同じ事象が再発したとの報告がありました。',
+        urgency: () => 'お客様から、至急対応してほしいとの明確な要望がありました。',
+        impactProduction: () => 'お客様は、本番環境に影響が出ていると述べています。',
+        impactUsers: () => 'お客様は、自社の利用者に影響が出ていると述べています。',
+        impact: () => 'お客様は、業務への影響について説明しています。',
+        unverified: () => 'お客様はその結果をまだ確認できておらず、未確認のままです。',
+        blockerQuoted: (p) => `別の問題が本件の進行を妨げています。お客様の説明は次のとおりです：「${p.q}」。`,
+        blocker: (p) => `別の不具合${p.ref ? `（${p.ref}）` : ''}が本件の進行を妨げています。`,
+        issueContrast: (p) => `お客様はご自身の報告のなかで、以前に言及された案件と本件を区別しています：「${p.q}」。`
+    }
+};
+
+function repairSentenceFor(key, s, writeLang) {
     const q = String((s && s.quote) || '');
+    const T = (writeLang && REPAIR_SENTENCES[writeLang]) || null;
     switch (key) {
         case 'openQuestion': {
             const who = String((s && s.sender) || '').trim();
             const when = String((s && s.time) || '').trim();
             // The question itself is quoted rather than paraphrased: it may be in any language,
             // and a deterministic repair must not attempt a translation it cannot verify.
+            if (T) return T.openQuestion({ who, when, q });
             return `The case is currently waiting on SOTI to answer ${who ? who + "'s" : "the customer's"} latest message${when ? ` of ${when}` : ''}, which asks: "${q}".`;
         }
         case 'pendingRequest': {
             const when = String((s && s.time) || '').trim();
+            if (T) return T.pendingRequest({ when });
             return `SOTI Support has already asked the customer for the evidence described${when ? ` on ${when}` : ''}, and nothing in the chain shows it arriving.`;
         }
         case 'recurrence':
@@ -8166,16 +8306,19 @@ function repairSentenceFor(key, s) {
             // it usually means the customer has met this fault before, on the case they go on to
             // name. Restoring the chain wording here would assert an earlier fix that never
             // happened, so the two sources get two different sentences.
+            if (T) return s && s.fromIssueSummary ? T.recurrenceFromIssue({}) : T.recurrence({});
             return s && s.fromIssueSummary
                 ? 'In their original report the customer stated they have encountered this problem again, having seen it before.'
                 : 'The customer has reported that the issue returned after previously being treated as fixed.';
         case 'urgency':
+            if (T) return T.urgency({});
             return 'The customer has explicitly asked for this to be picked up with urgency.';
         case 'impact':
-            if (/\bproduction\b/i.test(q)) return 'The customer states this is now impacting production.';
-            if (/\b(?:customers?|users?|clients?)\b/i.test(q)) return 'The customer states their own users are affected.';
-            return 'The customer has stated the business impact this is causing.';
+            if (/\bproduction\b/i.test(q)) return T ? T.impactProduction({}) : 'The customer states this is now impacting production.';
+            if (/\b(?:customers?|users?|clients?)\b/i.test(q)) return T ? T.impactUsers({}) : 'The customer states their own users are affected.';
+            return T ? T.impact({}) : 'The customer has stated the business impact this is causing.';
         case 'unverified':
+            if (T) return T.unverified({});
             return 'The customer has not been able to confirm that outcome yet, so it remains unverified.';
         case 'blocker': {
             const ref = (q.match(CASE_NUMBER_RE) || [])[0];
@@ -8185,14 +8328,15 @@ function repairSentenceFor(key, s) {
             // between "a separate fault" and "the calendar link will not open and I cannot sign
             // in to book a slot", which is the thing someone actually has to fix.
             if (q && !coverageTokens(q).length) {
-                return `A separate problem is holding this case up — the customer described it as: "${q}".`;
+                return T ? T.blockerQuoted({ q }) : `A separate problem is holding this case up — the customer described it as: "${q}".`;
             }
-            return `A separate fault${ref ? ` (${ref})` : ''} is blocking progress on this case.`;
+            return T ? T.blocker({ ref }) : `A separate fault${ref ? ` (${ref})` : ''} is blocking progress on this case.`;
         }
         case 'issueContrast':
             // Quoted, not paraphrased, for the same reason as openQuestion: it is very often the
             // one sentence written in the customer's own language, and a deterministic repair
             // must never attempt a translation it cannot verify.
+            if (T) return T.issueContrast({ q });
             return `In their own report the customer set this case apart from the earlier one they referenced: "${q}".`;
         default:
             return '';
@@ -8207,6 +8351,9 @@ function checkCaseSummaryCoverage(text, info) {
     const sig = info.signals || {};
     const lc = info.lc || {};
     const applied = [];
+    // The language the answer is written in, so a restored fact is stated in that language rather
+    // than bolted on in English. '' (or an unsupported language) keeps the English wording.
+    const writeLang = info.writeLang || '';
 
     // 1. STRIKE OUT what the chain proves false, before anything is measured against the text —
     //    a sentence that is about to be deleted must not count as covering the fact it gets wrong.
@@ -8336,7 +8483,7 @@ function checkCaseSummaryCoverage(text, info) {
         const quoted = String(s.quote).length >= 12 && src.includes(s.quote);
         const covered = quoted || (semanticEnough && semantic.test(src)) || (wordCheckable && coverageHit(src, s.quote));
         if (covered) continue;
-        const sentence = repairSentenceFor(key, s);
+        const sentence = repairSentenceFor(key, s, writeLang);
         if (sentence) { missing.push(sentence); applied.push(`restored: ${key}`); }
     }
     // Other SOTI case numbers referenced in the chain: an exact string, so this is exact.
@@ -8345,7 +8492,18 @@ function checkCaseSummaryCoverage(text, info) {
     try {
         const refs = referencedCaseNumbers(info.refText || info.chain, info.caseNumber).filter(n => !src.includes(n));
         if (refs.length) {
-            missing.push(`The chain also references case ${refs.join(' and ')}.`);
+            const list = refs.join(refs.length > 1 ? ', ' : '');
+            const REF = {
+                German: `Der Verlauf verweist außerdem auf Fall ${list}.`,
+                French: `Les échanges renvoient également au dossier ${list}.`,
+                Spanish: `La correspondencia también hace referencia al caso ${list}.`,
+                Portuguese: `A correspondência refere também o caso ${list}.`,
+                Italian: `La corrispondenza fa inoltre riferimento al caso ${list}.`,
+                Dutch: `De correspondentie verwijst ook naar case ${list}.`,
+                Russian: `В переписке также упоминается обращение ${list}.`,
+                Japanese: `やり取りのなかでは案件 ${list} にも言及されています。`
+            };
+            missing.push((writeLang && REF[writeLang]) || `The chain also references case ${refs.join(' and ')}.`);
             applied.push(`restored: referenced case ${refs.join(', ')}`);
         }
     } catch (e) { }
@@ -16611,6 +16769,8 @@ async function generateCaseSummary() {
         // a matter of trust — and a gap is closed rather than reported.
         verifySummary: {
             signals, lc, chain: chainRaw, caseNumber: $('caseNum').value || '',
+            // So a restored fact is written in the same language as the summary it lands in.
+            writeLang,
             // The OTHER case the customer says this one resembles is very often written only in
             // the Issue Summary ("a similar issue to the one described in macOS case C01698144"),
             // never in an email — so a reference scan over the chain alone missed it and the
@@ -16652,6 +16812,34 @@ function renderSummaryPrompt(p) {
     // exact time window"), and the model followed the language it was reading rather than the
     // language it was told. Naming the language again at the point of use is what holds it.
     const inLang = writeLang ? ` WRITE THIS SECTION IN ${writeLang.toUpperCase()}.` : '';
+    // SHOW the shape, in the target language, immediately before the model starts writing it.
+    // "Next steps" was the one section that kept reverting to English: its spec is the longest and
+    // most prescriptive English text in the prompt, and the [LOG ACCESS] and [SOTI CHECKS] blocks
+    // feeding it are English too, so the model mirrored what it was READING. A placeholder written
+    // in the target language, sitting exactly where that section begins, is the same "show, don't
+    // tell" fix that settled the email's greeting.
+    const hint = writeLang ? (OUTPUT_LANG_HINTS[writeLang] || {
+        sentences: `3-6 sentences in ${writeLang}`, line: `one line per action, in ${writeLang}`, step: `one step, in ${writeLang}`
+    }) : null;
+    const skeleton = hint ? `
+
+THE SHAPE OF YOUR ANSWER — the three headers in English exactly as shown, everything under them in ${writeLang}:
+
+Summary: <${hint.sentences}>
+
+Troubleshoots done:
+- <${hint.line}>
+- <${hint.line}>
+
+Next steps:
+1. <${hint.step}>
+2. <${hint.step}>` : '';
+    // The LAST thing in the prompt, after every directive block. Those blocks are all English and
+    // they are what the model has just finished reading when it begins to answer; a closing line
+    // is the nearest instruction to the first token it writes.
+    const closingLang = writeLang
+        ? `\n\nFINAL REMINDER — every block above is written in English because it is briefing FOR you. Your ANSWER is not: write the Summary, every "Troubleshoots done" bullet AND every numbered step under "Next steps" in ${writeLang}. Only the three section headers stay in English.`
+        : '';
     return `Write a concise, accurate case summary followed by the recommended next steps. Be complete but brief — capture every decisive fact and every troubleshooting action already taken, with NO padding and NO repetition.
 
 RULES:${languageRule}
@@ -16671,9 +16859,9 @@ Summary: 3-6 sentences — the customer/account, product and versions, platform/
 
 Troubleshoots done: "-" bullets, one short line per DISTINCT action already taken or finding already established, covering the case from its START to its newest message — what support tested or tried, what the customer tested or tried and what came of it, calls made, internal findings/notes, development tickets raised (quote their IDs, e.g. MCMR-xxxxx), workarounds offered and whether they were accepted or refused, questions the customer already answered, and any findings from log analysis in this conversation. Every line must be something ${historyRef} actually records; where an action's result is not recorded, write the action and "— outcome not reported". Merge duplicates. No dates as a timeline. If genuinely nothing has been done yet, write "- None yet.".${inLang}
 
-Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".${inLang}
+Next steps: a numbered list of the concrete actions still to do for the support engineer. Every step must be executable exactly as written — one action, the exact artefact it acts on, and what result would confirm or rule out the cause. This list MUST follow the CASE STATE and LOG ACCESS directives below exactly, and MUST NOT repeat anything already listed under "Troubleshoots done".${inLang}${skeleton}
 
-${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}`;
+${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '\n\n' + langDirective : ''}${chronology ? '\n\n' + chronology : ''}${logAccess ? '\n\n' + logAccess : ''}${playbook ? '\n\n' + playbook : ''}${closingLang}`;
 }
 
 // Draft the next email the support engineer should send the customer, from the LIVE case
