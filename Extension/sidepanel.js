@@ -17845,6 +17845,26 @@ const JIRA_KEYWORD_STOPWORDS = new Set([
 // the model from filling it. The tokens an engineer greps for are usually written in the issue
 // summary and the correspondence too ("Removal Failed", "0x80072746", "SqlException"), so they
 // are mined from there before the model is asked for anything.
+// The server OS as the product itself prints it, in the preamble every SOTI service log opens
+// with. Only the HEAD of each file is read: an OS string further down belongs to a device or to
+// a quoted remote host, not to the server this log came from. Returns '' when no log says.
+const SERVER_OS_RES = [
+    /\b(Windows Server\s+(?:20\d\d)(?:\s+R2)?)\b/i,
+    /\b(Windows\s+(?:11|10|8\.1|8|7))\b/i,
+    /\b((?:Red Hat Enterprise Linux|RHEL|Ubuntu|CentOS|Debian|SUSE Linux Enterprise)\s*(?:Server\s*)?[\d.]*)\b/i
+];
+function extractServerOsFromLogs(logs) {
+    for (const log of (logs || [])) {
+        const head = String((log && log.content) || '').slice(0, 4000);
+        if (!head) continue;
+        for (const re of SERVER_OS_RES) {
+            const m = head.match(re);
+            if (m && m[1]) return m[1].trim();
+        }
+    }
+    return '';
+}
+
 function deriveJiraKeywordsFromCase(text, exclude, max = 8) {
     const src = String(text || '');
     if (!src.trim()) return [];
@@ -18947,7 +18967,14 @@ $('btnGenerateJira').onclick = async () => {
     let prefilledSQLVersion = "TBC";
     let prefilledOSVersionSQL = "TBC";
     if (c.logs.length > 0) {
+        // The server OS is normally printed in the log's own preamble ("Node: mc-ms-prod-01
+        // (Windows Server 2022, 16 vCPU, 64 GB)"), and the ticket still shipped
+        // "Server OS Version: TBC" with the answer sitting in an attached file. Read it off the
+        // header rather than making the engineer type what the log already told us.
+        const osFromLogs = extractServerOsFromLogs(c.logs);
+        if (osFromLogs) prefilledServerOS = osFromLogs;
         parsedLogFacts += "### PRE-PARSED LOG DETAILS:\n";
+        if (osFromLogs) parsedLogFacts += `- Server OS (read from a log header): ${osFromLogs}\n`;
         for (const log of c.logs) {
             parsedLogFacts += `- Log Name: ${log.name}\n`;
             if (log.panelIntel) {
