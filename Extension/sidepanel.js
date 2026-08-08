@@ -17491,6 +17491,37 @@ function repair306090Header(text, milestone, todayLabel) {
     return out;
 }
 
+// The JIRA Justification may name an MCMR that is ALREADY on this case, and no other. The
+// general citation allow-list is wider than that on purpose — a log-forensics answer is allowed
+// to cite the fix for an error it found in the logs — but a management-review justification
+// citing a code that came out of release-note research reads as "development already has a fix
+// for this", which is a claim about THIS case that nobody made. Observed: a case carrying
+// MCMR-48812 had its justification cite MCMR-42238, an unrelated re-enrolment fix.
+function stripUnrelatedMcmrFromJustification(text, caseMcmrCodes) {
+    const src = String(text || '');
+    const i = src.search(/^30\/60\/90 JIRA Justification\s*:/m);
+    if (i < 0) return src;
+    const allowed = new Set((caseMcmrCodes || []).map(c => String(c).toUpperCase()));
+    const head = src.slice(0, i);
+    let tail = src.slice(i);
+    if (!/\b(?:MCMR|MCPR)-\d{3,6}\b/i.test(tail)) return src;
+    let stripped = false;
+    tail = tail.replace(/\b((?:MCMR|MCPR)-\d{3,6})\b/gi, (m, code) => {
+        if (allowed.has(code.toUpperCase())) return m;
+        stripped = true;
+        return '__MCMR_DROP__';
+    });
+    if (!stripped) return src;
+    // Remove whatever sentence carried the dropped code rather than leaving a hole in it.
+    tail = tail.split('\n').map(line => {
+        if (!line.includes('__MCMR_DROP__')) return line;
+        const kept = line.split(/(?<=[.!?])\s+/).filter(s => !s.includes('__MCMR_DROP__'));
+        return kept.join(' ').trim();
+    }).filter((line, idx) => idx === 0 || line.trim() !== '').join('\n');
+    tail = tail.split('__MCMR_DROP__').join('').replace(/[ \t]{2,}/g, ' ');
+    return head + tail;
+}
+
 // "30/60/90 Case Analysis" — the management-review write-up for an aging case. The 30/60/90
 // milestone is derived DETERMINISTICALLY from the Case Age field (never guessed) and today's
 // date is injected as fact. Open cases get release-notes / Pulse research so Research Links
@@ -17558,7 +17589,14 @@ ${chronology ? chronology + '\n\n' : ''}${logAccess ? logAccess + '\n\n' : ''}Ba
         skipResearch: !researchQuery,
         researchQuery,
         copyKind: 'summary',
-        repairAnswer: (t) => repair306090Header(t, milestoneValue, today)
+        repairAnswer: (t) => {
+            const caseCodes = collectMcmrCodes(
+                `${$('jiraNum').value || ''}\n${$('jiraDetails').value || ''}\n` +
+                `${$('emailChain').value || ''}\n${$('issueSummary').value || ''}\n${$('meetingNotes').value || ''}`
+            );
+            return stripUnrelatedMcmrFromJustification(
+                repair306090Header(t, milestoneValue, today), caseCodes);
+        }
     });
 }
 
