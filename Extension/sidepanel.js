@@ -14322,15 +14322,33 @@ const OllamaAI = {
                         const convoEnd = content.indexOf('[END CONVERSATION SO FAR]');
                         if (convoEnd > 0) minKeep = Math.max(minKeep, Math.min(convoEnd + 26, 7000));
                     }
-                    let newLen = Math.max(minKeep, content.length - over - 150);
+                    // Not everything after the data is data. A few DIRECTIVE blocks are emitted
+                    // last — the injected date, the case status, the citation rules — and cutting
+                    // the tail drops those first, before a single line of the evidence they govern.
+                    // On the case-summary path (the largest prompt the panel builds) that removed
+                    // [CURRENT DATE & TIME] and [CASE STATUS] on every big case, and neither is
+                    // repeated anywhere else in the request: the model was left to guess today's
+                    // date on the one answer whose whole purpose is to be dated. They are cheap —
+                    // a few hundred characters — so they are lifted out and re-appended whole,
+                    // and the evidence above them absorbs the cut instead.
+                    let tail = '';
+                    if (bigIdx === 0 && m.role === 'system') {
+                        const tm = /\n\[(?:CURRENT DATE & TIME|CASE STATUS|MCMR RULE|LOG ACCESS|CASE STATE)\b/.exec(content.slice(minKeep));
+                        if (tm) tail = content.slice(minKeep + tm.index);
+                    }
+                    const tailStart = tail ? content.length - tail.length : content.length;
+                    let newLen = Math.max(minKeep, content.length - over - 150 - tail.length);
+                    if (newLen > tailStart) newLen = tailStart;
                     // A cut the appended notice would cancel out frees no space — floor reached.
-                    if (newLen >= content.length - 200) { atFloor.add(bigIdx); continue; }
+                    if (newLen + tail.length >= content.length - 200) { atFloor.add(bigIdx); continue; }
                     // Land the cut on a line boundary. A raw slice ended prompts mid-word — the
                     // last thing one model was told was `the business impact I have been asked to
                     // quant` — which reads to the model as corrupted input rather than a boundary.
                     const nl = content.lastIndexOf('\n', newLen);
                     if (nl > minKeep - 200 && nl > newLen - 400) newLen = nl;
-                    m.content = content.slice(0, newLen).replace(/\s+$/, '') + "\n\n[Evidence trimmed to fit the context window — the manifest and primary findings above are complete.]";
+                    m.content = content.slice(0, newLen).replace(/\s+$/, '')
+                        + "\n\n[Evidence trimmed to fit the context window — the manifest and primary findings above are complete.]"
+                        + tail;
                     totalChars = messages.reduce((acc, x) => acc + (x.content ? x.content.length : 0), 0);
                     console.warn(`[Ollama Request] Trimmed message #${bigIdx} to ${newLen} chars to fit context`);
                 }
