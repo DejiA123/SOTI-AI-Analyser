@@ -8470,6 +8470,53 @@ const OWED_INVERSION_RES = [
     /\bwe\s+need\s+the\s+customer\s+to\s+(?:confirm|decide|advise|tell\s+us|answer)/i,
     /\b(?:please\s+)?confirm\s+(?:to\s+us\s+)?whether\s+(?:you|the\s+customer)\s+(?:wish|want|intend)/i
 ];
+// The case holds more evidence than the PANEL does. stripRequestsForHeldEvidence only knows the
+// files an engineer dragged into the Logs section; the chain records plenty that never got
+// uploaded. On case C01745392 the customer wrote "I have attached MobiControlMS_2026-07-26.log
+// and the device debug report for 2A7C-D0A19F as requested" on 27 July, and a generated plan
+// asked for both of them again eleven days later.
+// Mined only from lines that ANNOUNCE a delivery, so a passing mention ("the MS log will show
+// this") does not count as an arrival.
+function deliveredEvidenceFromChain(chain) {
+    let entries = [];
+    try { entries = getCleanChainEntries(chain) || []; } catch (e) { return []; }
+    const seen = new Map();
+    for (const e of entries) {
+        for (const line of chainSentences(e.body || '')) {
+            if (!REQUEST_FULFILLED_RE.test(line)) continue;
+            const names = [];
+            for (const m of line.matchAll(/\b[\w][\w.-]*\.(?:log|txt|zip|json|xml|har|csv|evtx|cab)\b/gi)) names.push(m[0]);
+            for (const m of line.matchAll(/\b(device debug report|profile execution status)\b/gi)) names.push(m[1]);
+            for (const n of names) {
+                const k = n.toLowerCase();
+                if (!seen.has(k)) seen.set(k, { name: n, when: (e.time || '').trim(), who: (e.sender || '').trim() });
+            }
+        }
+    }
+    return [...seen.values()];
+}
+
+// Flagged, not deleted — the distinction from stripRequestsForHeldEvidence is deliberate. A file
+// sitting in the Logs panel has been read by this conversation, so asking for it again is simply
+// wrong. A file the CHAIN says arrived may still need re-collecting: a newer window, a different
+// device, the state after a change. So the engineer is told it already came in, and left to
+// decide whether the step wants a fresh capture.
+function flagRequestsForDeliveredEvidence(text, delivered) {
+    const src = String(text || '');
+    if (!src.trim() || !delivered || !delivered.length) return src;
+    const actionable = collectActionableLines(src);
+    const hit = [];
+    for (const d of delivered) {
+        let re;
+        try { re = new RegExp(d.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'i'); }
+        catch (e) { continue; }
+        if (actionable.some(l => EVIDENCE_REQUEST_VERB_RE.test(l) && re.test(l))) hit.push(d);
+    }
+    if (!hit.length) return src;
+    const list = hit.map(d => `${d.name}${d.when ? ` — sent ${d.when}` : ''}`).join('; ');
+    return src + `\n\n*Check: the chain already records ${hit.length === 1 ? 'this artefact arriving' : 'these artefacts arriving'}: ${list}. If the step above needs a FRESH capture, say which window and why; if not, work from what the case already has rather than asking the customer twice.*`;
+}
+
 function flagOwedDirection(text, hasUnansweredCustomerQuestion) {
     const src = String(text || '');
     if (!src.trim() || !hasUnansweredCustomerQuestion) return src;
@@ -8513,6 +8560,8 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
     try {
         const ac = cases.find(x => x.id === activeCaseId);
         out = stripRequestsForHeldEvidence(out, (ac && ac.logs || []).map(l => l && l.name));
+        const chainForEvidence = ($('emailChain') && $('emailChain').value) || '';
+        if (chainForEvidence.trim()) out = flagRequestsForDeliveredEvidence(out, deliveredEvidenceFromChain(chainForEvidence));
     } catch (e) { console.warn('Held-evidence check failed', e); }
     try {
         const chain = ($('emailChain') && $('emailChain').value) || '';
