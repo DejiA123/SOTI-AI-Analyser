@@ -7708,8 +7708,12 @@ function buildChainLanguageDirective(entries, kind = 'summary') {
 //             a short screen-share to capture them together against a known timestamp.
 // Small local models never infer this from context, so it is injected as a deterministic FACT
 // directive built from the field rather than left to the model to guess.
-function getMcHosted() {
-    const raw = (($('dsCfg') && $('dsCfg').value) || '').trim();
+// `rawOverride` — the value from a specific case's record, for the checks that run after a model
+// call and must not read whatever tab is on screen by then. Omitted, it reads the live field.
+function getMcHosted(rawOverride) {
+    const raw = String(rawOverride === undefined || rawOverride === null
+        ? (($('dsCfg') && $('dsCfg').value) || '')
+        : rawOverride).trim();
     if (/cloud/i.test(raw)) return 'Cloud';
     if (/on-?\s*prem/i.test(raw)) return 'On-Prem';
     return '';
@@ -8554,8 +8558,16 @@ function flagLogAccessMismatch(text, hosted) {
 // One post-generation pass for every case-writing answer (Case Summary, Draft Email, Fix,
 // 30/60/90): unverifiable MCMR references out, contentless verification steps out, and a
 // flag when the answer collects evidence from the wrong side of the deployment.
-function postValidateCaseAnswer(text, allowedMcmrCodes) {
+// `runCase` — the case this answer belongs to. Every check below is about THAT case, and all of
+// them run after the model, by which time the user may be looking at a different tab. Reading the
+// form here graded one case's answer against another case's chain. It is optional only so an
+// older call site cannot break; when omitted the on-screen case is used, as before.
+function postValidateCaseAnswer(text, allowedMcmrCodes, runCase) {
     let out = String(text || '');
+    const rc = runCase || cases.find(x => x.id === activeCaseId);
+    const rci = (rc && rc.ci) || {};
+    const chainText = String(rci.emailChain || '');
+    const issueText = String(rci.issueSummary || '');
     try { out = enforceMcmrCitations(out, allowedMcmrCodes).text; } catch (e) { console.warn('MCMR enforcement failed', e); }
     // Idempotent, and normally a no-op: the streaming sanitizer clears the scaffold as the
     // answer arrives. It runs again here so a case-writing answer is covered even if it reached
@@ -8566,22 +8578,19 @@ function postValidateCaseAnswer(text, allowedMcmrCodes) {
     try { out = stripPromptScaffold(out); } catch (e) { console.warn('Scaffold leak guard failed', e); }
     try { out = dedupeAnswerBullets(out); } catch (e) { console.warn('Bullet dedupe failed', e); }
     try {
-        const ac = cases.find(x => x.id === activeCaseId);
-        out = stripRequestsForHeldEvidence(out, (ac && ac.logs || []).map(l => l && l.name));
-        const chainForEvidence = ($('emailChain') && $('emailChain').value) || '';
-        if (chainForEvidence.trim()) out = flagRequestsForDeliveredEvidence(out, deliveredEvidenceFromChain(chainForEvidence));
+        out = stripRequestsForHeldEvidence(out, ((rc && rc.logs) || []).map(l => l && l.name));
+        if (chainText.trim()) out = flagRequestsForDeliveredEvidence(out, deliveredEvidenceFromChain(chainText));
     } catch (e) { console.warn('Held-evidence check failed', e); }
     try {
-        const chain = ($('emailChain') && $('emailChain').value) || '';
-        if (chain.trim()) {
-            const lc = detectCaseLifecycleState({ email_chain: chain });
-            const sig = detectChainSignals(getCleanChainEntries(chain), lc, ($('issueSummary') && $('issueSummary').value) || '');
+        if (chainText.trim()) {
+            const lc = detectCaseLifecycleState({ email_chain: chainText });
+            const sig = detectChainSignals(getCleanChainEntries(chainText), lc, issueText);
             out = flagOwedDirection(out, !!(sig && sig.openQuestion));
         }
     } catch (e) { console.warn('Owed-direction check failed', e); }
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
     try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
-    try { out = flagLogAccessMismatch(out, getMcHosted()); } catch (e) { console.warn('Log-access check failed', e); }
+    try { out = flagLogAccessMismatch(out, getMcHosted(rci.dsCfg)); } catch (e) { console.warn('Log-access check failed', e); }
     return out;
 }
 
@@ -14935,7 +14944,13 @@ function syncSendEnabled() {
 }
 
 async function send(overrideText = null, silent = false, opts = {}) {
-    const c = cases.find(x => x.id === activeCaseId);
+    // WHICH CASE THIS RUN BELONGS TO is decided by the CALLER, at the moment the user asked for
+    // it — never by whichever tab happens to be on screen by the time this coroutine runs. A
+    // quick action awaits several times before reaching here, and a tab switch inside that gap
+    // used to retarget the whole run: the answer was filed against the case the user had
+    // switched TO. Same capture-then-verify shape as scheduleSaveState.
+    const targetCaseId = opts.caseId || activeCaseId;
+    const c = cases.find(x => x.id === targetCaseId);
     if (!c) {
         toast('No active case selected', 'e');
         return;
@@ -15022,28 +15037,39 @@ async function send(overrideText = null, silent = false, opts = {}) {
         console.log('[SEND] imgContext length:', imgContext.length);
     }
 
+    // …and the case DATA comes from that case's own record, not from the form. The form shows
+    // whichever tab is on screen, and this run can outlive that. Reading it late is how a run
+    // started on one case came to be assembled from another case's fields — the quieter half of
+    // the same bug, because the answer still filed correctly and only its contents were wrong.
+    // syncActiveCaseCiFromForm keeps the record current on every keystroke and switchCase
+    // snapshots the outgoing case before it repaints the form, so the record is authoritative
+    // for every case. Sync once more here so the last instant of typing is not missed — but only
+    // when this run's case is the one actually on screen, or we would be writing the visible
+    // form into a background case.
+    if (c.id === activeCaseId) syncActiveCaseCiFromForm();
+    const rec = c.ci || {};
     const ci = {
-        case_number: $('caseNum').value,
+        case_number: rec.caseNum || '',
         // Who the case is waiting on, straight from the Salesforce workflow — see
         // buildCaseStatusDirective, which also spells out what each status implies.
-        case_status: $('caseStatus').value,
+        case_status: rec.caseStatus || '',
         // The engineering ticket. Rides in its own [JIRA ISSUE] section (buildJiraSection),
         // NOT in the [CASE] JSON blob — see buildCaseContextForPrompt.
-        jira_details: $('jiraDetails').value,
-        soti_version: $('sotiVer').value,
-        platform: $('platform').value,
-        agent_version: $('agentVer').value,
-        case_age_days: $('caseAge').value,
-        account_scrub: $('scrubAccount').value,
-        meeting_notes: $('meetingNotes').value,
-        product: $('product').value,
+        jira_details: rec.jiraDetails || '',
+        soti_version: rec.sotiVer || '',
+        platform: rec.platform || '',
+        agent_version: rec.agentVer || '',
+        case_age_days: rec.caseAge || '',
+        account_scrub: rec.scrubAccount || '',
+        meeting_notes: rec.meetingNotes || '',
+        product: rec.product || '',
         // Cloud vs On-Prem decides who collects the server-side evidence, so it travels with
         // the case context on EVERY turn, not only the quick actions (see buildLogAccessDirective).
-        mc_hosted: $('dsCfg').value,
-        environment: $('enviro').value,
-        affected_devices: $('affDev').value,
-        issue_summary: $('issueSummary').value,
-        email_chain: $('emailChain').value
+        mc_hosted: rec.dsCfg || '',
+        environment: rec.enviro || '',
+        affected_devices: rec.affDev || '',
+        issue_summary: rec.issueSummary || '',
+        email_chain: rec.emailChain || ''
     };
 
     // Rich Preview Injection
@@ -15925,7 +15951,7 @@ ${imgContext}`;
                 if (hasLogs) {
                     for (const code of collectMcmrCodes(c.logs.map(l => l.content || '').join('\n'))) allowedMcmr.add(code);
                 }
-                finalAnswer = postValidateCaseAnswer(finalAnswer, allowedMcmr);
+                finalAnswer = postValidateCaseAnswer(finalAnswer, allowedMcmr, c);
             } catch (e) { console.warn('Case answer post-validation failed', e); }
         }
 
@@ -16946,8 +16972,10 @@ $('btnAnalyse').onclick = async () => {
     await paintYield();
 
     // Send "Analyse" as a silent chat message - this triggers the
-    // standard send() flow but hides the user prompt from the UI.
-    await send('Analyse', true);
+    // standard send() flow but hides the user prompt from the UI. The case is the one whose
+    // Analyse button was pressed: there is a paintYield above, and the report must not follow
+    // the user to whatever tab they open while it runs.
+    await send('Analyse', true, { caseId: c.id });
 
     // Mark as completed
     if (pLbl && pFill) {
@@ -17153,7 +17181,7 @@ ${notes}
 """`;
 
     await runQuickAIAction('Cleaning up meeting notes...', 'Meeting notes cleaned', prompt,
-        { forceConversational: true, freshContext: true, skipResearch: true, copyKind: 'notes' });
+        { forceConversational: true, freshContext: true, skipResearch: true, copyKind: 'notes', caseId: c.id });
 }
 
 async function generateCaseSummary() {
@@ -17364,6 +17392,8 @@ async function generateCaseSummary() {
         skipResearch: !researchQuery,
         researchQuery,
         copyKind: 'summary',
+        // Captured at the click, so tabbing away mid-run cannot move this answer to another case.
+        caseId: c.id,
         // The [CASE HISTORY] scaffold in the prompt already lists every message, so the chain
         // section is capped to the newest messages' verbatim text rather than repeating the whole
         // correspondence in a budget the scaffold and the directives need.
@@ -17555,7 +17585,8 @@ ${stateDirective}${signalsBlock ? '\n\n' + signalsBlock : ''}${langDirective ? '
         freshContext: true,
         skipResearch: !researchQuery,
         researchQuery,
-        copyKind: 'email'
+        copyKind: 'email',
+        caseId: c.id
     });
 }
 
@@ -17614,7 +17645,8 @@ Deliver the fix with full confidence, grounded 100% in the case facts and the re
         freshContext: true,
         skipResearch: !researchQuery,
         researchQuery,
-        copyKind: 'summary'
+        copyKind: 'summary',
+        caseId: c.id
     });
 }
 
@@ -17745,10 +17777,15 @@ ${chronology ? chronology + '\n\n' : ''}${logAccess ? logAccess + '\n\n' : ''}Ba
         skipResearch: !researchQuery,
         researchQuery,
         copyKind: 'summary',
+        caseId: c.id,
+        // Runs AFTER the model, so it reads the case's own record rather than the form: which
+        // MCMR codes are "already on this case" is a question about THIS case, and by now the
+        // user may be looking at another one.
         repairAnswer: (t) => {
+            const r = c.ci || {};
             const caseCodes = collectMcmrCodes(
-                `${$('jiraNum').value || ''}\n${$('jiraDetails').value || ''}\n` +
-                `${$('emailChain').value || ''}\n${$('issueSummary').value || ''}\n${$('meetingNotes').value || ''}`
+                `${r.jiraNum || ''}\n${r.jiraDetails || ''}\n` +
+                `${r.emailChain || ''}\n${r.issueSummary || ''}\n${r.meetingNotes || ''}`
             );
             return stripUnrelatedMcmrFromJustification(
                 repair306090Header(t, milestoneValue, today), caseCodes);
@@ -17798,7 +17835,8 @@ ${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case fac
         forceConversational: true,
         freshContext: true,
         skipResearch: true,
-        copyKind: 'summary'
+        copyKind: 'summary',
+        caseId: c.id
     });
 }
 
