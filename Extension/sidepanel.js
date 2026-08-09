@@ -7148,7 +7148,9 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     }
     if (kind === 'email') {
         const asks = [];
-        if (sig.openQuestion) asks.push("ANSWER the customer's unanswered question above directly, in its first paragraph — it is the reason they are waiting, and a reply that does not answer it reads as if their email was never opened");
+        if (sig.openQuestion) asks.push((sig.openQuestion.count || 1) > 1
+            ? "ANSWER EVERY ONE of the customer's unanswered asks above, each one explicitly and in the order they asked them — they are the reason the customer is waiting, and a reply that settles some and leaves the others unmentioned reads as if their email was skim-read"
+            : "ANSWER the customer's unanswered question above directly, in its first paragraph — it is the reason they are waiting, and a reply that does not answer it reads as if their email was never opened");
         if (sig.pendingRequest) asks.push('restate what SOTI is still waiting for using EXACTLY the artefacts already named in the outstanding request above — never substitute different logs, files or steps');
         if (sig.meetingBooked) asks.push('treat the live session as already BOOKED — confirm the appointment and the time exactly as the chain states it, say what will be done on the call, and NEVER ask the customer to book or schedule a session that is already in the diary');
         else if (sig.meetingProposed) asks.push('treat the live session as already OFFERED — give concrete availability and get it booked, rather than proposing a session again as though it were a new idea');
@@ -7160,7 +7162,9 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         lines.push(`Because of this, the email MUST ${asks.join('; ')}. Never send a reply that reads as if the case were quietly resolved.`);
     } else if (small) {
         const asks = [];
-        if (sig.openQuestion) asks.push("that the case is waiting on SOTI to answer the customer's question quoted above (say what they asked, in English)");
+        if (sig.openQuestion) asks.push((sig.openQuestion.count || 1) > 1
+            ? "that the case is waiting on SOTI to answer the customer's asks quoted above — say what EACH of them asked, in English, not just the first"
+            : "that the case is waiting on SOTI to answer the customer's question quoted above (say what they asked, in English)");
         if (sig.recurrence) asks.push('the recurrence (the problem came back after being treated as fixed)');
         // On a closing case the escalation is history and belongs in the narrative of how the case
         // went, not in the statement of where it stands. Requiring it here is what put "The
