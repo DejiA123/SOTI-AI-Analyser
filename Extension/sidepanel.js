@@ -8466,7 +8466,15 @@ function stripNames(line, aliases) {
 // fine and only its direction is wrong, and inventing a commitment in its place would be worse.
 const OWED_INVERSION_RES = [
     /\bwe\s+(?:need|require|await|are\s+awaiting|would\s+need)\s+(?:your|the\s+customer'?s?)\s+(?:definitive\s+|written\s+|formal\s+)?(?:decision|confirmation|answer|response|approval|sign[- ]?off)/i,
-    /\b(?:awaiting|pending|await)\s+(?:the\s+)?customer(?:'s)?\s+(?:confirmation|decision|answer|response|approval|sign[- ]?off)/i,
+    // An adjective may sit between: "pending the customer's WRITTEN answers".
+    /\b(?:awaiting|pending|await)\s+(?:the\s+)?(?:customer|client)(?:'s)?\s+(?:\w+\s+){0,2}(?:confirmation|decisions?|answers?|responses?|approval|sign[- ]?off)/i,
+    // …or the customer may arrive at the END, in a prepositional phrase rather than as the
+    // possessor: "the case remains open pending written answers FROM THE CUSTOMER regarding a
+    // permanent fix". Every pattern above needs the two words adjacent, so that phrasing walked
+    // straight through — observed on the Problem & Resolution summary for case C01745392, whose
+    // three outstanding answers are owed BY SOTI. Anchored on "from the customer" so the honest
+    // form, "awaiting confirmation from our Development team", still does not match.
+    /\b(?:awaiting|pending|waiting\s+(?:on|for))\b[^.!?]{0,80}\b(?:answers?|confirmation|decisions?|responses?|approval|repl(?:y|ies)|sign[- ]?off)\b[^.!?]{0,40}\bfrom\s+(?:the\s+)?(?:customer|client)\b/i,
     /\bwe\s+need\s+the\s+customer\s+to\s+(?:confirm|decide|advise|tell\s+us|answer)/i,
     /\b(?:please\s+)?confirm\s+(?:to\s+us\s+)?whether\s+(?:you|the\s+customer)\s+(?:wish|want|intend)/i
 ];
