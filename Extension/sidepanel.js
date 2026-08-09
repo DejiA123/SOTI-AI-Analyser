@@ -17653,7 +17653,11 @@ function stripUnrelatedMcmrFromJustification(text, caseMcmrCodes) {
     const src = String(text || '');
     const i = src.search(/^30\/60\/90 JIRA Justification\s*:/m);
     if (i < 0) return src;
-    const allowed = new Set((caseMcmrCodes || []).map(c => String(c).toUpperCase()));
+    // collectMcmrCodes — the only real caller — hands back a Set, not an array. Taking .map on it
+    // threw, the repairAnswer try/catch swallowed the error, and the WHOLE closure died with it:
+    // the 30/60/90 milestone header was never written in from Case Age, the date was never
+    // normalised, and this guard never ran at all. Accept either shape.
+    const allowed = new Set(Array.from(caseMcmrCodes || [], c => String(c).toUpperCase()));
     const head = src.slice(0, i);
     let tail = src.slice(i);
     if (!/\b(?:MCMR|MCPR)-\d{3,6}\b/i.test(tail)) return src;
