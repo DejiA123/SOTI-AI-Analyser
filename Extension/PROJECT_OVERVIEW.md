@@ -190,6 +190,13 @@ async function getSessionCtx(model) {
 > the record of what was actually tried, because the case history is the block the smaller budget
 > cannot hold. **Auto is the right default**; 8K is the setting to choose when an answer is wanted
 > in five minutes and the plan matters more than the history.
+> To be exact about 8K: the quick-action prompt does NOT fit there and is not meant to. The
+> mandatory half — the task spec, the CASE STATE verdict and the DECISIVE CASE SIGNALS — is about
+> 10K on its own, and those are the blocks that decide whether the answer is TRUE, so they are
+> never traded for size. The per-request trimmer therefore still cuts, and what it reaches first
+> is the case history at the tail of the user message. That is a deliberate, measured degradation,
+> not an accident: at Auto (28,901 of 36,900 chars for the case above, 31,787 for a case carrying
+> a 15K Description and a 5.6K JIRA thread) nothing is cut at all.
 > Auto got faster on the way to that figure: the chain-condensation pass (`buildCaseHistoryLines`)
 > used to run on any chain of 8+ messages, which on a twelve-message case meant six model calls
 > — about six minutes — spent rewriting messages into 90-character lines that the scaffold then
@@ -335,10 +342,11 @@ fallback for layouts that don't expose MC Hosted.
 ---
 5.9 Case-answer guards — the deterministic checks around the model
 The quick actions (Case Summary + Next Steps, Draft an email, Work out a
-resolution, 30/60/90) produce text that goes to a customer or into the Salesforce
-record, so three classes of error are checked in JavaScript rather than trusted to the
+resolution, 30/60/90, Problem & Resolution) produce text that goes to a customer or into the
+Salesforce record, so five classes of error are checked in JavaScript rather than trusted to the
 model. Each has a prompt side (tell the model) and an output side (verify the answer),
-because an instruction is not a guarantee on a small local model.
+because an instruction is not a guarantee on a small local model — every one of these was added
+after watching the instruction alone fail.
 1. MCMR citations must be right, or absent. An MCMR code promises the customer that
 their exact defect is fixed in a named build, so a near-miss is worse than silence.
 Matching (`releaseNoteLineMatchesSymptom`): a release-notes line reaches the prompt only
@@ -366,7 +374,17 @@ carries (`jiraNum`, the synced ticket, or a code the correspondence names) appea
 Resolved Issues of a build NEWER than `sotiVer`, `caseTicketsFixedInNewerVersion` treats that as
 settled fact and `noteShippedFixForCaseTicket` appends the build and the gap if the answer never
 says it. Deliberately narrow: a symptom-matched code the case does *not* carry is a suggestion,
-and suggestions stay with the model and its allow-list.
+and suggestions stay with the model and its allow-list. The note reads the answer before it
+speaks — "upgrading belongs in the next steps" is right on a case summary and wrong on an
+internal record or a forensic report, neither of which has a plan.
+5. An interim mitigation is not left out of the internal record. `flagMissingMitigation` fires
+only when the case data itself uses the word (workaround / interim mitigation / stop-gap) and the
+finished "Solution:" line uses none, and it FLAGS rather than fills in — which of a case's
+recorded actions *is* the mitigation is a judgement, and a wrong one written into a permanent
+record is worse than a missing one. The reason it exists is that instructions were not enough:
+the fact reaches the prompt verbatim from the notes, the template demands it and the record
+directive demands it, and a small model still wrote a two-sentence Solution without the
+240-second keep-alive that was the only thing keeping 2,060 devices online.
 Enforcement (`enforceMcmrCitations`): every `MCMR-xxxxx` in the finished answer is checked
 against the allow-list (symptom-verified entries + codes already on the case + codes in the
 logs). Anything else has its sentence deleted and a visible note appended — removing a
@@ -426,6 +444,16 @@ Two filters keep the claim honest: a conditional undertaking is not one ("if it 
 yet, tell me and I will plan around it" was being reported as the outstanding action), and
 neither is a gesture with no substance — a commitment worth opening a plan with names a ticket,
 a build, a case, a file, or is at least a full clause.
+An internal note or call log is written to a fixed template, and BOTH of its halves are read.
+"Next steps" supplies the commitments (the newest note's plan is the plan, so the loop stops at
+the first one it finds); "Troubleshoots done" supplies the record of what was actually carried
+out, collected across every note because those are historical facts that do not supersede one
+another. That second half used to be ignored entirely — which is where the interim mitigation
+lives, and on case C01751884 the internal Problem & Resolution record therefore came back without
+"Keep-alive set to 240s on the Warrington test group": the next engineer to touch the case would
+not have known that a hand-set timer was the only thing keeping the estate online, which is
+exactly the thing they would undo. When items come from more than one note the "recorded by X in
+a note (date)" label is dropped rather than attributing all of them to whichever note came first.
 `detectChainSignals(entries, lc, issueText)` also reads the **issue summary**, not just the
 chain. On a case opened through the portal that is the only place the customer states the
 problem in full, and it is where a recurrence and the "unlike the previous case…" contrast
