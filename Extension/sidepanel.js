@@ -40,7 +40,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.7.0 — a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 2.8.0 — "Next steps" now starts where the case actually is: the newest message. Nothing read it. A chain whose last word was SOTI\'s own — "I will be in contact with the developers on MCMR-30202 first thing tomorrow to get a target build" — reached the model only through the promise block, whose instruction is "never contradict this": a request not to argue with the commitment rather than to CARRY IT OUT. The generated plan duly opened "1. Arrange a 30-minute remote session with the customer" — a session held five days earlier, ahead of the follow-up the customer had been promised in writing that morning. The newest message\'s stated action is now a signal in its own right, on both sides: SOTI\'s own undertaking opens the plan and the drafted email reports back on it, while a customer\'s "I will send it Monday" becomes a follow-up step instead of the same request under a new name. A conditional aside is not a commitment ("if it is not released yet, tell me and I will plan around it" was being reported as the outstanding next action), and neither is a three-word gesture. The commitment itself arrives whole: a tempered capture stops where the NEXT "I will" begins, so it ended "…first thing tomorrow to get", naming no deliverable — and every promise on a hard-wrapped email stopped at whatever column the mail client broke on. A session ALREADY HELD is now the fourth session state, so the On-Prem log-access rule stops mandating a meeting that has happened. An internal note survives the wrap that split it: "Prepare the / 90-day review pack" was two items and the leading-marker strip ate the number, leaving "day review pack"; "Chase Development for a target build" was in no forward-verb list, so the one agreed action on a 90-day case was filed under things ALREADY DONE and banned from the plan. Urgency and business impact quote the sentence the heading claims: "the customer explicitly demanded priority" sat over "…for your escalation" — SOTI\'s own escalation — while "we could not push the planogram to the store estate" and "still being done by hand, one device at a time" were no impact at all. A fix that has already SHIPPED is stated as fact, not left to the model: when a ticket the case already carries turns up in the Resolved Issues of a newer build, the answer says which build and that the deployment is behind it — including on a log analysis, which until now was FORBIDDEN from mentioning an upgrade at all, because research never ran on that path so no MCMR was ever verified. A case that names its own MCMR no longer switches the citation guard off: "did the agent ask to see the release notes?" is a question about the agent\'s words, and it was being inferred from case text. The 30/60/90 and the internal Problem & Resolution record get the decisive signals they never had, mapped to their own section names. And the case summary got faster by doing less: the chain-condensation pass was gated on message COUNT, so a twelve-message case spent six minutes of model time rewriting messages that had room for 260 characters into 90 — a history that came out shorter than the free one. A big case now fits the budget instead of being cut blind: the Case Summary sized its own message against “budget minus 1,700” — the amount the request trimmer promises to KEEP of the system message, not what it costs — so a case carrying a 15,348-character Salesforce Description and a 5,639-character JIRA thread built a pair of messages 7,132 characters over, the trimmer deleted [RELEASE NOTES] and half the MCMR rule off the end, and the model returned nothing at all. The system side is estimated from the case record now, and the Description — the one section with no cap while the notes, the chain and the ticket all had one — has one. And the tool stops talking to the customer: a “*Check: …*” line is the panel speaking to the ENGINEER, and Copy was stripping the italics and keeping the sentence. 71 new deterministic checks, 416 in total, run the shipping code. Previously — build 2.7.0, a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -6087,11 +6087,28 @@ const SIG_RECURRENCE_RE = /\b(?:the |this |that )?(?:same|identical) (?:error|is
 // some urgency") and \burgent(?:ly)?\b does not match it — the whole escalation was invisible
 // to the summary. Priority/expedite/blocker phrasing is included for the same reason.
 const SIG_URGENCY_RE = /\burgent(?:ly)?\b|\burgenc(?:y|ies)\b|\basap\b|\bas soon as possible\b|\bimmediate(?:ly)?\b|\bcritical\b|\bhigh(?:est)? priority\b|\bpriorit(?:y|ise|ize|ised|ized)\b|\bexpedite\b|\bescalat(?:e|ing|ion)\b|\btop priority\b|\bat the earliest\b|\bwith some urgency\b|\bpicked up (?:with|as) (?:some )?(?:urgency|priority)\b/i;
+// The SAME signal, minus "escalation" — the one cue in the list that is not itself a demand.
+// The quote is what the engineer reads under the heading "the customer explicitly demanded
+// priority", and matchEarliest takes whichever cue appears FIRST in the message. On a chain
+// where the customer wrote "what this is costing us, since you asked me to quantify it for your
+// escalation" three paragraphs before "Please treat this as a priority", the heading was
+// therefore attached to a sentence that demands nothing — SOTI's own escalation, quoted back as
+// the customer escalating. So an explicit demand is looked for first and only if the message
+// contains none does the weaker cue stand in; recall is unchanged, the quote is the right one.
+const SIG_URGENCY_STRONG_RE = /\burgent(?:ly)?\b|\burgenc(?:y|ies)\b|\basap\b|\bas soon as possible\b|\bimmediate(?:ly)?\b|\bcritical\b|\bhigh(?:est)? priority\b|\bpriorit(?:y|ise|ize|ised|ized)\b|\bexpedite\b|\btop priority\b|\bat the earliest\b|\bwith some urgency\b|\bpicked up (?:with|as) (?:some )?(?:urgency|priority)\b/i;
 // Same failure on the impact side: the customer wrote "this has become a production-impacting
 // issue" and "this is now hitting production too", and the old pattern only knew
 // "impacted"/"affected" — so a case that had just escalated from a test environment to
 // PRODUCTION was summarised with no mention of production at all.
 const SIG_IMPACT_RE = /\b(?:customers?|users?|clients?|staff|technicians?|agents?)\b[^.\n]{0,60}\b(?:calling|complain\w*|affected|impacted|blocked|waiting|cannot|can'?t|unable)\b|\bunable to (?:assist|support|work|operate|serve|help)\b|\b(?:production|business|operations?|service)\b[^.\n]{0,40}\b(?:down|halted|stopped|impact\w*|affect\w*|failing|failure|at a standstill)\b|\b(?:hitting|affects?|affecting|impact\w*|reproduc\w*)\b[^.\n]{0,20}\bproduction\b|\bproduction[- ]impacting\b|\bin production (?:as well|too|environment)\b|\bbusiness[- ](?:impact|critical)\b|\bwe are (?:down|blocked|stuck)\b|\bcannot (?:assist|support|serve) (?:our |the )?customers?\b/i;
+// A SECOND tier, tried only when the pattern above finds nothing in the message. Both of these
+// are business impact in an MDM case — work that cannot be deployed, and work being done by hand
+// that the product exists to automate — but they are how a customer describes the CONSEQUENCE in
+// passing, so they lose to an explicit statement of it. Kept as a fallback rather than folded in
+// above for the same reason urgency is: matchEarliest takes whichever cue comes first in the
+// message, so a new alternative that matches an anecdote in paragraph one silently outranks the
+// customer's own quantified impact paragraph further down.
+const SIG_IMPACT_WEAK_RE = /\b(?:could ?n'?t|could not|cannot|can'?t|unable to|not able to|were? unable to|had to stop)\b[^.\n]{0,40}\b(?:push|deploy|distribut\w*|roll ?out|provision|install)\b|\b(?:doing|done|deploying|installing|updating|rolling out|running)\b[^.\n]{0,50}\b(?:by hand|manually|one (?:device )?at a time)\b|\b(?:by hand|manually)\b[^.\n]{0,60}\b(?:hours?|days?|weeks?|devices?|each|every)\b/i;
 // The customer says the thing SOTI is waiting on could NOT be established — the upgrade was
 // installed but its effect is unconfirmed, or a second fault keeps derailing the test. This is
 // the signal whose absence produced the worst observed summary error: the chain said "we
@@ -6242,7 +6259,14 @@ function isChainLifecycleRow(e) {
 // sentence. Nothing else is joined, and that is what keeps the estate table, the numbered list of
 // asks and the signature block intact: every one of those starts its lines with a capital, a
 // digit or a bullet.
-const WRAP_CONTINUATION_RE = /^[a-zà-öø-ÿа-яё]/u;
+// A wrapped line normally resumes in lower case, but a mail client wraps wherever the column
+// runs out — including immediately before a number that belongs to the sentence. An internal
+// note reading "Prepare the\n90-day review pack for this case." was therefore read as TWO
+// items, and the leading-marker strip then turned the second into "day review pack for this
+// case." — a fragment injected into the prompt as a fact the answer must carry. A digit-led
+// line counts as a continuation only when it cannot be a list marker: "90-day" and "2,400"
+// resume a sentence, while "2. Collect the logs" opens a new one and must stay separate.
+const WRAP_CONTINUATION_RE = /^(?:[a-zà-öø-ÿа-яё]|\d+(?:[-–—][A-Za-zà-öø-ÿа-яё]|[.,]\d))/u;
 const SENTENCE_FINISHED_RE = /[.!?:;。！？][")'\]]?$/;
 function unwrapHardWraps(text) {
     const out = [];
@@ -6326,6 +6350,33 @@ function truncatePromiseAtClause(t) {
         if (!PROMISE_DANGLING_VERB_RE.test(s)) break;
     }
     return s.replace(/[\s,;:–-]+$/, '') + '…';
+}
+
+// A promise capture is TEMPERED — it stops before the next "we will / I'll" so one commitment
+// cannot swallow the next. That boundary is very often mid-clause, because a sentence routinely
+// runs both halves together: "I will be in contact with the developers on MCMR-30202 first thing
+// tomorrow to get a target build, and I will come back to you with what they say" was captured as
+// "…first thing tomorrow to get" — the object of "to get" lives in the half that was cut away.
+// Quoted into the prompt under "ALREADY PROMISED TO THE CUSTOMER IN WRITING", a fragment ending on
+// a bare transitive verb is the same failure "and collect Profile." was: it names no deliverable,
+// and the model either copies the fragment or invents the missing object. So the incomplete tail
+// is REMOVED and what stands on its own is kept — the promise is then shorter than what was
+// written, but every word of it is true and actionable.
+// Only verbs that demand an object are listed: "come back to you" ends on "you" and is complete,
+// and stripping a bare "to <anything>" would have wrecked it.
+const PROMISE_OPEN_INFINITIVE = 'get|obtain|secure|collect|gather|raise|reproduce|note|provide|send|share|check|review|run|capture|enable|disable|install|upgrade|apply|test|verify|confirm|arrange|schedule|book|create|open|escalate|attach|export|chase|contact|discuss|agree|request|ask|prepare|draft|update|deliver|produce|push|deploy|investigate|analyse|analyze';
+const PROMISE_OPEN_TAIL_RE = new RegExp(`[\\s,;:–-]+(?:to\\s+(?:${PROMISE_OPEN_INFINITIVE})|and|or|but|so|then|also|because|which|whether|that)$`, 'i');
+function trimOpenPromiseTail(t) {
+    let s = String(t || '').trim();
+    for (let i = 0; i < 4; i++) {
+        let next = s.replace(PROMISE_OPEN_TAIL_RE, '').trim();
+        if (next === s) next = s.replace(PROMISE_DANGLING_VERB_RE, '').replace(/[\s,;:–-]+$/, '').trim();
+        // Never trim a promise down to nothing: a short complete clause beats an empty one.
+        if (next === s || next.length < 12) break;
+        s = next;
+        if (!PROMISE_OPEN_TAIL_RE.test(s) && !PROMISE_DANGLING_VERB_RE.test(s)) break;
+    }
+    return s.replace(/[\s,;:–-]+$/, '');
 }
 
 // SOTI offering a live working session (with or without a booking link). Once that offer is on
@@ -6676,6 +6727,7 @@ function detectChainSignals(entries, lc, issueText) {
         recordedActions: [], recordedActionSource: null,
         promises: [], promiseSource: null, staleStatements: [],
         openQuestion: null, pendingRequest: null, meetingProposed: null, meetingBooked: null,
+        meetingHeld: null, latestIntent: null,
         issueContrast: null
     };
     // THE ISSUE SUMMARY IS THE CUSTOMER SPEAKING TOO, and on a case opened through the portal it
@@ -6730,8 +6782,17 @@ function detectChainSignals(entries, lc, issueText) {
         const body = unwrapHardWraps(e.body || '');
         // A dated recurrence from the chain supersedes the issue summary's undated one.
         if (!out.recurrence || out.recurrence.fromIssueSummary) { const m = matchEarliest(body, SIG_RECURRENCE_RE, SIG_RECURRENCE_ML_RE); if (m) out.recurrence = mk(e, m, body); }
-        if (!out.urgency) { const m = matchEarliest(body, SIG_URGENCY_RE, SIG_URGENCY_ML_RE); if (m) out.urgency = mk(e, m, body); }
-        if (!out.impact) { const m = matchEarliest(body, SIG_IMPACT_RE, SIG_IMPACT_ML_RE); if (m) out.impact = mk(e, m, body); }
+        // An explicit demand outranks a bare mention of "escalation" — see SIG_URGENCY_STRONG_RE.
+        if (!out.urgency) {
+            const m = matchEarliest(body, SIG_URGENCY_STRONG_RE, SIG_URGENCY_ML_RE) || matchEarliest(body, SIG_URGENCY_RE);
+            if (m) out.urgency = mk(e, m, body);
+        }
+        // An explicit statement of the consequence outranks the passing mention — see
+        // SIG_IMPACT_WEAK_RE, which only stands in when the message contains no explicit one.
+        if (!out.impact) {
+            const m = matchEarliest(body, SIG_IMPACT_RE, SIG_IMPACT_ML_RE) || matchEarliest(body, SIG_IMPACT_WEAK_RE);
+            if (m) out.impact = mk(e, m, body);
+        }
         if (!out.unverified) { const m = matchEarliest(body, SIG_UNVERIFIED_RE, SIG_UNVERIFIED_ML_RE); if (m) out.unverified = mk(e, m, body); }
         if (!out.blocker) { const m = matchEarliest(body, SIG_BLOCKER_RE, SIG_BLOCKER_ML_RE); if (m) out.blocker = mk(e, m, body); }
         // An issue-summary recurrence does not count as "found" here: the loop must keep going in
@@ -6747,12 +6808,28 @@ function detectChainSignals(entries, lc, issueText) {
     // "Troubleshoots done" instead. These classify each line so it lands in the right section.
     const PAST_ACTION_RE = /^(?:i|we|support|soti)?\s*(?:have|has|had)\s+\S+(?:ed|en|ne|un|t)\b|^(?:i|we)\s+(?:requested|tested|checked|installed|created|raised|escalated|advised|asked|shared|sent|tried|performed|reviewed|analysed|analyzed|collected|gathered|confirmed|reproduced|notified|upgraded|enrolled|enroled)\b|^(?:already|previously)\b/i;
     const STATEMENT_RE = /^(?:there (?:is|are|was|were)|at the moment|currently|customer (?:said|says|mentioned|refused|prefers|prefer|prefered|preferred|has|is|does|did|will)|the customer\b|this (?:is|was|has|sounds)|it (?:is|was|seems|appears)|no |not )/i;
-    const FORWARD_RE = /^(?:i|we|support|soti)?\s*(?:will|shall|'?ll|would (?:advise|suggest|recommend|like)|need(?:s)? to|plan(?:ning)? to|going to|am going to|are going to|should|must|to )\b|^(?:reach out|transfer|transferring|monitor|follow[- ]up|following up|check|collect|gather|request|arrange|schedule|escalate|create|raise|test|verify|confirm|install|upgrade|downgrade|send|provide|review|continue|await|pick(?: it| this)? up|advise|suggest|recommend|ask|share|call|invite|enable|disable|apply|run|capture|reproduce)\b/i;
+    // The imperative list is what decides whether an agreed action becomes a NEXT STEP or is
+    // filed as something already done. An unrecognised verb falls through to `recorded` — a
+    // deliberate choice (never fabricate an instruction), but it means a missing verb silently
+    // asserts that the work is finished. On a real 90-day case the note read "Next steps - Chase
+    // Development for a target build on MCMR-31461", and with no "chase" here that line was
+    // injected under "ACTIONS/FINDINGS ALREADY RECORDED — these are things ALREADY done" together
+    // with "It is FORBIDDEN to turn any of them into a Next step". The one agreed action on the
+    // case was reported as complete and banned from the plan. These are the verbs support
+    // engineers actually write in that template.
+    const FORWARD_RE = /^(?:i|we|support|soti)?\s*(?:will|shall|'?ll|would (?:advise|suggest|recommend|like)|need(?:s)? to|plan(?:ning)? to|going to|am going to|are going to|should|must|to )\b|^(?:reach out|transfer|transferring|monitor|follow[- ]up|following up|check|collect|gather|request|arrange|schedule|escalate|create|raise|test|verify|confirm|install|upgrade|downgrade|send|provide|review|continue|await|pick(?: it| this)? up|advise|suggest|recommend|ask|share|call|invite|enable|disable|apply|run|capture|reproduce|chase|chasing|chase up|prepare|preparing|draft|drafting|liaise|obtain|secure|seek|submit|log|document|contact|book|deploy|push|pull|progress|work with|get)\b/i;
 
     // Split a note into the units those regexes classify: one per line, or per sentence.
-    const noteItems = (text) => String(text || '')
+    // Hard wraps are undone FIRST. An engineer writes the template into a fixed-width box, so a
+    // single action routinely spans two lines — splitting on "\n" alone turned "Continue to\n
+    // collect the daily offline counts" into the commitment "Continue to", which is not an
+    // instruction anybody can carry out, and it reached the prompt as one the answer MUST list.
+    // The leading-marker strip is also exact now: "^[-*\d.)\s]+" ate any run of digits and dots,
+    // so an item that legitimately OPENS with a number ("90-day review pack…", "2026.1.0 upgrade
+    // to be scheduled") lost it. Only a real list marker followed by a space is removed.
+    const noteItems = (text) => unwrapHardWraps(String(text || ''))
         .split(/\n+|(?<=\.)\s+(?=[A-Z])/)
-        .map(s => s.replace(/^[-*\d.)\s]+/, '').trim())
+        .map(s => s.replace(/^\s*(?:[-*•]+|\(?\d{1,2}[.)])\s+/, '').trim())
         .filter(s => s.length > 6 && s.length < 200);
     // Has the case moved on since entry `i`? entries are NEWEST first, so "newer" = lower index,
     // and an out-of-office auto-reply carries no case signal so it is not the case moving on.
@@ -6864,15 +6941,12 @@ function detectChainSignals(entries, lc, issueText) {
     // ends the promise is a clause boundary rather than wherever the counter happened to land.
     const PROMISE_MAX = 260;
     const PROMISE_RE = new RegExp(`${PROMISE_LEAD}\\s+((?:(?!${PROMISE_LEAD})[^.\\n]){8,${PROMISE_MAX}})`, 'gi');
-    for (const e of entries) {
-        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
-        // POSITIVE support identification, not merely "not the customer": on a chain where the
-        // customer's name never matched (the feed decorated it with the company), every
-        // customer email fell through "not the customer" and their own "we'll share it with you
-        // here" was injected into the prompt as a promise SOTI had made and must not walk back.
-        if (!isSupport(e)) continue;
+    // Extracted from the loop below so the SAME reading of "what this message undertakes to do"
+    // can be applied to one specific message — the newest one — by the latestIntent block further
+    // down. Two different definitions of a commitment would eventually disagree.
+    const promisesIn = (rawBody) => {
         const found = [];
-        for (const m of String(e.body || '').matchAll(PROMISE_RE)) {
+        for (const m of String(rawBody || '').matchAll(PROMISE_RE)) {
             let capped = m[1].length >= PROMISE_MAX;
             let t = m[1].replace(/\s+/g, ' ').trim();
             // The commitment ends where the email's TEMPLATE begins. A SOTI reply pastes the
@@ -6886,6 +6960,9 @@ function detectChainSignals(entries, lc, issueText) {
             // Drop the dangling connective a tempered capture leaves behind ("… investigation,").
             t = t.replace(/[\s,;:–-]+(?:and|but|so|then|also|as part of the investigation)?[\s,;:–-]*$/i, '').trim();
             if (capped) t = truncatePromiseAtClause(t);
+            // Runs whether or not the cap was hit: the tempered capture ends where the NEXT
+            // promise starts, which is a mid-clause boundary far more often than the cap is.
+            else t = trimOpenPromiseTail(t);
             // "we will be happy to help" / "we will get back to you" / "we will keep you
             // informed" are pleasantries, not commitments to a specific action.
             // "we will need to arrange a 30-minute remote session to raise the log level on the
@@ -6907,6 +6984,22 @@ function detectChainSignals(entries, lc, issueText) {
             if (t.length < 8) continue;
             found.push(t);
         }
+        return found;
+    };
+    for (const e of entries) {
+        if (/\bINTERNAL\b|\bCALL\b/i.test(e.type || '')) continue;
+        // POSITIVE support identification, not merely "not the customer": on a chain where the
+        // customer's name never matched (the feed decorated it with the company), every
+        // customer email fell through "not the customer" and their own "we'll share it with you
+        // here" was injected into the prompt as a promise SOTI had made and must not walk back.
+        if (!isSupport(e)) continue;
+        // Unwrapped first, for the same reason the customer loop above unwraps: the capture is
+        // bounded by [^.\n], so on a hard-wrapped email EVERY promise stopped at whatever column
+        // the mail client happened to break on. "I will be in contact with the developers on
+        // MCMR-30202 first thing tomorrow to get a target build and a definitive answer on
+        // whether the fix can be back-ported" reached the prompt as "…first thing tomorrow to
+        // get" — not a promise anyone could act on.
+        const found = promisesIn(unwrapHardWraps(e.body || ''));
         if (!found.length) continue;
         out.promises = found.slice(0, 3);
         out.promiseSource = { sender: (e.sender || 'unknown').trim(), time: (e.time || '').trim() };
@@ -6935,6 +7028,66 @@ function detectChainSignals(entries, lc, issueText) {
                 time: (newestSubstantive.time || '').trim(),
                 quote: qs.slice(0, 4).join(' ').slice(0, 700),
                 count: Math.min(qs.length, 4)
+            };
+        }
+    }
+
+    // WHAT THE NEWEST MESSAGE SAYS HAPPENS NEXT.
+    // "Next steps" is a question about the FUTURE, and the last thing anybody wrote on the case is
+    // the most recent statement anyone made about it. When that message ends "I will be in contact
+    // with the developers on MCMR-30202 first thing tomorrow", the next step is not a plan derived
+    // from the symptom — it is that. Nothing extracted it: the promise block below finds the same
+    // sentence but files it under "never contradict this", which asks the model not to argue with
+    // the commitment rather than to CARRY IT OUT, and the generated plan duly opened by arranging a
+    // remote session that had already been held five days earlier.
+    //
+    // Two sides, two different next steps:
+    //   • SOTI wrote it  → the action is SOTI's own and it is owed to the customer, so it opens the
+    //     plan and the drafted email reports on it;
+    //   • the customer wrote it → SOTI is waiting on THEM, so the step is to follow up on exactly
+    //     what they said they would do, never to re-request it under a different name.
+    // Restricted to the newest substantive entry: an intention stated further back may already
+    // have been carried out by the messages that follow it, and the promise/commitment blocks
+    // already cover that ground with the "check it first" wording that uncertainty requires.
+    if (newestSubstantive) {
+        const soti = isSupport(newestSubstantive);
+        const body = unwrapHardWraps(newestSubstantive.body || '');
+        // The customer's own "I will …" is read with the same machinery, which is safe because
+        // promisesIn() drops pleasantries, staffing notes and closure notices whoever wrote them.
+        // Two further filters apply HERE and not to the promise block, because this signal makes
+        // a much stronger claim — that the action is what the case is waiting on:
+        //   • a CONDITIONAL undertaking is not one. "If it is not released yet, tell me that
+        //     plainly and I will plan around it" is the customer describing what they would do in
+        //     a case that has not happened, and reporting it as the outstanding next action tells
+        //     the engineer the case is waiting on the customer to "plan around it";
+        //   • an undertaking with no substance is not one either. A commitment worth opening a
+        //     plan with names something — a ticket, a version, a case, a file, a product artefact
+        //     — or is at least a full clause rather than a three-word gesture.
+        const SUBSTANTIVE_ID_RE = /\b(?:MCMR|MCPR)-\d{3,6}\b|\bC0\d{6,8}\b|\b(?:20\d\d|\d{2})\.\d+(?:\.\d+)*\b|\b[\w.-]+\.(?:log|txt|xml|zip|har|evtx)\b|\b(?:developer|development|engineering|R&D)\b/i;
+        const worthCarrying = (a) => {
+            const words = String(a).trim().split(/\s+/).filter(Boolean);
+            if (SUBSTANTIVE_ID_RE.test(a)) return true;
+            if (words.length < 5) return false;
+            // "…and I will plan around it" / "…will look into it" — a clause whose whole object is
+            // a pronoun says nothing an engineer can act on or check off.
+            return !/\b(?:it|this|that|them|these|those)\s*$/i.test(a) || words.length >= 8;
+        };
+        const conditionalIntent = (a) => {
+            const at = body.indexOf(a);
+            if (at < 0) return false;
+            const sentence = quoteAround(body, at, a.length, 220);
+            return /\bif\b|\bunless\b|\bin case\b|\botherwise\b|\bshould (?:it|there|we|you|they)\b|\bin the event\b|\bwere (?:it|this|that) to\b/i.test(sentence);
+        };
+        const actions = promisesIn(body).filter(a => worthCarrying(a) && !conditionalIntent(a)).slice(0, 3);
+        if (actions.length) {
+            out.latestIntent = {
+                side: soti ? 'soti' : 'customer',
+                sender: (newestSubstantive.sender || (soti ? 'SOTI Support' : 'the customer')).trim(),
+                time: (newestSubstantive.time || '').trim(),
+                actions,
+                // So the coverage machinery, which measures every other signal by its quote, can
+                // measure this one the same way.
+                quote: actions.join('; ')
             };
         }
     }
@@ -7015,6 +7168,29 @@ function detectChainSignals(entries, lc, issueText) {
         }
         break;
     }
+    // THE SESSION ALREADY HAPPENED — the fourth state, and the only one nothing recorded.
+    // "offered" and "booked" both stop the plan re-proposing a meeting; "held" was inferred only
+    // as a way of CANCELLING those two, so a case whose session is behind it carried no session
+    // signal at all. The [LOG ACCESS] directive for an On-Prem deployment then applied its
+    // unconditional rule — "one numbered step MUST be: Arrange a 30-minute remote session…" — and
+    // the plan opened by arranging a session that had been held five days earlier, on a case whose
+    // newest message said SOTI was going to Development with the findings from it.
+    // Recorded only when it is the LATEST session state: a booking or a fresh offer that postdates
+    // the meeting means another one is genuinely pending, and those two signals own that case.
+    if (!out.meetingBooked && !out.meetingProposed) {
+        for (let i = 0; i < entries.length; i++) {
+            const e = entries[i];
+            if (isOooAutoReply(e) || isChainLifecycleRow(e)) continue;
+            const m = matchEarliest(e.body || '', MEETING_HELD_RE, MEETING_HELD_ML_RE);
+            if (!m) continue;
+            out.meetingHeld = {
+                sender: (e.sender || 'unknown').trim(),
+                time: (e.time || '').trim(),
+                quote: quoteAround(e.body, m.index, m[0].length)
+            };
+            break;
+        }
+    }
     return out;
 }
 
@@ -7035,20 +7211,33 @@ function srcArticle(type) {
 // demanded priority", and then requiring the Summary to state it, put a four-month-old "please
 // investigate this as a priority" at the top of the summary of a case the customer had already
 // signed off. The facts stay; the instruction to foreground them does not.
-function buildCaseSignalsBlock(sig, kind, small, lc) {
+// sections — the answer's OWN section names, for a template that does not use the case
+// summary's three. The 30/60/90 write-up calls its narrative "Case Summary:" and has no
+// "Troubleshoots done:" at all, so a mandate naming those headers points the model at a
+// section that is not in the template it was handed. Supplying them here renames the two
+// that matter and prints one mapping line for the rest.
+function buildCaseSignalsBlock(sig, kind, small, lc, sections) {
     if (small === undefined) { try { small = isSmallLocalModel(); } catch (e) { small = false; } }
     if (!sig) return '';
     const closing = !!(lc && lc.state === 'closure');
+    const sec = sections || {};
+    const SUMMARY_SEC = `"${sec.summary || 'Summary:'}"`;
+    const NEXT = `"${sec.next || 'Next steps:'}"`;
     const has = sig.recurrence || sig.urgency || sig.impact || sig.unverified || sig.blocker
         || (sig.commitments && sig.commitments.length) || (sig.promises && sig.promises.length)
         || (sig.recordedActions && sig.recordedActions.length)
         || sig.openQuestion || sig.pendingRequest || sig.meetingProposed || sig.meetingBooked
+        || sig.latestIntent || sig.meetingHeld
         || sig.issueContrast;
     if (!has) return '';
     const q = (s) => `${s.sender}${s.time ? ` (${s.time})` : ''}: "${s.quote}"`;
     const lines = [closing
         ? '[DECISIVE CASE SIGNALS — extracted verbatim from the chain by exact text match. THESE ARE FACTS, and each is dated. This case is CLOSING (see the CASE STATE directive): anything below that predates the closure is case HISTORY — report it as something that happened earlier in the case, never as an open demand or an outstanding action.]'
         : '[DECISIVE CASE SIGNALS — extracted verbatim from the chain by exact text match. THESE ARE FACTS. Every one listed here MUST appear in your answer; omitting one is an error, and no other content may displace them.]'];
+    // Only when the answer's template uses different headers from the case summary's.
+    if (sec.summary || sec.next || sec.noDoneSection) {
+        lines.push(`SECTION NAMES IN YOUR ANSWER: where a rule below says "Summary:" it means ${SUMMARY_SEC}, and where it says "Next steps:" it means ${NEXT}.${sec.noDoneSection ? ' Your template has NO "Troubleshoots done:" section — where a rule says something belongs there, it means the fact belongs in ' + SUMMARY_SEC + ' and must NOT be written as a next step.' : ''}`);
+    }
     // Placed FIRST, ahead of every other signal: when the newest message on the case is the
     // customer asking something, that question IS the current state and answering it IS the next
     // step — no amount of correct troubleshooting detail makes up for a summary that misses it.
@@ -7057,6 +7246,23 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         // over a quote holding three of them invites an answer to one.
         const many = (sig.openQuestion.count || 1) > 1;
         lines.push(`- UNANSWERED QUESTION${many ? 'S' : ''} FROM THE CUSTOMER — this is the NEWEST message on the case, so nobody has replied to ${many ? 'them' : 'it'} yet. ${many ? 'EVERY ask quoted here is outstanding and each one needs its own answer. ' : ''}${q(sig.openQuestion)}`);
+    }
+    // WHAT THE NEWEST MESSAGE SAYS HAPPENS NEXT — placed directly after the unanswered question,
+    // because between them they ARE "where the case stands". Everything below is context for it.
+    const li = sig.latestIntent;
+    // The promise block quotes the same sentences whenever the newest message is SOTI's, and
+    // three near-identical paragraphs would spend the budget the case history needs.
+    // On a CLOSING case the promise block already carries these sentences with the wording that
+    // state requires ("this is history: the case has since been resolved"), so the duplicate
+    // suppression below is switched off and the line here makes no claim about what is owed.
+    const intentEchoesPromise = !closing && !!(li && li.side === 'soti' && sig.promiseSource
+        && sig.promiseSource.sender === li.sender && sig.promiseSource.time === li.time);
+    if (li && closing) {
+        lines.push(`- SOTI'S NEWEST MESSAGE ALSO STATED: ${li.actions.map(a => `"${a}"`).join('; ')}. This case is CLOSING (see the CASE STATE directive), so treat that as something already communicated — never as an outstanding action.`);
+    } else if (li && li.side === 'soti') {
+        lines.push(`- THE NEWEST MESSAGE ON THIS CASE IS SOTI'S OWN, AND IT STATES WHAT HAPPENS NEXT — ${li.sender}${li.time ? ` (${li.time})` : ''} told the customer that SOTI would: ${li.actions.map(a => `"${a}"`).join('; ')}. Nothing in the case shows it has been done yet, and the customer has read it and is waiting on it. This is the immediate next action on this case.`);
+    } else if (li) {
+        lines.push(`- THE NEWEST MESSAGE ON THIS CASE IS THE CUSTOMER'S, AND THEY SAID THEY WOULD: ${li.actions.map(a => `"${a}"`).join('; ')} — ${li.sender}${li.time ? ` (${li.time})` : ''}. The case is therefore waiting on THEM for exactly that, and nothing shows it has arrived.`);
     }
     // On a case that is CLOSING, an evidence request from earlier is history: chasing it would
     // contradict the CASE STATE directive, which allows closure actions and nothing else.
@@ -7070,6 +7276,8 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         lines.push(`- THE LIVE SESSION IS ALREADY BOOKED — it is agreed and in the diary, and the chain does not show it has been held yet. State the appointment (including the time exactly as the chain gives it) as where the case stands. It is FORBIDDEN to write "book", "arrange", "schedule" or "set up" a session as a next step: that work is DONE. ${q(sig.meetingBooked)}`);
     } else if (sig.meetingProposed && !closing) {
         lines.push(`- A LIVE SESSION HAS ALREADY BEEN OFFERED and the chain does not show it has been held yet. ${q(sig.meetingProposed)}`);
+    } else if (sig.meetingHeld && !closing) {
+        lines.push(`- THE LIVE SESSION HAS ALREADY BEEN HELD, and no later message offers or books another one. Whatever was done on that call belongs under work already completed. Arranging, booking or proposing a session is therefore NOT a next step on this case: only write one if the plan needs evidence that provably cannot be captured any other way, and never as the first step. ${q(sig.meetingHeld)}`);
     }
     if (sig.recurrence && sig.recurrence.descriptiveOnly) {
         // The text calls the fault recurring without anyone reporting a repeat. Still decisive —
@@ -7129,7 +7337,7 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
     // fact three times over — three near-identical paragraphs, on a budget where the case history
     // is what gets trimmed to pay for them. The mandates below still apply; only the duplicate
     // quote is dropped.
-    const promisesEchoRequest = !!(sig.pendingRequest && sig.promises && sig.promises.length
+    const promisesEchoRequest = intentEchoesPromise || !!(sig.pendingRequest && sig.promises && sig.promises.length
         && sig.promises.every(p => {
             const head = String(p).replace(/…$/, '').slice(0, 60).toLowerCase();
             return head.length > 20 && sig.pendingRequest.quote.toLowerCase().includes(head);
@@ -7146,8 +7354,27 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
             ? `- PROMISED TO THE CUSTOMER EARLIER IN THE CASE${who}: ${what}. This is history: the case has since been resolved and is closing. Do NOT present it as something still owed.`
             : `- ALREADY PROMISED TO THE CUSTOMER IN WRITING${who}: ${what}. The customer has read this and is waiting on it.`);
     }
-    if (kind === 'email') {
+    if (kind === 'record') {
+        // The internal Problem & Resolution record has two lines and no plan, so the mandates
+        // that shape "Next steps:" would point at a section that does not exist. What it needs
+        // from these signals is the one thing it can get catastrophically wrong: writing a
+        // resolution for a case that does not have one. Every fact above is evidence about that.
+        const openWork = [];
+        if (sig.openQuestion) openWork.push('the customer has asked something that is still unanswered');
+        if (li && li.side === 'soti') openWork.push('SOTI\'s own newest message undertakes an action that has not been reported as done');
+        else if (li) openWork.push('the customer has said they will do something that has not arrived');
+        if (sig.pendingRequest) openWork.push('SOTI is still waiting on evidence it has already asked for');
+        if (sig.unverified) openWork.push('the customer stated an outcome could NOT be confirmed');
+        if (sig.recurrence) openWork.push('the issue has come back after being treated as fixed');
+        if (sig.blocker) openWork.push('a separate fault is blocking the work');
+        lines.push(openWork.length && !closing
+            ? `MANDATORY FOR "Solution:" — this case is NOT resolved: ${openWork.join('; ')}. Write what has actually been established and what is being done about it, and say plainly that the issue is not yet resolved. Any interim workaround must be named AS a workaround, never as the resolution. Stating or implying that the problem was fixed, closed or resolved is a FABRICATION.`
+            : 'MANDATORY FOR "Solution:" — state only what the case record actually says was done. Where an action\'s outcome was never reported, say so rather than supplying one.');
+        lines.push('Both lines are a RECORD, not a plan: do not write next steps, recommendations or anything the case has not already done.');
+    } else if (kind === 'email') {
         const asks = [];
+        if (li && li.side === 'soti') asks.push('REPORT BACK on what SOTI said it would do in its last email — that undertaking is the reason the customer is waiting, so say where it stands and what it produced (or, if it is still in progress, say so and when they will hear)');
+        else if (li) asks.push("follow up on what the customer themselves said they would do, in their own terms, without asking again for something they have already said they are sending");
         if (sig.openQuestion) asks.push((sig.openQuestion.count || 1) > 1
             ? "ANSWER EVERY ONE of the customer's unanswered asks above, each one explicitly and in the order they asked them — they are the reason the customer is waiting, and a reply that settles some and leaves the others unmentioned reads as if their email was skim-read"
             : "ANSWER the customer's unanswered question above directly, in its first paragraph — it is the reason they are waiting, and a reply that does not answer it reads as if their email was never opened");
@@ -7162,6 +7389,8 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         lines.push(`Because of this, the email MUST ${asks.join('; ')}. Never send a reply that reads as if the case were quietly resolved.`);
     } else if (small) {
         const asks = [];
+        if (li && li.side === 'soti') asks.push(`what SOTI said it would do next in its own last message (${li.actions.map(a => `"${a}"`).join('; ')}) — that is where the case stands`);
+        else if (li) asks.push('what the customer said THEY would do next in their own last message — the case is waiting on them for it');
         if (sig.openQuestion) asks.push((sig.openQuestion.count || 1) > 1
             ? "that the case is waiting on SOTI to answer the customer's asks quoted above — say what EACH of them asked, in English, not just the first"
             : "that the case is waiting on SOTI to answer the customer's question quoted above (say what they asked, in English)");
@@ -7179,6 +7408,10 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
         if (sig.openQuestion) lines.push(closing
             ? 'The customer\'s question above is still unanswered — state it in "Summary:". What "Next steps:" may contain is decided by the CASE STATE directive, not by this signal.'
             : `MANDATORY FOR "Next steps:" — step 1 MUST be replying to the customer with the answer to ${(sig.openQuestion.count || 1) > 1 ? 'EVERY ask quoted above; a reply that settles some of them and leaves the rest unmentioned does not count' : 'that question'}. Nothing may come before it.`);
+        if (li && !closing) lines.push(li.side === 'soti'
+            ? `MANDATORY FOR ${NEXT} — SOTI's own newest message already says what happens next. Step ${sig.openQuestion ? '1 (or 2 if the reply above comes first)' : '1'} MUST be carrying that out — ${li.actions.map(a => `"${a}"`).join('; ')} — rewritten as an executable action (who is contacted or what is done, on which ticket or artefact, and what answer or result ends it). Do NOT replace it with an investigation of your own, and do NOT list anything ahead of it that the case has not been told is coming.`
+            : `MANDATORY FOR ${NEXT} — the customer's newest message says what THEY will do next. One numbered step MUST be following that up specifically — ${li.actions.map(a => `"${a}"`).join('; ')} — naming what is expected and by when. Do NOT write a step that asks them for it again under a different name.`);
+        if (sig.meetingHeld && !closing) lines.push(`MANDATORY — the working session has ALREADY been held. Writing "arrange", "book", "schedule" or "set up" a session as a next step is FORBIDDEN unless the plan genuinely needs evidence that cannot be captured any other way, and it may never be step 1.`);
         if (sig.pendingRequest && !closing) lines.push('MANDATORY — the outstanding request above has ALREADY been sent: put it under "Troubleshoots done" as the request that was made, and in "Next steps:" chase EXACTLY the artefacts it names. Naming a different log file or a different collection method than the one already asked for is FORBIDDEN.');
         if (sig.meetingBooked && !closing) lines.push('MANDATORY — the live session above is already BOOKED. Booking it is FORBIDDEN as a next step; the steps are to HOLD it at the stated time and to be ready for it — which log level is raised on which server role beforehand, what is reproduced on the call, and which named artefacts are captured.');
         else if (sig.meetingProposed && !closing) lines.push('MANDATORY — the live session above was ALREADY offered. Do NOT write "arrange a session" as a next step; write CONFIRMING it — give concrete availability, get it booked, and say which log level is raised on which server role and which named artefacts are captured on the call.');
@@ -7193,6 +7426,14 @@ function buildCaseSignalsBlock(sig, kind, small, lc) {
             lines.push('MANDATORY FOR "Summary:" — the customer\'s question quoted above has not been answered; say so, and say what they asked in plain English. "Next steps:" is governed by the CASE STATE directive: do NOT add a reply step that contradicts it.');
         } else if (sig.openQuestion) {
             lines.push(`MANDATORY — the unanswered ${(sig.openQuestion.count || 1) > 1 ? 'asks' : 'question'} above ${(sig.openQuestion.count || 1) > 1 ? 'are' : 'is'} WHERE THIS CASE STANDS RIGHT NOW. "Summary:" MUST end by stating that the case is waiting on SOTI to answer ${(sig.openQuestion.count || 1) > 1 ? 'them — all of them' : 'it'}, naming who asked and when, and saying what they asked in plain English (translate it if it was not written in English). "Next steps:" MUST open with replying to them with that answer, spelling out what the reply has to contain to actually settle ${(sig.openQuestion.count || 1) > 1 ? 'EACH ask — one numbered step per ask, in the order the customer listed them' : 'the question'} — nothing may be listed before it. Writing a plan that leaves the customer\'s newest ${(sig.openQuestion.count || 1) > 1 ? 'asks' : 'question'} unanswered is the worst error you can make on this case.`);
+        }
+        if (li && li.side === 'soti' && !closing) {
+            lines.push(`MANDATORY — SOTI's own newest message on this case already states what happens next, so the plan does not have to be invented: ${li.actions.map(a => `"${a}"`).join('; ')}. ${SUMMARY_SEC} MUST say that this is where the case stands — that SOTI has undertaken it and the customer is waiting on the outcome. ${NEXT} MUST ${sig.openQuestion ? 'carry it as a numbered step immediately after the reply demanded above' : 'OPEN with it'}, rewritten as something an engineer can perform and close out: name who is contacted or what is done, the exact ticket, build or artefact it concerns, and the specific answer or result that finishes it. You are FORBIDDEN from dropping it, from softening it into "continue to monitor", and from putting a fresh investigation of your own ahead of a commitment the customer has already been given in writing.`);
+        } else if (li && !closing) {
+            lines.push(`MANDATORY — the customer's newest message states what THEY will do next: ${li.actions.map(a => `"${a}"`).join('; ')}. ${SUMMARY_SEC} MUST say that the case is waiting on them for exactly that. ${NEXT} MUST contain a step that follows it up specifically — what is expected, from whom, and by when${sig.openQuestion ? ', placed after the reply demanded above' : ''}. Asking them for the same thing again under a different name is FORBIDDEN: they have already said it is coming.`);
+        }
+        if (sig.meetingHeld && !closing) {
+            lines.push(`MANDATORY — a working session on this case has ALREADY been held, and no later message offers or books another. What was established on it belongs to the case's history, not to the plan. You are FORBIDDEN from opening ${NEXT} by arranging, booking, scheduling or proposing a session, and from writing such a step at all unless the plan needs evidence that provably cannot be captured any other way — in which case it is a LATER step and must say what specifically the earlier session could not produce.`);
         }
         if (sig.pendingRequest && !closing) {
             lines.push('MANDATORY — the outstanding request above was ALREADY SENT to the customer. Record it under "Troubleshoots done" as the request that was made (with what was asked for), and in "Next steps:" chase EXACTLY the artefacts, server role and collection method it names. You are FORBIDDEN from replacing them with your own choice of log file, tool or procedure, and from asking the customer for the same thing twice under a different name.');
@@ -7493,6 +7734,20 @@ function detectCaseLifecycleState(ci) {
 function buildCaseStateDirective(lc, kind, small) {
     if (small === undefined) { try { small = isSmallLocalModel(); } catch (e) { small = false; } }
     const evLines = (lc.evidence || []).map(e => `- ${e.sender}${e.time ? ` wrote on ${e.time}` : ' wrote'}: "${e.quote}"`).join('\n');
+    // 'record' — the internal Problem & Resolution note. It has no plan and no closure email, so
+    // neither of the two directives below applies to it; what it needs is the verdict itself,
+    // because "Solution:" on an unresolved case is the one line in this tool that can put a
+    // fabricated resolution into the permanent case record.
+    if (kind === 'record') {
+        const head = ['[CASE STATE — VERIFIED DETERMINISTICALLY FROM THE EMAIL CHAIN. THIS IS FACT.]'];
+        if (lc.state === 'closure') {
+            head.push('The chain shows this case reached a resolution and is closing, so "Solution:" may state the outcome the chain records — and only that outcome.');
+        } else {
+            head.push('The chain shows NO confirmed resolution and NO closure agreement: this case is STILL OPEN. "Solution:" MUST therefore say what has been established and what is currently being done, and state plainly that the issue is not yet resolved. Writing that it was fixed, resolved or closed is a FABRICATION, and an interim workaround must be named as a workaround.');
+        }
+        if (evLines) head.push('The message(s) this verdict rests on:\n' + evLines);
+        return head.join('\n');
+    }
     if (lc.state === 'closure') {
         const lines = ['[CASE STATE — VERIFIED DETERMINISTICALLY FROM THE EMAIL CHAIN. THIS IS FACT — DO NOT SECOND-GUESS IT.]'];
         if (lc.customerConfirmed && lc.supportClosingSent) {
@@ -7723,8 +7978,19 @@ function getMcHosted(rawOverride) {
 // the obligation (a customer-facing email must not say "I pulled your logs from the backend"
 // in the same terms an internal next-steps list does).
 // small: compact wording for CPU-bound models, where every kilobyte of prefill costs seconds.
-function buildLogAccessDirective(kind = 'summary', small = false) {
+// sessionHeld — the chain shows a working session has already taken place and nothing since has
+// offered or booked another. The On-Prem branch below otherwise applies its rule unconditionally
+// ("one numbered step MUST be: Arrange a 30-minute remote session…"), and on a case whose session
+// was held five days ago that rule is what put "1. Arrange a 30-minute remote session with <the
+// customer>" at the top of the plan — ahead of the follow-up SOTI had promised the customer in
+// writing that morning. The requirement to name the artefacts exactly is unchanged; only the
+// instruction to book a meeting that has already happened is withdrawn.
+function buildLogAccessDirective(kind = 'summary', small = false, opts = {}) {
     const hosted = getMcHosted();
+    const sessionHeld = !!(opts && opts.sessionHeld);
+    const sessionRule = sessionHeld
+        ? 'A working session with the customer has ALREADY been held on this case, so arranging one is NOT a next step: request each named artefact directly. Propose a further session ONLY if the evidence genuinely cannot be captured without one, say what the earlier session could not produce, and never make it the first step.'
+        : '';
 
     if (hosted === 'Cloud') {
         if (small) {
@@ -7745,14 +8011,16 @@ function buildLogAccessDirective(kind = 'summary', small = false) {
 
     if (hosted === 'On-Prem') {
         if (small) {
-            return `[LOG ACCESS — FACT, from the Case Info panel field "MC Hosted" = On-Prem]: the CUSTOMER hosts and administers this server, so SOTI Support has NO backend access. Every server-side artefact must be REQUESTED FROM THE CUSTOMER, named exactly: which log file, on which server role, at which log level, and the exact time window with time zone. Arranging the session with the customer is itself a next step: one numbered step MUST be "Arrange a 30-minute remote session with <the customer contact> to raise the log level on <server role>, reproduce the issue, note the exact timestamp, and collect <named log files> together" — written on its own, never folded into another step.`;
+            return `[LOG ACCESS — FACT, from the Case Info panel field "MC Hosted" = On-Prem]: the CUSTOMER hosts and administers this server, so SOTI Support has NO backend access. Every server-side artefact must be REQUESTED FROM THE CUSTOMER, named exactly: which log file, on which server role, at which log level, and the exact time window with time zone. ${sessionHeld ? sessionRule : 'Arranging the session with the customer is itself a next step: one numbered step MUST be "Arrange a 30-minute remote session with <the customer contact> to raise the log level on <server role>, reproduce the issue, note the exact timestamp, and collect <named log files> together" — written on its own, never folded into another step.'}`;
         }
         const lines = [
             '[LOG ACCESS — VERIFIED FROM THE CASE INFO PANEL: the "MC Hosted" field is set to ON-PREM. THIS IS FACT — DO NOT SECOND-GUESS IT.]',
             'The customer hosts and administers this server themselves, so SOTI Support has NO backend access. Every piece of server-side evidence must come FROM THE CUSTOMER.',
             '- Each request MUST be specific enough to action without a follow-up: name the exact log file and the server role it lives on (e.g. MS.log on the Management Server, DS.log on the Deployment Server), the log level to raise BEFORE reproducing, and the exact time window with time zone to capture.',
             '- Logs collected unattended routinely come back at the wrong log level, from the wrong server, or with no coverage of the failure.',
-            '- MANDATORY: because the server is the customer\'s, a working session with them is itself a next step and MUST appear as its OWN numbered step in "Next steps:" — never folded into another step, never left implied, and never reduced to "request the logs". Write it as a bookable action: "Arrange a 30-minute remote session (Teams/WebEx) with <the customer contact> to raise the log level on <server role>, reproduce the issue live, note the exact timestamp, and collect <named log files> together on the call." Name who needs to attend from the customer side when it requires server access they alone hold. If the DECISIVE CASE SIGNALS say a session has ALREADY been offered, this step is to CONFIRM and BOOK that session (with concrete availability) instead of proposing it again.',
+            sessionHeld
+                ? `- ${sessionRule} Every request still has to be specific enough to action without a follow-up, exactly as above.`
+                : '- MANDATORY: because the server is the customer\'s, a working session with them is itself a next step and MUST appear as its OWN numbered step in "Next steps:" — never folded into another step, never left implied, and never reduced to "request the logs". Write it as a bookable action: "Arrange a 30-minute remote session (Teams/WebEx) with <the customer contact> to raise the log level on <server role>, reproduce the issue live, note the exact timestamp, and collect <named log files> together on the call." Name who needs to attend from the customer side when it requires server access they alone hold. If the DECISIVE CASE SIGNALS say a session has ALREADY been offered, this step is to CONFIRM and BOOK that session (with concrete availability) instead of proposing it again.',
             '- Do NOT write steps that assume SOTI can read the server, restart its services, or query its database directly — the agent cannot.'
         ];
         if (kind === 'email') {
@@ -8184,6 +8452,49 @@ function enforceMcmrCitations(text, allowedCodes) {
 }
 
 // ---------------------------------------------------------------------------
+// "THE FIX HAS ALREADY SHIPPED" — a fact, not an inference
+// ---------------------------------------------------------------------------
+// When a development ticket THIS CASE ALREADY CARRIES (the JIRA Number field, the synced ticket,
+// or a code the correspondence names) turns up in the Resolved Issues of a version NEWER than the
+// one the customer is running, there is nothing left to judge: the defect the case is about is
+// fixed, the build is named, and the customer is on an older one. That is the single most
+// valuable sentence the tool can produce on an aging case, and leaving it to the model means it
+// arrives hedged ("review the release notes and recommend upgrading if applicable") or not at
+// all — both observed on gemma4:e2b, which is the model most engineers run.
+//
+// Deliberately narrow. A symptom-matched entry whose code the case does NOT carry is a
+// suggestion, and suggestions stay with the model and its allow-list. This runs only on the
+// certainty: same ticket, newer version.
+function caseTicketsFixedInNewerVersion(caseText, currentVersion) {
+    if (!VERIFIED_MCMR_ENTRIES.length) return [];
+    let carried;
+    try { carried = collectMcmrCodes(caseText); } catch (e) { return []; }
+    if (!carried || !carried.size) return [];
+    const cur = String(currentVersion || '').trim();
+    const out = [];
+    for (const e of VERIFIED_MCMR_ENTRIES) {
+        if (!carried.has(e.code) || !e.version) continue;
+        // No customer version on the case → the fix is still worth naming; it simply cannot be
+        // stated as "newer than yours". With one, only a genuinely newer build qualifies.
+        if (cur && e.version.localeCompare(cur, undefined, { numeric: true }) <= 0) continue;
+        if (!out.some(x => x.code === e.code)) out.push(e);
+    }
+    return out;
+}
+
+function noteShippedFixForCaseTicket(text, fixes, currentVersion) {
+    const src = String(text || '');
+    if (!src.trim() || !fixes || !fixes.length) return src;
+    // Already said — in any wording — so there is nothing to add. Both the code and its build
+    // have to be present: naming the ticket without the build is the gap this closes.
+    const missing = fixes.filter(f => !(src.includes(f.version) && new RegExp(`\\b${f.code}\\b`, 'i').test(src)));
+    if (!missing.length) return src;
+    const f = missing[0];
+    const where = currentVersion ? ` and this deployment is on ${currentVersion}` : '';
+    return src + `\n\n*Check: ${f.code} — a development ticket this case already carries — is listed in the SOTI Pulse release notes as fixed in ${f.product ? f.product + ' ' : ''}${f.version}${where}. Upgrading to ${f.version} belongs in the next steps, with the customer's change window.*`;
+}
+
+// ---------------------------------------------------------------------------
 // VAGUE NEXT-STEP FILTER
 // ---------------------------------------------------------------------------
 // "Verify the current server configuration against known stable states for versions X and
@@ -8591,6 +8902,14 @@ function postValidateCaseAnswer(text, allowedMcmrCodes, runCase) {
     try { out = stripVagueNextSteps(out); } catch (e) { console.warn('Vague-step filter failed', e); }
     try { out = flagEmptyNextSteps(out); } catch (e) { console.warn('Empty-plan check failed', e); }
     try { out = flagLogAccessMismatch(out, getMcHosted(rci.dsCfg)); } catch (e) { console.warn('Log-access check failed', e); }
+    // Runs LAST, after the filters that can delete a step: an upgrade step the model wrote and a
+    // filter then removed must still leave the fact on the page.
+    try {
+        const fixes = caseTicketsFixedInNewerVersion(
+            `${rci.jiraNum || ''}\n${rci.jiraDetails || ''}\n${issueText}\n${chainText}\n${rci.meetingNotes || ''}`,
+            rci.sotiVer || '');
+        out = noteShippedFixForCaseTicket(out, fixes, rci.sotiVer || '');
+    } catch (e) { console.warn('Shipped-fix check failed', e); }
     return out;
 }
 
@@ -8684,6 +9003,18 @@ function editSummarySection(text, fn) {
     const edited = fn(m[3]);
     if (edited === m[3]) return src;
     return src.slice(0, m.index) + m[1] + m[2] + edited + src.slice(m.index + m[0].length);
+}
+
+// The text under the answer's forward-looking heading, or null when it has none. Used by the
+// repair pass to ask a question the Summary section cannot answer: does the PLAN act on what
+// the case's newest message said would happen next?
+function nextStepsSectionOf(text) {
+    const lines = String(text || '').split('\n');
+    const at = lines.findIndex(l => FORWARD_SECTION_RE.test(l));
+    if (at < 0) return null;
+    const rest = lines.slice(at + 1);
+    const end = rest.findIndex(l => HISTORICAL_SECTION_RE.test(l));
+    return (end < 0 ? rest : rest.slice(0, end)).join('\n');
 }
 
 // Sentence-split that survives the version strings these summaries are full of: "v2026.1.1.1453"
@@ -8870,6 +9201,20 @@ function repairSentenceFor(key, s, writeLang) {
             // must never attempt a translation it cannot verify.
             if (T) return T.issueContrast({ q });
             return `In their own report the customer set this case apart from the earlier one they referenced: "${q}".`;
+        case 'latestIntent': {
+            // The newest message's own statement of what happens next. Quoted, like the question
+            // and the contrast, because it is a commitment: paraphrasing one is how a promise
+            // quietly changes shape between the email that made it and the summary that records it.
+            const who = String((s && s.sender) || '').trim();
+            const when = String((s && s.time) || '').trim();
+            const what = ((s && s.actions) || []).map(a => `"${a}"`).join('; ');
+            if (!what) return '';
+            if (T && T.latestIntentSoti && s.side === 'soti') return T.latestIntentSoti({ who, when, q: what });
+            if (T && T.latestIntentCustomer && s.side !== 'soti') return T.latestIntentCustomer({ who, when, q: what });
+            return s.side === 'soti'
+                ? `The case now stands on SOTI's own most recent message${who ? ` from ${who}` : ''}${when ? ` of ${when}` : ''}, which told the customer that SOTI would ${what} — the customer is waiting on that.`
+                : `The case is waiting on the customer${who ? ` (${who})` : ''}${when ? `, whose message of ${when}` : ', who'} said they would ${what}.`;
+        }
         default:
             return '';
     }
@@ -9018,6 +9363,44 @@ function checkCaseSummaryCoverage(text, info) {
         const sentence = repairSentenceFor(key, s, writeLang);
         if (sentence) { missing.push(sentence); applied.push(`restored: ${key}`); }
     }
+    // WHAT THE NEWEST MESSAGE SAID WOULD HAPPEN NEXT — checked on its own terms rather than
+    // through the generic quote machinery, because an intention is carried by naming the ACTION
+    // ("chase Development on MCMR-30202"), not by reusing the sentence it was written in. A
+    // distinctive identifier the action names — a ticket, a case number, a version — settles it
+    // outright; otherwise the usual one-third content-word overlap applies. When neither holds,
+    // the fact is restored into "Summary:" the same way every other decisive fact is.
+    const li = sig.latestIntent;
+    if (li && li.actions && li.actions.length) {
+        const act = String(li.actions[0]);
+        const ids = act.match(/\b(?:MCMR|MCPR)-\d{3,6}\b|\bC0\d{6,8}\b|\b(?:20\d\d|\d{2})\.\d+(?:\.\d+)+\b/gi) || [];
+        const carried = ids.some(t => src.toUpperCase().includes(t.toUpperCase())) || coverageHit(src, act);
+        if (!carried) {
+            const sentence = repairSentenceFor('latestIntent', li, writeLang);
+            if (sentence) { missing.push(sentence); applied.push('restored: latestIntent'); }
+        }
+        // …and the PLAN has to act on it. The summary can state the commitment perfectly and
+        // still hand the engineer a list of steps that ignores it — which is the failure this
+        // whole signal exists to prevent, so the plan is checked separately from the prose.
+        // A note rather than an inserted step: the tool never writes a numbered instruction it
+        // has not been asked for, and an engineer reading "*Check: …*" knows it is the tool
+        // speaking. Only raised when there is a plan to check.
+        try {
+            const plan = nextStepsSectionOf(src);
+            if (plan !== null && plan.trim()) {
+                const inPlan = ids.some(t => plan.toUpperCase().includes(t.toUpperCase())) || coverageHit(plan, act);
+                const note = li.side === 'soti'
+                    ? `*Check: the newest message on this case is SOTI's own, and it told the customer that SOTI would ${act}. That is the action the customer is waiting on and it is not in the next steps above.*`
+                    : `*Check: the customer's newest message says they will ${act}. Following that up is not in the next steps above.*`;
+                // Re-running a repair must be a no-op — the note itself is not a next step, so a
+                // second pass would otherwise find the plan just as empty and append it again.
+                if (!inPlan && !src.includes(note)) {
+                    src += `\n\n${note}`;
+                    applied.push('flagged: plan omits the latest message\'s stated next action');
+                }
+            }
+        } catch (e) { }
+    }
+
     // Other SOTI case numbers referenced in the chain: an exact string, so this is exact.
     // referencedCaseNumbers already excludes this case's own number (including when the
     // case-number field is empty and the only number in the chain is its own).
@@ -10202,6 +10585,26 @@ function buildCaseHeadline(maxChars = 160) {
         if (t.length >= 6) return t.slice(0, maxChars);
     }
     return '';
+}
+
+// The query behind a log analysis's release-notes scan. Same shape as buildCaseResearchQuery —
+// English only, symptom-led — but the log's own error signature is added, because the whole point
+// is to match a resolved-issue line against what the LOG shows rather than against the case's
+// prose. The signature terms lead: on a case whose description is thin, they are all there is.
+function buildLogFixScanQuery(logs, ci) {
+    let sig = [];
+    try { sig = (collectLogSignatureTerms(logs) || []).slice(0, 8); } catch (e) { sig = []; }
+    let symptom = '';
+    try { symptom = (buildEffectiveIssueSummary(ci) || '').replace(/\s+/g, ' ').trim(); } catch (e) { }
+    if (!symptom) { try { symptom = buildCaseSymptomText(500); } catch (e) { } }
+    const latin = String(symptom)
+        .split(/(?<=[.!?])\s+|\n+/)
+        .filter(seg => !/[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(seg))
+        .join(' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    const q = ('troubleshoot issue: ' + [sig.join(' '), latin].filter(Boolean).join(' ')).slice(0, 700);
+    return q.length > 22 ? q : '';
 }
 
 function buildCaseResearchQuery() {
@@ -13263,7 +13666,19 @@ const GENERIC_QUERY_WORDS = new Set(['tell', 'show', 'give', 'look', 'help', 'ne
     'about', 'know', 'think', 'right', 'good', 'really', 'just', 'sure', 'also', 'with', 'from', 'have', 'they',
     'them', 'there', 'their', 'accurately', 'exactly', 'properly', 'again']);
 
-async function searchPulseAndDocs(query, msgs, ci) {
+// opts.caseDerived — the query was built by the APP from the case's own symptom text (the quick
+// actions, and the release-notes scan behind a log analysis), not typed by the agent. It decides
+// one thing and it decides it completely: "did the agent ask to see the release notes?" is a
+// question about the agent's words, and inferring it from case text gets it wrong in the most
+// damaging direction. A case whose Issue Summary names its own development ticket — "MCMR-30202
+// is raised with Development", which is exactly what a well-filled case says — matched the
+// /mcmr[\s-]*\d+/ trigger below, flipped MCMR_CITATION_MODE to 'open', and switched off the
+// allow-list that stops an unrelated code from a release-notes dump being cited as this case's
+// fix. The guard was disabled by the case being well documented.
+// opts.notesOnly — fetch the release notes and nothing else (no community/docs/deep research).
+async function searchPulseAndDocs(query, msgs, ci, opts = {}) {
+    const caseDerived = !!(opts && opts.caseDerived);
+    const notesOnly = !!(opts && opts.notesOnly);
     try {
         PULSE_SEARCH_RESULTS = ""; DOCS_SEARCH_RESULTS = ""; RESEARCHED_ARTICLE_CONTENT = ""; RELEASE_NOTES_CONTENT = "";
         const rawQLower = query.toLowerCase();
@@ -13286,12 +13701,13 @@ async function searchPulseAndDocs(query, msgs, ci) {
 
         const asksIdentity = qLower.includes('identity') || (ci && ci.product === 'SOTI Identity');
 
-        const isListingAll = /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(rawQLower) ||
-                             /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(history);
+        const isListingAll = !caseDerived && (
+                             /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(rawQLower) ||
+                             /\b(list\s*all|show\s*all|all\s*release\s*notes|resolved\s*issues|all\s*issues|full\s*list|all\s*of\s*them|all\s*them|list\s*them)\b/i.test(history));
 
-        const asksReleaseNotes = isListingAll ||
+        const asksReleaseNotes = !caseDerived && (isListingAll ||
                                  /\b(release\s*notes?|product\s*notes?|what'?s\s+new|whats\s+new|what\s+is\s+new|changelog|release\s*highlights?|resolved\s*issues?|known\s*issues?|fixed\s+in|fixed\s+since)\b/i.test(rawQLower) ||
-                                 /\b(mcmr[\s-]*\d+)\b/i.test(rawQLower);
+                                 /\b(mcmr[\s-]*\d+)\b/i.test(rawQLower));
 
         // A direct request to SEE the notes makes the listing itself the answer, so every code
         // in it is legitimately quotable. Every other turn is a case turn, where only codes that
@@ -13306,7 +13722,10 @@ async function searchPulseAndDocs(query, msgs, ci) {
         // troubleshooting the release notes are how the model discovers an issue is already
         // fixed in a newer version, so narrow trigger words silently disabled that behaviour.
         const shouldFetchReleaseNotes = asksReleaseNotes || /\b(error|fail(?:s|ed|ing)?|broken|crash(?:es|ed|ing)?|bug|issues?|missing|cannot|can'?t|unable|not\s+work(?:ing)?|stopp?ed|problems?|disappear(?:s|ed|ing)?|blank|empty|stuck|slow|fix(?:es|ed|ing)?|resolve|solve)\b/i.test(qLower);
-        const shouldDoWebSearch = isTroubleshoot || asksReleaseNotes;
+        // notesOnly: the caller wants the newer-version fix scan and nothing else. Community
+        // threads, docs search and deep research are the slow half of this function, and a log
+        // analysis is already the longest thing the panel does.
+        const shouldDoWebSearch = !notesOnly && (isTroubleshoot || asksReleaseNotes);
 
         // Small/CPU models live inside a ~10K-char TOTAL prompt budget — research sized for
         // large models (20-40K) forces the end-trimmer to delete the email chain and case
@@ -14718,6 +15137,15 @@ function mdToPlainText(mdText) {
     // old answer can never paste an internal check into the case record.
     const checkAt = t.indexOf(SUMMARY_CHECK_MARKER);
     if (checkAt > 0) t = t.slice(0, checkAt).trimEnd();
+    // The tool's OWN advisory lines — "*Check: …*" from the log-access, held-evidence,
+    // owed-direction and shipped-fix guards, "*Note: … was removed*" from the MCMR guard, and the
+    // empty-plan notice. They are addressed to the engineer reading the panel, and Copy exists to
+    // put text into Salesforce or into an email to the customer. The italics markers were being
+    // stripped a few lines below and the SENTENCE kept, so "Check: MCMR-30202 … is listed in the
+    // SOTI Pulse release notes as fixed in 2026.1.0" pasted straight into a customer reply.
+    t = t.split('\n')
+        .filter(l => !/^\s*\*(?:Check|Note):[^*]*\*\s*$/i.test(l) && l.trim() !== EMPTY_PLAN_NOTICE)
+        .join('\n');
     t = t.replace(/```[a-zA-Z]*\n?/g, '').replace(/`([^`]*)`/g, '$1'); // code fences/inline code
     t = t.replace(/^#{1,6}\s+/gm, '');                                  // headers
     t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1'); // bold
@@ -15156,6 +15584,34 @@ async function send(overrideText = null, silent = false, opts = {}) {
     // Start every turn with an empty MCMR allow-list — whatever research runs below re-fills
     // it. Without this, a code verified for the PREVIOUS question stays citable for this one.
     resetMcmrCitationState('strict');
+    // A FORENSIC run is excluded from the research block below (its answer comes from the
+    // installer log, not from the web), but that exclusion also cost it the newer-version fix
+    // scan — and an MSI rollback is one of the symptoms most likely to BE a shipped defect. On a
+    // case whose own ticket is listed as fixed in 2026.1.0, the forensic report could not say so,
+    // and worse, the MCMR rule told it in writing that claiming any such fix was FORBIDDEN. The
+    // scan is the same bounded, symptom-gated, notes-only one the ordinary analysis path runs.
+    let shippedFixSection = "";
+    if (forensicRun && !isGreeting && !chainDigestTurn) {
+        const fixQuery = buildLogFixScanQuery(c.logs, ci);
+        if (fixQuery) {
+            try {
+                await Promise.race([
+                    searchPulseAndDocs(fixQuery, c.msgs, ci, { caseDerived: true, notesOnly: true }),
+                    new Promise(r => setTimeout(r, 12000))
+                ]);
+            } catch (e) { console.warn('Release-notes fix scan skipped'); }
+        }
+        // The forensic system prompt is deliberately lean and carries no liveDataSection, so
+        // [RELEASE NOTES] and the MCMR rule never reach it. The matched entries are therefore
+        // condensed into one small block of their own — a few hundred characters, and the only
+        // way this path can tell an engineer that the defect in front of them is already fixed.
+        if (VERIFIED_MCMR_ENTRIES.length) {
+            const cur = ((c.ci && c.ci.sotiVer) || '').trim();
+            shippedFixSection = '[RELEASE-NOTES MATCHES — SOTI Pulse Resolved Issues whose text was deterministically matched to THIS case\'s symptom. These are the ONLY codes you may cite, verbatim, with the version they shipped in written IN FULL. If one genuinely describes what this log shows, say so in the recommendation and make upgrading a concrete step'
+                + (cur ? ` — this deployment is on ${cur}.` : '.') + ' If none of them does, cite none and do not mention release notes.]\n'
+                + VERIFIED_MCMR_ENTRIES.slice(0, 6).map(e => `- ${e.code} — fixed in ${e.product ? e.product + ' ' : ''}${e.version}: "${String(e.line).replace(/^[-\s]+/, '').trim()}"`).join('\n');
+        }
+    }
     if (!isGreeting && !forensicRun && !chainDigestTurn) {
         if (opts.skipResearch || metaConversationTurn) {
             // Quick-action AND chat-meta turns must be grounded in the CASE / conversation only —
@@ -15178,43 +15634,67 @@ async function send(overrideText = null, silent = false, opts = {}) {
             const researchMs = (needsDeepPulse || opts.researchQuery || fixIntentTurn) ? 20000 : 10000;
             try {
                 await Promise.race([
-                    searchPulseAndDocs(opts.researchQuery || txt, c.msgs, ci),
+                    searchPulseAndDocs(opts.researchQuery || txt, c.msgs, ci, { caseDerived: !!opts.researchQuery }),
                     new Promise(r => setTimeout(r, researchMs))
                 ]);
             } catch (e) { console.warn('Research timed out'); }
-        } else if (!isSmallLocalModel()) {
+        } else {
+            // A LOG ANALYSIS MUST STILL BE ABLE TO SAY "THIS IS FIXED IN A NEWER BUILD".
+            // Research used to be skipped entirely here, which had a consequence nobody intended:
+            // with no release-notes scan there are no verified MCMR entries, so buildMcmrCitationRule
+            // emits its "NO release-notes entry matched this case's symptom — you are FORBIDDEN
+            // from writing any MCMR code, any 'fixed in version X' claim, and any upgrade step"
+            // paragraph into the analysis prompt. An engineer analysing a log on MobiControl
+            // 2024.1.2 was therefore guaranteed never to be told the defect in front of them ships
+            // fixed in 2026.1.0. The scan is symptom-gated (only lines that match reach the model),
+            // notes-only (no community/docs/deep research — those are the slow half), case-derived
+            // (so it can never flip the citation mode open) and time-boxed, so the cost is one
+            // cached burst per session rather than a second research phase.
+            if (analysisRun) {
+                const fixQuery = buildLogFixScanQuery(c.logs, ci);
+                if (fixQuery) {
+                    try {
+                        await Promise.race([
+                            searchPulseAndDocs(fixQuery, c.msgs, ci, { caseDerived: true, notesOnly: true }),
+                            new Promise(r => setTimeout(r, 12000))
+                        ]);
+                    } catch (e) { console.warn('Release-notes fix scan skipped'); }
+                }
+            }
             // Logs attached (larger models only): small, clearly-labelled offline KB lookup —
             // supports the analysis with official docs but never distracts from the logs.
             // Skipped for small/CPU models: it's explicitly "background, ignore for the answer"
             // text that just burns prefill time and crowds the log evidence out of the window.
-            try {
-                await PulseKB.ensureIndex();
-                const sigTerms = [];
-                const prodHints = [];
-                for (const l of c.logs.slice(0, 6)) {
-                    const intel = l.panelIntel;
-                    if (intel) {
-                        if (intel.product) prodHints.push(intel.product);
-                        if (intel.topException) sigTerms.push(intel.topException.split(' x')[0]);
-                        if (intel.topCategory) sigTerms.push(intel.topCategory.split(' x')[0]);
+            if (!isSmallLocalModel()) {
+                try {
+                    await PulseKB.ensureIndex();
+                    const sigTerms = [];
+                    const prodHints = [];
+                    for (const l of c.logs.slice(0, 6)) {
+                        const intel = l.panelIntel;
+                        if (intel) {
+                            if (intel.product) prodHints.push(intel.product);
+                            if (intel.topException) sigTerms.push(intel.topException.split(' x')[0]);
+                            if (intel.topCategory) sigTerms.push(intel.topCategory.split(' x')[0]);
+                        }
                     }
-                }
-                const stop = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for', 'logs', 'log', 'analyse', 'analyze']);
-                const kws = [...new Set(
-                    txt.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stop.has(w))
-                        .concat(sigTerms.map(s => s.toLowerCase()).filter(s => s.length > 3))
-                )].slice(0, 10);
-                const refs = PulseKB.search(txt.toLowerCase(), kws, {
-                    productHints: prodHints,
-                    signatureTerms: sigTerms,
-                    maxArticles: 2,
-                    maxChars: 3000,
-                    perChunkCap: 1500
-                });
-                if (refs.length > 0) {
-                    supportingRefSection = `[SUPPORTING REFERENCE — internal KB excerpts for background only. Your analysis MUST be driven by the attached LOGS; NEVER summarize these articles as the answer.]\n${refs.join('\n---\n')}`;
-                }
-            } catch (e) { console.warn('KB reference lookup failed', e); }
+                    const stop = new Set(['what', 'where', 'how', 'when', 'there', 'is', 'are', 'was', 'were', 'the', 'and', 'with', 'some', 'having', 'issues', 'this', 'that', 'they', 'their', 'them', 'from', 'into', 'your', 'will', 'would', 'could', 'should', 'about', 'doing', 'it', 'for', 'logs', 'log', 'analyse', 'analyze']);
+                    const kws = [...new Set(
+                        txt.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !stop.has(w))
+                            .concat(sigTerms.map(s => s.toLowerCase()).filter(s => s.length > 3))
+                    )].slice(0, 10);
+                    const refs = PulseKB.search(txt.toLowerCase(), kws, {
+                        productHints: prodHints,
+                        signatureTerms: sigTerms,
+                        maxArticles: 2,
+                        maxChars: 3000,
+                        perChunkCap: 1500
+                    });
+                    if (refs.length > 0) {
+                        supportingRefSection = `[SUPPORTING REFERENCE — internal KB excerpts for background only. Your analysis MUST be driven by the attached LOGS; NEVER summarize these articles as the answer.]\n${refs.join('\n---\n')}`;
+                    }
+                } catch (e) { console.warn('KB reference lookup failed', e); }
+            }
         }
     }
 
@@ -15422,7 +15902,21 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             // 2) LIVE DATA / CASE CONTEXT (case info, research, learned insights).
             let liveDataSection = "";
             const liveDataLines = [];
-            liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${summaryText}`);
+            // The Salesforce Description is pasted rich text and can be enormous — one real case
+            // carries 15,348 characters of it in a single paragraph. Uncapped, that is 6,100
+            // tokens, a THIRD of a small model's whole prompt budget, spent before the chain, the
+            // case history or the release notes are even considered. Everything else in this
+            // section is bounded (meeting notes 1,500, the chain by chainCap, the ticket by
+            // jiraCap); this was the one that was not, and on that case the quick-action prompt
+            // came out 7,132 characters over budget, the request trimmer cut the system message's
+            // tail — [RELEASE NOTES] and half the MCMR rule — and the model returned nothing at
+            // all. The opening of a description is where the problem is stated; the tail is
+            // elaboration, and the full text stays in the case record either way.
+            const issueCap = opts.issueCap || (isSmallModel ? 3000 : 12000);
+            const issueText = summaryText.length > issueCap
+                ? summaryText.slice(0, issueCap).replace(/\s+\S*$/, '') + ' …[the rest of the description is trimmed to fit the context window — it is unchanged in the case record]'
+                : summaryText;
+            liveDataLines.push(`[ISSUE SUMMARY (original reported problem — may be superseded by the EMAIL CHAIN below)]: ${issueText}`);
             // Occurrence-count answer goes FIRST (right after the issue) so the end-trimmer can
             // never cut it — it is the authoritative answer to a counting question.
             if (countQuestionTurn) {
@@ -15644,7 +16138,7 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             //   whenever the research sections were large (verified on gemma4:e2b) — rules
             //   must lead so the trim eats the tail of [DEEP RESEARCH] instead.
             sysPrompt = forensicRun && hasLogs
-                ? `${corePrompt}${productSignatures}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}
+                ? `${corePrompt}${productSignatures}${learnedSection ? '\n\n' + learnedSection : ''}${knownFixesSection ? '\n\n' + knownFixesSection : ''}${shippedFixSection ? '\n\n' + shippedFixSection : ''}
 
 ${imgContext}`
                 : analysisRun
@@ -17242,7 +17736,7 @@ async function generateCaseSummary() {
     // deterministic, and both only matter while the case is still open.
     const isOpen = lc.state !== 'closure';
     const small = isSmallLocalModel();
-    const logAccess = isOpen ? buildLogAccessDirective('summary', small) : '';
+    const logAccess = isOpen ? buildLogAccessDirective('summary', small, { sessionHeld: !!(signals && signals.meetingHeld) }) : '';
     // One family / four checks on a CPU-bound model: the whole quick-action prompt lives inside
     // ~10K characters there, and the email chain must not lose room to a checklist.
     const playbook = isOpen ? buildSymptomPlaybook(buildCaseSymptomText(), { headline: buildCaseHeadline(), ...(small ? { maxFamilies: 1, maxChecks: 4 } : {}) }) : '';
@@ -17286,9 +17780,31 @@ async function generateCaseSummary() {
         // fed it, and the cut landed mid-word inside a quoted signal. Sizing the blocks here
         // against the real budget is what turns that into whole blocks kept or whole blocks
         // dropped, and what stops the condensation pass running for an answer nobody reads.
-        const SYSTEM_FLOOR = 1700;    // the system message's own trim floor + the trim notice
+        //
+        // 1,700 was the system message's TRIM FLOOR — the amount the request trimmer promises to
+        // KEEP — and using it as the amount the system message COSTS is only true on a thin case.
+        // On a case carrying a 15,348-character Salesforce Description and a 5,639-character JIRA
+        // thread the system message came to 27,850 characters, this message was sized as though it
+        // took 1,700, and the two together arrived 7,132 over the budget. The trimmer then cut the
+        // LARGEST message from its end — the system one — deleting [RELEASE NOTES] and half the
+        // MCMR rule, and the model returned an empty answer. So the system side is ESTIMATED from
+        // the case record instead: every part of it is either bounded by a cap this file sets or
+        // measurable here, and a reserve that is slightly too generous only costs a few lines of
+        // case history, while one that is too small costs the whole answer.
+        const systemReserve = (() => {
+            const len = (id) => (($(id) && $(id).value) || '').length;
+            const issue = Math.min(len('issueSummary'), small ? 3000 : 12000);
+            const jira = Math.min(len('jiraDetails'), small ? 2500 : 6000);
+            const chainSection = Math.min(chainRaw.length, chainEntryCount >= 8 ? (small ? 3000 : 8000) : (small ? 6000 : 16000));
+            // searchPulseAndDocs caps a troubleshooting turn's research at these figures; a
+            // closure case runs none, and the quick actions only research while the case is open.
+            const research = researchQuery ? (small ? 6000 : 10000) : 0;
+            // The rest of the system message: the quick-action core prompt, [CASE], the case-status
+            // directive, the MCMR rule, the version lists, the date line and the section headers.
+            return 4200 + issue + jira + chainSection + research;
+        })();
         const room = await (async () => {
-            try { const b = await getPromptCharBudget(); return b > 0 ? Math.max(2500, b - SYSTEM_FLOOR) : Infinity; }
+            try { const b = await getPromptCharBudget(); return b > 0 ? Math.max(2500, b - systemReserve) : Infinity; }
             catch (e) { return Infinity; }
         })();
 
@@ -17348,7 +17864,22 @@ async function generateCaseSummary() {
         // was the binding constraint at 34 of 79 messages even with 21K characters free.
         const explicitCtx = !!(LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto');
         const historyCeiling = explicitCtx ? Infinity : (small ? 4600 : 11000) + closedBonus;
-        const chronologyBudget = Math.max(0, Math.min(historyCeiling, room - fixed));
+        // buildChainChronology cannot render below about 1.9K: its header alone is ~1.4K and it
+        // floors the line budget at 400 so a scaffold is never a list of empty quotes. Asking it
+        // for less does not produce less — it produces the same ~1.9K over a budget that has no
+        // room for it, and the per-request trimmer then cuts the END of the largest message
+        // BLIND. On Context Size 8K that is exactly what happened: the prompt was built 511
+        // characters over its own room, the cut landed inside the case history, and the answer's
+        // "Troubleshoots done" came back carrying a fragment of the scaffold's own wording. Below
+        // the floor the block is dropped WHOLE instead, and the prompt already has honest wording
+        // for that case — it tells the model the correspondence exists but did not fit, and
+        // forbids it from concluding there is no history. Whole blocks in or out; never half of one.
+        const CHRONOLOGY_FLOOR = 1900;
+        const chronologyRoom = Math.min(historyCeiling, room - fixed);
+        const chronologyBudget = chronologyRoom >= CHRONOLOGY_FLOOR ? chronologyRoom : 0;
+        if (chronologyRoom > 0 && !chronologyBudget) {
+            console.warn(`[Case summary] Prompt budget leaves only ${Math.round(chronologyRoom)} chars for [CASE HISTORY] — below the ${CHRONOLOGY_FLOOR} it needs to render, so the block is dropped whole rather than cut mid-history by the request trimmer.`);
+        }
 
         // The condensation pass costs one model call per batch — ~37 minutes on a 79-message
         // chain on a CPU-bound model — and its ONLY consumer is the chronology below. Running it
@@ -17358,11 +17889,26 @@ async function generateCaseSummary() {
         let historyLines = new Map();
         // Worth the extra model calls only when the chain is long enough that the deterministic
         // gists would actually lose content; short chains go straight through as before.
-        if (chainEntryCount >= 8 && chronologyBudget >= MIN_CONDENSE_ROOM) {
+        //
+        // "Long enough" was measured by MESSAGE COUNT, which is the wrong quantity. What decides
+        // whether a deterministic gist loses anything is how many characters each message gets in
+        // the scaffold, and buildChainChronology hands out up to 260 of them. The condensation
+        // target on a small model is 90. So on a twelve-message case the pass spent six minutes of
+        // an engineer's afternoon rewriting messages that had room for 260 characters into 90 —
+        // paying for a history that came out SHORTER than the free one, on the model most people
+        // run. It earns its cost only when the budget forces a cap at or below what the model
+        // would produce, which is what this compares. On a forty-message chain it still runs.
+        const condenseTarget = small ? 90 : 170;
+        const roomPerMessage = chainEntryCount ? Math.floor((chronologyBudget - 1500) / chainEntryCount) : 0;
+        const condensationWouldHelp = roomPerMessage < condenseTarget * 2.2;
+        if (chainEntryCount >= 8 && chronologyBudget >= MIN_CONDENSE_ROOM && !condensationWouldHelp) {
+            console.info(`[Case summary] Skipped chain condensation: the scaffold has ${roomPerMessage} chars per message, more than a model-written ${condenseTarget}-character line would use — the deterministic gists are longer AND exact.`);
+        }
+        if (chainEntryCount >= 8 && chronologyBudget >= MIN_CONDENSE_ROOM && condensationWouldHelp) {
             try {
                 historyLines = await buildCaseHistoryLines(ciForChain, {
                     lc,
-                    targetLen: small ? 90 : 170,
+                    targetLen: condenseTarget,
                     onProgress: (done, total) => {
                         const p = chainReadingLabel(chainEntryCount, done, total);
                         setLabel(p.render, p.fraction, p.next);
@@ -17525,8 +18071,12 @@ async function draftCustomerEmail() {
     const emailEntries = (() => {
         try { return getCleanChainEntries($('emailChain').value || ''); } catch (e) { return []; }
     })();
+    const emailSignals = (() => {
+        try { return detectChainSignals(emailEntries, lc, $('issueSummary').value || ''); }
+        catch (e) { return null; }
+    })();
     const signalsBlock = (() => {
-        try { return buildCaseSignalsBlock(detectChainSignals(emailEntries, lc, $('issueSummary').value || ''), 'email', undefined, lc); }
+        try { return emailSignals ? buildCaseSignalsBlock(emailSignals, 'email', undefined, lc) : ''; }
         catch (e) { return ''; }
     })();
     // A reply that answers a question the customer asked in their own language — instead of
@@ -17537,7 +18087,7 @@ async function draftCustomerEmail() {
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
     // What the email may ask the customer for depends entirely on who can reach the server:
     // asking a Cloud customer to export logs SOTI already holds is the mistake this prevents.
-    const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('email', isSmallLocalModel());
+    const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('email', isSmallLocalModel(), { sessionHeld: !!(emailSignals && emailSignals.meetingHeld) });
     const customerFirst = (lc.customerSender || '').split(/\s+/)[0] || '';
     const caseNum = ($('caseNum').value || '').trim();
     // The layout below is the strongest instruction in this prompt — it is shown, not described,
@@ -17744,10 +18294,25 @@ async function generate306090Analysis() {
     }
     const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-    const lc = detectCaseLifecycleState({ email_chain: $('emailChain').value || '' });
+    const chainRaw = $('emailChain').value || '';
+    const lc = detectCaseLifecycleState({ email_chain: chainRaw });
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
-    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
-    const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('summary', isSmallLocalModel());
+    const chronology = buildChainChronology({ email_chain: chainRaw, case_number: $('caseNum').value || '' }, 'grounding');
+    // The decisive signals were missing from this button entirely, and its "Next steps:" is read
+    // by management: on a case whose newest message was SOTI's own undertaking to go to
+    // Development, the 30/60/90 had no way to know that and re-derived a plan from the symptom.
+    // Same extraction as the Case Summary; only the section names differ, which `sections` maps.
+    const signals = (() => {
+        try { return detectChainSignals(getCleanChainEntries(chainRaw), lc, $('issueSummary').value || ''); }
+        catch (e) { return null; }
+    })();
+    const signalsBlock = (() => {
+        try {
+            return signals ? buildCaseSignalsBlock(signals, 'summary', undefined, lc,
+                { summary: 'Case Summary:', next: 'Next steps:', noDoneSection: true }) : '';
+        } catch (e) { return ''; }
+    })();
+    const logAccess = lc.state === 'closure' ? '' : buildLogAccessDirective('summary', isSmallLocalModel(), { sessionHeld: !!(signals && signals.meetingHeld) });
 
     const prompt = `Produce a 30/60/90 case analysis for management review of this aging support case. Use EXACTLY the template layout below — same headers, same order — and output nothing before or after it.
 
@@ -17769,7 +18334,7 @@ Next steps: "-" bullets — the concrete actions still to do to move the case fo
 Research Links: [real URLs from the research/case, or "None"]
 30/60/90 JIRA Justification: 1-3 sentences on whether this aged case warrants a JIRA / development escalation at this milestone, referencing the case age, business impact, and whether a product defect is suspected. Quote an MCMR only if it was already raised on this case or is listed in the [MCMR RULE] block — never any other code.
 
-${chronology ? chronology + '\n\n' : ''}${logAccess ? logAccess + '\n\n' : ''}Base everything strictly on the case facts and the research provided.`;
+${signalsBlock ? signalsBlock + '\n\n' : ''}${chronology ? chronology + '\n\n' : ''}${logAccess ? logAccess + '\n\n' : ''}Base everything strictly on the case facts and the research provided.`;
 
     await runQuickAIAction('Building 30/60/90 analysis...', '30/60/90 analysis ready', prompt, {
         forceConversational: true,
@@ -17813,7 +18378,23 @@ async function generateProblemResolutionSummary() {
         return;
     }
 
-    const chronology = buildChainChronology({ email_chain: $('emailChain').value || '', case_number: $('caseNum').value || '' }, 'grounding');
+    const prChain = $('emailChain').value || '';
+    const chronology = buildChainChronology({ email_chain: prChain, case_number: $('caseNum').value || '' }, 'grounding');
+    // "If the case is NOT actually resolved yet, say so plainly" was a rule with nothing behind
+    // it: this button had no signals block, so whether the case is resolved was left entirely to
+    // the model's reading of a long chain. The same deterministic evidence the Case Summary uses
+    // decides it here — an unanswered question, an outstanding request, an unconfirmed outcome or
+    // a recurrence each mean the case is open, whatever the last email sounds like.
+    const prLc = detectCaseLifecycleState({ email_chain: prChain });
+    const prSignalsBlock = (() => {
+        try {
+            const s = detectChainSignals(getCleanChainEntries(prChain), prLc, $('issueSummary').value || '');
+            return s ? buildCaseSignalsBlock(s, 'record', undefined, prLc) : '';
+        } catch (e) { return ''; }
+    })();
+    const prStateDirective = (() => {
+        try { return buildCaseStateDirective(prLc, 'record'); } catch (e) { return ''; }
+    })();
 
     const prompt = `Write a brief INTERNAL Problem & Resolution summary for this case. Use EXACTLY the two-section layout below and output nothing else.
 
@@ -17829,7 +18410,9 @@ TEMPLATE:
 Problem: <the customer's actual issue in 1-3 sentences — what was failing, on which product/version/platform>
 Solution: <exactly how the issue was resolved: the fix applied, configuration change, workaround, or upgrade — accurate to 100%. If unresolved, state that and the current status.>
 
-${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case facts.`;
+- If a development ticket has been raised on this case (the JIRA Number field or the [JIRA ISSUE] section), quote its ID in "Solution:" — this record is read by whoever picks the case up next, and the ticket is how they find where it stands.
+
+${prStateDirective ? prStateDirective + '\n\n' : ''}${prSignalsBlock ? prSignalsBlock + '\n\n' : ''}${chronology ? chronology + '\n\n' : ''}Base both lines strictly on the case facts.`;
 
     await runQuickAIAction('Building problem & resolution summary...', 'Problem & resolution ready', prompt, {
         forceConversational: true,

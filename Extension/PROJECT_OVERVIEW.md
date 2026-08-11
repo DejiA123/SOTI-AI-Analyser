@@ -178,11 +178,23 @@ async function getSessionCtx(model) {
 > almost every turn. Fixing it means the model loads **once** and stays warm. This was one
 > of the biggest speed wins.
 >
-> **Why 8,192 for small models and not the full 131,072?** On a CPU, every extra 1,000
-> tokens of context adds real seconds of "prefill" time (the model reading your prompt).
-> A 131K window would be technically possible but unusably slow. 8K is the sweet spot:
-> enough for the manifest + key log evidence + case summary, small enough to stay fast.
-> You can raise it in Settings → Context Size if you have a faster machine.
+> **Why not the full 131,072?** Two different numbers do two different jobs, and conflating
+> them was a bug in its own right. `num_ctx` (`getSessionCtx`) is the KV-cache window: on Auto
+> it is the model's own window capped at 32,768, held CONSTANT for the session so Ollama never
+> reloads between turns. The PROMPT BUDGET (`getPromptCharBudget`) is how much text we actually
+> put in, and that is what costs time — prefill scales with prompt tokens, not with `num_ctx`.
+> On Auto a small model budgets against 16,384 tokens (≈36,900 chars).
+> Measured on gemma4:e2b, CPU, a 61,213-char chain — Case Summary + Next Steps:
+> Auto ≈ 620 s, 14/14 on the scorecard. Context Size 8K ≈ 300 s, 13/14 — everything decisive
+> survives (the plan, the JIRA, the fix version, the recurrence), but "Troubleshoots done" loses
+> the record of what was actually tried, because the case history is the block the smaller budget
+> cannot hold. **Auto is the right default**; 8K is the setting to choose when an answer is wanted
+> in five minutes and the plan matters more than the history.
+> Auto got faster on the way to that figure: the chain-condensation pass (`buildCaseHistoryLines`)
+> used to run on any chain of 8+ messages, which on a twelve-message case meant six model calls
+> — about six minutes — spent rewriting messages into 90-character lines that the scaffold then
+> rendered at a 260-character cap. It now runs only when the budget actually forces a cap at or
+> below what the model would produce, so a long chain still gets it and a normal one does not.
 Budgeting & trimming. Before sending, the code checks the prompt fits:
 ```js
 const CHARS_PER_TOKEN = 2.5;  // measured: gemma turns ~2.5 chars of log text into 1 token
@@ -337,7 +349,24 @@ issue ever shipped, which is how an unrelated fix once got cited.
 Scoping: a troubleshooting turn never receives a wholesale resolved-issues dump. With a
 customer version it runs the upgrade scan (newer versions only); without one it runs
 the symptom scan (matching lines across all versions). An explicit "show me the release
-notes" question is the only case that gets the full listing (`MCMR_CITATION_MODE = 'open'`).
+notes" question is the only case that gets the full listing (`MCMR_CITATION_MODE = 'open'`),
+and "explicit" means *the agent typed it*. A quick action's research query is built by the app
+from the case's own symptom text, so `searchPulseAndDocs(..., { caseDerived: true })` refuses to
+infer the question from it: a case whose Issue Summary reads "MCMR-30202 is raised with
+Development" — which is exactly what a well-filled case says — used to trip the `mcmr-\d+`
+trigger and switch the allow-list off. The guard was being disabled by the case being well
+documented.
+A log analysis runs the scan too (`buildLogFixScanQuery`, notes-only and time-boxed). Research
+used to be skipped on that path entirely, which meant no MCMR was ever verified, which meant
+`buildMcmrCitationRule` emitted its "you are FORBIDDEN from writing any 'fixed in version X'
+claim" paragraph — so an engineer analysing a log from a two-year-old build was *guaranteed*
+never to be told the defect in front of them ships fixed.
+4. A fix that has already shipped is stated, not implied. When a ticket the case already
+carries (`jiraNum`, the synced ticket, or a code the correspondence names) appears in the
+Resolved Issues of a build NEWER than `sotiVer`, `caseTicketsFixedInNewerVersion` treats that as
+settled fact and `noteShippedFixForCaseTicket` appends the build and the gap if the answer never
+says it. Deliberately narrow: a symptom-matched code the case does *not* carry is a suggestion,
+and suggestions stay with the model and its allow-list.
 Enforcement (`enforceMcmrCitations`): every `MCMR-xxxxx` in the finished answer is checked
 against the allow-list (symptom-verified entries + codes already on the case + codes in the
 logs). Anything else has its sentence deleted and a visible note appended — removing a
@@ -355,7 +384,7 @@ makes specificity possible: real service names, log files, ports and error signa
 MC Hosted field into a fact directive:
 MC Hosted	Who collects	What the answer must say
 Cloud	The support agent, from the backend	Name the artefact and time window the agent pulls; asking the customer for server logs is forbidden; only device-side evidence is requested
-On-Prem	The customer	Name each log, server role, log level and time window; include arranging a screen-share to reproduce and capture together with exact timestamps
+On-Prem	The customer	Name each log, server role, log level and time window; include arranging a screen-share to reproduce and capture together with exact timestamps — unless a session has already been HELD (`{ sessionHeld }`), in which case arranging one is not a next step at all
 (blank)	Unknown	Confirm the hosting first; never write an unconditional "ask the customer for the logs"
 `flagLogAccessMismatch` then checks the answer and appends a correction if it collected from
 the wrong side. This one flags rather than edits: "request further details, including any
@@ -378,12 +407,25 @@ Two traps the cue tables exist to avoid, both of which had silently disabled who
 under `u`, so a stem written `срочн\w*` fails its closing boundary the moment a Cyrillic letter
 follows. Every cue uses `\p{L}` and the lookaround boundaries in `mlCue` instead.
 The layer covers the decisive signals (`SIG_*`), what SOTI asked for and what the customer
-delivered (`SUPPORT_REQUEST`, `REQUEST_FULFILLED`), the three states of a live session
-(`MEETING_PROPOSED` → `MEETING_BOOKED` → `MEETING_HELD` — booked is a state of its own, so a
-plan can never open by arranging a meeting that is already in the diary), the customer's
+delivered (`SUPPORT_REQUEST`, `REQUEST_FULFILLED`), the four states of a live session
+(`MEETING_PROPOSED` → `MEETING_BOOKED` → `MEETING_HELD`, plus "none of these") — booked is a
+state of its own so a plan can never open by arranging a meeting already in the diary, and HELD
+is now recorded rather than merely used to cancel the other two, because a case whose session is
+behind it carried no session signal at all and the On-Prem log-access rule then told the plan to
+arrange one), the customer's
 contrast with an earlier case (`ISSUE_CONTRAST`), and the lifecycle scan that decides open vs
 closing (`REOPEN_SIGNAL`, `CUSTOMER_CONSENT`, `SUPPORT_CLOSING`) — that last one matters most,
 because the case state governs what "Next steps:" is even allowed to contain.
+**What the newest message says happens next** (`latestIntent`) sits above all of them, because
+"Next steps" is a question about the future and the last thing anyone wrote is the most recent
+statement about it. When SOTI's own newest email says "I will be in contact with the developers
+on MCMR-30202 first thing tomorrow", that IS the next step — it opens the plan, and the drafted
+email reports back on it. When the CUSTOMER's newest message says what *they* will do, the case
+is waiting on them and the step is to follow that up, never to re-request it under a new name.
+Two filters keep the claim honest: a conditional undertaking is not one ("if it is not released
+yet, tell me and I will plan around it" was being reported as the outstanding action), and
+neither is a gesture with no substance — a commitment worth opening a plan with names a ticket,
+a build, a case, a file, or is at least a full clause.
 `detectChainSignals(entries, lc, issueText)` also reads the **issue summary**, not just the
 chain. On a case opened through the portal that is the only place the customer states the
 problem in full, and it is where a recurrence and the "unlike the previous case…" contrast
@@ -412,7 +454,7 @@ Decision	Chosen	Rejected alternative	Why
 AI location	Local (Ollama)	Cloud API	Privacy of customer logs; cost; offline use
 Default model	gemma4:2b (small)	A big 70B model	Must run on a 2-core laptop CPU; big models are unusably slow
 `num_ctx`	Fixed per session	Grow-to-fit per request	Avoids costly model reloads between turns
-Context size (small)	8,192 tokens	The full 131,072	CPU prefill time; 8K fits the essentials and stays fast
+Context size (small)	Auto: num_ctx ≤32,768, prompt budget 16,384 tokens	The full 131,072, or a fixed 8,192	Prefill cost is the PROMPT, not the window; 8K is ~2× faster but drops the case history
 Logs → AI	Pre-analysed brief + key lines	Raw log dump	Fits the window; small models can't search raw logs
 Prompt ordering	Rules → logs → case/research	Case/research first	So trimming sacrifices secondary data, never the logs
 Chat history	Clean text only	Store the log dump too	Old dumps in history pushed new logs out of context
