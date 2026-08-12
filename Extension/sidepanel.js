@@ -16322,6 +16322,36 @@ ${imgContext}`;
         let lastRender = 0;
         let pendingRender = false;
 
+        // GENERATION PROGRESS, for a caller driving a progress bar (see runQuickAIAction).
+        // A streaming generation has no total to divide by — the answer's length is not known
+        // until it has been written. What it does have is real, OBSERVABLE milestones: the first
+        // token arriving, the reasoning phase giving way to the answer, and each header the
+        // answer's format mandates appearing in the output. Those are what is reported here, and
+        // nothing else — no estimate, no invented number. The caller maps them onto the bar and
+        // eases BETWEEN them, exactly as the chain-condensation pass already does.
+        // Entirely inert unless opts.onGenerate is supplied.
+        const emitGen = typeof opts.onGenerate === 'function' ? opts.onGenerate : null;
+        const genSections = Array.isArray(opts.progressSections) ? opts.progressSections : [];
+        const genMatchers = genSections.map(answerSectionMatcher);
+        let genIdx = 0, genScanFrom = 0, genLastScan = 0, genSawToken = false, genWriting = false;
+        // Headers are matched IN ORDER and only ever forward: each search resumes where the
+        // previous header ended, so the same word occurring again inside a later section cannot
+        // rewind the bar. Throttled rather than sampled — the scan always resumes from the last
+        // confirmed position, so skipping a tick can delay a checkpoint but never lose one.
+        const genScan = (force) => {
+            if (!emitGen || genIdx >= genMatchers.length) return;
+            const now = performance.now();
+            if (!force && now - genLastScan < 120) return;
+            genLastScan = now;
+            while (genIdx < genMatchers.length) {
+                const m = genMatchers[genIdx].exec(resp.slice(genScanFrom));
+                if (!m) break;
+                genScanFrom += m.index + m[0].length;
+                genIdx++;
+                emitGen('section', genIdx);
+            }
+        };
+
         // Detect if this is a thinking/reasoning model (Gemma 4, QwQ, etc.) (substring match to support GGUF/custom names)
         const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
 
@@ -16379,6 +16409,7 @@ ${imgContext}`;
                             // Model is in thinking phase — accumulate but don't display
                             isThinking = true;
                             thinkingResp += reasoningTok;
+                            if (emitGen && !genSawToken) { genSawToken = true; emitGen('first-token'); }
                             pendingRender = true;
                             const now = performance.now();
                             if (now - lastRender > 300) { // Slower render during thinking
@@ -16394,6 +16425,14 @@ ${imgContext}`;
                                 console.log(`[Ollama] Thinking phase complete (${thinkingResp.length} chars). Streaming answer...`);
                             }
                             resp += contentTok;
+                            if (emitGen) {
+                                if (!genSawToken) { genSawToken = true; emitGen('first-token'); }
+                                // The ANSWER is now being written. Distinct from the reasoning
+                                // phase, which on a thinking model can run for a minute producing
+                                // nothing the engineer will ever read.
+                                if (!genWriting) { genWriting = true; emitGen('writing'); }
+                                genScan();
+                            }
                             pendingRender = true;
 
                             const now = performance.now();
@@ -16405,6 +16444,9 @@ ${imgContext}`;
                     } catch (e) { }
                 }
             }
+            // A header that landed in the final chunk still counts — the throttle above may have
+            // skipped the tick that would have seen it.
+            genScan(true);
             return reason;
         };
 
@@ -16420,6 +16462,9 @@ ${imgContext}`;
         let continuations = 0;
         while (doneReason === 'length' && resp.trim() && continuations < MAX_CONTINUATIONS && !controller.signal.aborted) {
             continuations++;
+            // The bar must not settle: the answer looked finished but was cut off, and there is
+            // another full generation round still to come.
+            if (emitGen) emitGen('continuing', continuations);
             console.warn(`[Ollama] Answer hit the output cap — continuation round ${continuations}/${MAX_CONTINUATIONS} (${resp.length} chars so far)`);
             const before = resp;
             // Headings already written, so the model knows what NOT to repeat.
@@ -16455,6 +16500,9 @@ ${imgContext}`;
             doneReason = await pumpStream(contReader);
             const addition = resp.slice(mark);
             resp = before + stitchContinuation(before, addition);
+            // Stitching rewrites resp from `before` onwards; keep the header scanner's cursor
+            // inside the string it now points into.
+            if (genScanFrom > resp.length) genScanFrom = resp.length;
             pendingRender = true;
             renderUpdate();
             if (!addition.trim()) {
@@ -16462,6 +16510,10 @@ ${imgContext}`;
                 break;
             }
         }
+
+        // Generation is over — including any continuation rounds. Everything past this point is
+        // deterministic repair of text that already exists, which is fast.
+        if (emitGen) emitGen('done');
 
         // If a thinking model never produced content tokens (all output was in reasoning field),
         // fall back to using the thinking output as the response
@@ -17602,6 +17654,43 @@ function chainReadingLabel(messageCount, done, total) {
     return { text: render(fraction * 100), fraction, next, render };
 }
 
+// Once the prompt is built the run is a single streaming generation, which has no total to
+// divide by — the answer's length is not known until it has been written. Its one source of REAL
+// progress is the answer's own mandated section headers arriving in the stream, so this matches a
+// header AS THE MODEL WRITES IT: markdown-decorated ("**Summary:**", "## Summary:",
+// "**Summary**:"), padded, or bare.
+//
+// Anchored to the start of a line with only decoration allowed in front. Without that anchor
+// "Summary:" also matches the "Case Summary:" belonging to the 30/60/90 template — a different
+// header, which would advance the bar on the wrong milestone.
+function answerSectionMatcher(name) {
+    const bare = String(name).replace(/\s*:\s*$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Emphasis closes with the same run it opened with, and markdown bold comes in BOTH forms —
+    // "**Next steps**:" and "__Next steps__:" — so the closing run has to accept either. Matching
+    // only asterisks silently skipped that header, and a skipped header is a checkpoint the bar
+    // never reaches: it would ease toward a milestone that had already gone past.
+    return new RegExp(`(?:^|\\n)[#*_> \\t]*${bare}[ \\t]*[*_]*[ \\t]*:`, 'i');
+}
+
+// Where the bar sits at each milestone of that generation.
+//   FIRST — the first token has landed, so the request was accepted and the model is running;
+//   BODY  — the ANSWER is being written, as opposed to the reasoning phase before it;
+//   TAIL  — the stream has closed and only the deterministic repair is left.
+// The span before the first header covers the two waits that produce nothing readable — the model
+// ingesting a long prompt (on a CPU-bound model with a full chain, the single longest wait in the
+// run) and the reasoning phase. A bar that only starts at the first header sits at 0% through
+// both, which is the dead bar this exists to fix.
+//
+// n + 1 slots, not n: seeing "Next steps:" means the model is ABOUT to write that section, not
+// that it has finished it. Dividing by n would paint a full bar at the moment the longest section
+// of the answer begins, and then have nowhere left to go while it was written.
+function generationProgressPlan(sectionCount) {
+    const FIRST = 0.06, BODY = 0.16, TAIL = 0.94;
+    const n = Math.max(0, Number(sectionCount) || 0);
+    const at = (i) => BODY + (TAIL - BODY) * (Math.max(0, Math.min(n + 1, Number(i) || 0)) / (n + 1));
+    return { FIRST, BODY, TAIL, at };
+}
+
 // promptText may be a string OR an async builder fn(setLabel) → string, for a quick action that
 // has preparation work of its own to do first (the Case Summary condenses every long message in
 // the chain before it can write its prompt) and wants that visible in the progress bar.
@@ -17630,47 +17719,49 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
     let trickle = null, stepStartedAt = 0, stepMs = 15000;
     const stopTrickle = () => { if (trickle) { clearInterval(trickle); trickle = null; } };
 
-    if (typeof promptText === 'function') {
-        const paintAt = (pct, render) => {
-            const v = Math.max(0, Math.min(100, pct));
-            if (pLbl) pLbl.textContent = render(v);
-            if (!pFill) return;
-            pFill.style.animation = 'none';
-            pFill.style.transform = 'none';
-            pFill.style.width = `${Math.round(v)}%`;
-        };
-        // setLabel(text) alone keeps the indeterminate slide — "something is happening, duration
-        // unknown". setLabel(text, fraction) switches the bar to a REAL fill, and a third argument
-        // says where the step now running will finish, which is what lets it creep. `text` may be
-        // a render(pct) function so the number in the label creeps with the bar rather than
-        // freezing at the last checkpoint while the bar moves underneath it.
-        const setLabel = (text, fraction, next) => {
-            const render = typeof text === 'function' ? text : () => String(text);
-            stopTrickle();
-            if (typeof fraction !== 'number' || !isFinite(fraction)) {
-                if (pLbl) pLbl.textContent = render(0);
-                if (pFill) {
-                    pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
-                    pFill.style.transform = '';
-                    pFill.style.width = '30%';
-                }
-                return;
+    const paintAt = (pct, render) => {
+        const v = Math.max(0, Math.min(100, pct));
+        if (pLbl) pLbl.textContent = render(v);
+        if (!pFill) return;
+        pFill.style.animation = 'none';
+        pFill.style.transform = 'none';
+        pFill.style.width = `${Math.round(v)}%`;
+    };
+    // setLabel(text) alone keeps the indeterminate slide — "something is happening, duration
+    // unknown". setLabel(text, fraction) switches the bar to a REAL fill, and a third argument
+    // says where the step now running will finish, which is what lets it creep. `text` may be
+    // a render(pct) function so the number in the label creeps with the bar rather than
+    // freezing at the last checkpoint while the bar moves underneath it.
+    const setLabel = (text, fraction, next) => {
+        const render = typeof text === 'function' ? text : () => String(text);
+        stopTrickle();
+        if (typeof fraction !== 'number' || !isFinite(fraction)) {
+            if (pLbl) pLbl.textContent = render(0);
+            if (pFill) {
+                pFill.style.animation = 'progress-slide 2s infinite ease-in-out';
+                pFill.style.transform = '';
+                pFill.style.width = '30%';
             }
-            const from = Math.max(0, Math.min(1, fraction));
-            const to = (typeof next === 'number' && isFinite(next)) ? Math.max(from, Math.min(1, next)) : from;
-            const now = Date.now();
-            if (stepStartedAt) stepMs = Math.max(1500, Math.min(120000, now - stepStartedAt));
-            stepStartedAt = now;
-            paintAt(from * 100, render);
-            if (to <= from) return;
-            trickle = setInterval(() => {
-                // Ease toward the next checkpoint and never reach it: the bar must not claim work
-                // that has not happened, but it must not look stopped either. If the step runs long
-                // the curve flattens and keeps inching instead of parking on the checkpoint.
-                const eased = 1 - Math.exp(-(Date.now() - stepStartedAt) / (stepMs * 0.45));
-                paintAt((from + (to - from) * Math.min(0.92, eased)) * 100, render);
-            }, 400);
-        };
+            return;
+        }
+        const from = Math.max(0, Math.min(1, fraction));
+        const to = (typeof next === 'number' && isFinite(next)) ? Math.max(from, Math.min(1, next)) : from;
+        const now = Date.now();
+        if (stepStartedAt) stepMs = Math.max(1500, Math.min(120000, now - stepStartedAt));
+        stepStartedAt = now;
+        paintAt(from * 100, render);
+        if (to <= from) return;
+        trickle = setInterval(() => {
+            // Ease toward the next checkpoint and never reach it: the bar must not claim work
+            // that has not happened, but it must not look stopped either. If the step runs long
+            // the curve flattens and keeps inching instead of parking on the checkpoint.
+            const eased = 1 - Math.exp(-(Date.now() - stepStartedAt) / (stepMs * 0.45));
+            paintAt((from + (to - from) * Math.min(0.92, eased)) * 100, render);
+        }, 400);
+    };
+
+    const hadPrep = typeof promptText === 'function';
+    if (hadPrep) {
         try {
             promptText = await promptText(setLabel);
         } catch (e) {
@@ -17680,12 +17771,67 @@ async function runQuickAIAction(runningLabel, doneLabel, promptText, opts) {
             toast('Could not prepare this action — see the console for details', 'e');
             return;
         }
-        setLabel(runningLabel);
-        await paintYield(0);
     }
 
     stopTrickle();
-    await send(promptText, true, opts);
+
+    // THE ANSWER ITSELF — the longest stretch of the run, and until now the one with nothing to
+    // show for it: the bar slid indeterminately for however many minutes the model took, which
+    // tells the engineer only that the panel has not crashed. An action that declares the headers
+    // its answer must contain gets a real percentage instead, off the same checkpoint-and-ease
+    // machinery the preparation passes use. Every number below is a milestone the stream actually
+    // reached; the movement between them is the existing ease, which never arrives early.
+    const o = opts || {};
+    let sendOpts = o;
+    const genNames = Array.isArray(o.progressSections) ? o.progressSections : [];
+    if (genNames.length && typeof o.onGenerate !== 'function') {
+        const { FIRST: GEN_FIRST, BODY: GEN_BODY, TAIL: GEN_TAIL, at } = generationProgressPlan(genNames.length);
+        const base = String(runningLabel).replace(/\s*(?:\.{3}|…)\s*$/, '');
+        const render = (pct) => `${base} — ${Math.round(pct)}%`;
+        let frac = 0;
+        const step = (from, to) => { frac = Math.max(frac, from); setLabel(render, frac, to); };
+        // This is a NEW PHASE, so the bar restarts at 0% under a new label — and `.prog-fill`
+        // transitions its width, so letting that restart animate would glide the bar BACKWARDS
+        // across the panel over a third of a second, which reads as the run cancelling itself
+        // rather than moving on to the next stage. Snap the reset with the transition suppressed,
+        // then hand it straight back so every forward step still glides.
+        if (pFill) {
+            pFill.style.animation = 'none';
+            pFill.style.transform = 'none';
+            pFill.style.transition = 'none';
+            pFill.style.width = '0%';
+            void pFill.offsetWidth; // flush the reset before the transition comes back
+            pFill.style.transition = '';
+        }
+        // Re-baseline the step clock. stepMs is measured from the previous checkpoint, and the
+        // previous checkpoint here belongs to the condensation pass — pacing the ease between
+        // generation milestones by how long a condensation batch took would be a guess drawn from
+        // unrelated work. The first generation step uses this default and self-corrects from the
+        // second onwards, exactly as the condensation pass does.
+        stepStartedAt = 0; stepMs = 20000;
+        step(0, GEN_FIRST);
+        sendOpts = { ...o, onGenerate: (ev, detail) => {
+            if (ev === 'first-token') step(GEN_FIRST, GEN_BODY);
+            else if (ev === 'writing') step(GEN_BODY, at(1));
+            else if (ev === 'section') step(at(detail), at(detail + 1));
+            else if (ev === 'continuing') step(frac, GEN_TAIL);
+            else if (ev === 'done') step(GEN_TAIL, 1);
+        } };
+    } else if (hadPrep) {
+        // No generation percentage for this action, but its preparation pass left the bar on a
+        // real fraction. Hand it back to the indeterminate slide rather than parking it on that
+        // checkpoint for the whole generation, which would read as a hang.
+        setLabel(runningLabel);
+    }
+    if (hadPrep || genNames.length) await paintYield(0);
+
+    // send() swallows its own errors, so this is belt-and-braces: a trickle left running would
+    // keep painting a bar that no longer has anything behind it.
+    try {
+        await send(promptText, true, sendOpts);
+    } finally {
+        stopTrickle();
+    }
 
     if (pLbl && pFill) {
         pLbl.textContent = doneLabel;
@@ -18013,6 +18159,14 @@ async function generateCaseSummary() {
         skipResearch: !researchQuery,
         researchQuery,
         copyKind: 'summary',
+        // Turns "Building case summary..." into a real percentage. These are the answer's own
+        // mandated headers, in the order the prompt requires them ("Output EXACTLY these three
+        // sections, in this order"), so each one appearing in the stream is a milestone the run
+        // has genuinely reached rather than a number invented to look busy. They stay in English
+        // even when the summary itself is written in the case's language — the prompt pins them
+        // as "labels the case record is indexed by" — so this works on a German or French case
+        // exactly as it does on an English one.
+        progressSections: ['Summary:', 'Troubleshoots done:', 'Next steps:'],
         // Captured at the click, so tabbing away mid-run cannot move this answer to another case.
         caseId: c.id,
         // The [CASE HISTORY] scaffold in the prompt already lists every message, so the chain
