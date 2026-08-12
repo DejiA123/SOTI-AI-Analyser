@@ -380,7 +380,58 @@ async function expandFeedPosts(root, feed) {
  * text on the end to strip. The container fallbacks below still clean, since that is
  * the case the cleaning was written for.
  */
+/*
+ * Every shape a Salesforce case layout renders a FIELD LABEL in. A case record does not have one
+ * canonical markup — it depends on the org's layout, the release, and whether the record is being
+ * viewed in the console, on its own page, or in Classic:
+ *
+ *   .test-id__field-label / .slds-form-element__label  Lightning record detail and Dynamic Forms
+ *   records-highlights-details-item .slds-text-title   the compact highlights strip at the top of
+ *                                                     the record — on a good number of org layouts
+ *                                                     that is the ONLY place Case Number, Status
+ *                                                     and Owner are rendered at all
+ *   .labelCol                                         Salesforce Classic, whose detail page is a
+ *                                                     plain table and matches none of the above
+ *
+ * Scraping only the first pair is what makes the sync look broken on somebody else's view: the
+ * page is a case, the feed loads and scrolls, and not one field is found.
+ */
+const FIELD_LABEL_SELECTOR = [
+    '.test-id__field-label',
+    '.slds-form-element__label',
+    'records-highlights-details-item .slds-text-title',
+    '.slds-page-header__detail-block .slds-text-title',
+    'td.labelCol',
+    'th.labelCol',
+    '.labelCol'
+].join(', ');
+
 function getFieldValue(labelEl, exact = false) {
+    if (!labelEl) return '';
+    const pick = (el) => exact
+        ? (el.textContent || '').replace(/\s{2,}/g, ' ').trim()
+        : cleanFieldValue(el.textContent);
+
+    // SALESFORCE CLASSIC: the detail page is a table, and the value is the sibling cell on the
+    // same row. None of the Lightning containers below exist there.
+    if (labelEl.classList && labelEl.classList.contains('labelCol')) {
+        const row = labelEl.closest('tr');
+        const dataCell = row && row.querySelector('td.dataCol, .dataCol');
+        if (dataCell) return pick(dataCell);
+    }
+
+    // The compact HIGHLIGHTS strip at the top of a Lightning record. Its value sits beside the
+    // title inside the same item, not in a .slds-form-element.
+    const highlight = labelEl.closest('records-highlights-details-item, .slds-page-header__detail-block');
+    if (highlight) {
+        const v = highlight.querySelector(
+            '[data-output-element-id="output-field"], ' +
+            'lightning-formatted-text, lightning-formatted-name, lightning-formatted-number, ' +
+            'lightning-formatted-url a, .slds-text-body_regular, p[title]'
+        );
+        if (v) return pick(v);
+    }
+
     const fieldComponent = labelEl.closest('records-record-layout-item, lightning-output-field, .slds-form-element');
     if (fieldComponent) {
         // Try the most specific value element first
@@ -477,14 +528,35 @@ async function scrapeSalesforce(options = {}) {
     const activeRoot = getActiveWorkspaceRoot();
     console.log('SOTI AI Analyser: Scraping from root', activeRoot);
 
-    const fieldLabels = findInShadows(
-        '.test-id__field-label, .slds-form-element__label, span.test-id__field-label',
-        activeRoot,
-        false
-    );
+    let fieldLabels = findInShadows(FIELD_LABEL_SELECTOR, activeRoot, false);
+    // getActiveWorkspaceRoot is a HEURISTIC — it scores containers and picks a winner. When it
+    // picks one that does not actually hold the record detail (an unfamiliar console layout, a
+    // record opened in its own browser tab, Classic), it returns a subtree with no fields in it
+    // and the whole sync comes back empty. Searching the entire document is strictly better than
+    // returning an empty case: the worst case is reading a background tab's fields, and the case
+    // number is reconciled against the page's own URL below anyway.
+    let rootFellBack = false;
+    if (!fieldLabels.length && activeRoot !== document) {
+        fieldLabels = findInShadows(FIELD_LABEL_SELECTOR, document, false);
+        rootFellBack = true;
+        console.warn('SOTI AI Analyser: no fields under the active root — falling back to the whole document');
+    }
 
     fieldLabels.forEach(label => {
-        const text = label.textContent.trim().toLowerCase();
+        // NORMALISED before it is matched. Several of the tests below are deliberately EXACT
+        // ("status", not anything containing it — a case layout is full of Sub Status / Escalation
+        // Status), and an exact test is only as good as the string it is given. Classic writes
+        // "Status:" with a colon, a required field is rendered "* Status", and a wrapped label
+        // arrives with a newline in the middle — all three miss an exact match on "status", which
+        // is how a layout ends up syncing no fields at all.
+        const text = (label.textContent || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/^[*\s]+/, '')
+            .replace(/\s*[:：]\s*$/, '')
+            .trim()
+            .toLowerCase();
+        if (!text) return;
         if (text.includes('case number') && !data.caseNumber) {
             data.caseNumber = getFieldValue(label);
         }
@@ -572,35 +644,57 @@ async function scrapeSalesforce(options = {}) {
         }
     }
 
-    // Attempt to capture Email Chain / Feed
-    // Look for common Salesforce email/chatter body selectors (Lightning & Classic)
-    const feedItems = findInShadows('article.cuf-feedItem', activeRoot, false);
+    // Attempt to capture Email Chain / Feed.
+    // FEED_ITEM_SELECTOR, not 'article.cuf-feedItem' alone. The feed LOADER counts posts with the
+    // full selector (it matches cuf-feedElement too), so on a view that renders the element form
+    // the loader scrolled the entire case to the bottom and then this line matched NOTHING —
+    // the case scrolled, and not one message came back. The two must use the same selector or the
+    // scrape silently disagrees with the thing that just did the work.
+    let feedItems = findInShadows(FEED_ITEM_SELECTOR, activeRoot, false);
+    // Same reasoning as the field labels: never let a bad root guess be the reason a case with a
+    // visible feed syncs as empty.
+    if (!feedItems.length && activeRoot !== document) {
+        feedItems = findInShadows(FEED_ITEM_SELECTOR, document, false);
+    }
     data.feedItemCount = feedItems.length;
     
     if (feedItems.length > 0) {
+        // innerText, then textContent. innerText is the better read — it respects line breaks the
+        // way the post is laid out — but it is the RENDERED text, so it comes back EMPTY for
+        // anything the page has hidden with CSS. Salesforce hides plenty (see the summary line
+        // below, which was already reading textContent for exactly this reason), and a post that
+        // expandFeedPosts could not open is hidden by definition. Reading innerText alone loses
+        // those messages silently: the feed is found, the post is counted, and its body is blank.
+        const readText = (el) => {
+            if (!el) return '';
+            const rendered = typeof el.innerText === 'string' ? el.innerText.trim() : '';
+            return rendered || (el.textContent || '').trim();
+        };
+
         const chain = feedItems.slice(0, 700).map(item => {
             // Target the header columns specifically
             const leftCol = item.querySelector('.preamble_left');
             const rightCol = item.querySelector('.preamble_right');
-            
-            const sender = leftCol ? (leftCol.innerText || leftCol.textContent).trim() : 'Unknown';
-            const time = rightCol ? (rightCol.innerText || rightCol.textContent).trim() : '';
-            
+
+            const sender = readText(leftCol) || 'Unknown';
+            const time = readText(rightCol);
+
             // Identify type using attributes and icons
             const typeAttr = item.getAttribute('data-type') || '';
             const hasCallIcon = item.querySelector('.slds-icon-standard-log-a-call, [title*="Call"]');
-            const isInternal = item.innerText.includes('Internal') || item.querySelector('.preamble_custom-preamble')?.innerText.includes('Internal');
-            
+            const itemText = readText(item);
+            const isInternal = itemText.includes('Internal') ||
+                readText(item.querySelector('.preamble_custom-preamble')).includes('Internal');
+
             let typePrefix = '';
             if (typeAttr.includes('Call') || hasCallIcon) typePrefix = '[CALL LOG] ';
             else if (isInternal) typePrefix = '[INTERNAL] ';
 
             // Collect content from all possible body locations
-            // Using textContent for summary because Salesforce often hides it with CSS
-            const summary = item.querySelector('.preamble_custom-summary')?.textContent.trim() || '';
-            const emailBody = item.querySelector('.emailMessageBody')?.innerText.trim() || '';
-            const callBody = item.querySelector('.logCallDescription')?.innerText.trim() || '';
-            const postBody = item.querySelector('.forceChatterFeedBodyText, .feedBodyInner')?.innerText.trim() || '';
+            const summary = readText(item.querySelector('.preamble_custom-summary'));
+            const emailBody = readText(item.querySelector('.emailMessageBody'));
+            const callBody = readText(item.querySelector('.logCallDescription'));
+            const postBody = readText(item.querySelector('.forceChatterFeedBodyText, .feedBodyInner'));
             
             // Special check for EmailMessageEvent rich text attributes
             const richTextEl = item.querySelector('emailui-rich-text-output');
@@ -643,12 +737,18 @@ async function scrapeSalesforce(options = {}) {
             '.email-item-body'
         ];
         
-        const emailItems = findInShadows(emailSelectors.join(', '), activeRoot, false);
+        let emailItems = findInShadows(emailSelectors.join(', '), activeRoot, false);
+        if (!emailItems.length && activeRoot !== document) {
+            emailItems = findInShadows(emailSelectors.join(', '), document, false);
+        }
         if (emailItems.length > 0) {
             const seen = new Set();
             data.emailChain = emailItems
                 .slice(0, 700)
-                .map(item => (item.innerText || item.textContent).trim())
+                .map(item => {
+                    const rendered = typeof item.innerText === 'string' ? item.innerText.trim() : '';
+                    return rendered || (item.textContent || '').trim();
+                })
                 .filter(txt => {
                     if (txt.length < 40 || seen.has(txt.slice(0, 100))) return false;
                     seen.add(txt.slice(0, 100));
@@ -657,6 +757,20 @@ async function scrapeSalesforce(options = {}) {
                 .join('\n\n' + '='.repeat(40) + '\n\n');
         }
     }
+
+    // WHY A SYNC CAME BACK EMPTY. Without this the panel could only say "nothing happened",
+    // which is indistinguishable from the button not working — the shape the original report
+    // arrived in. These are facts about what was actually looked at, so the panel can tell an
+    // engineer whose tab is not a case apart from one whose LAYOUT was not understood.
+    data.diagnostics = {
+        onCasePage: !!(data.caseNumber || /\/lightning\/r\/Case\//i.test(location.pathname) ||
+                       /[?&]id=500/i.test(location.search) || /\/500[A-Za-z0-9]{12,15}/.test(location.pathname)),
+        labelsSeen: fieldLabels.length,
+        feedItemsSeen: feedItems.length,
+        rootFellBack,
+        rootWasDocument: activeRoot === document,
+        href: (location.href || '').split('?')[0]
+    };
 
     return data;
 }

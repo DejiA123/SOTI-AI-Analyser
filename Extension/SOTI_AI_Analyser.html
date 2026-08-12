@@ -483,6 +483,22 @@
                 </select>
             </div>
 
+            <div class="fld" style="margin-top:12px">
+                <span class="flbl">Answer Language</span>
+                <select class="fsel" id="answerLangSel" title="The language the Case Summary + Next Steps and the customer email draft are written in. Auto reads it from the case itself — the email chain and the issue summary — and answers in the customer's language. Pick a language to always answer in that one, whatever the case is written in.">
+                    <option value="auto">Auto — match the case</option>
+                    <option value="English">English</option>
+                    <option value="French">French</option>
+                    <option value="Spanish">Spanish</option>
+                    <option value="German">German</option>
+                    <option value="Russian">Russian</option>
+                </select>
+                <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                    Auto detects the case's language from the email chain and issue summary. The
+                    three section headers stay in English either way — the case record is indexed by them.
+                </div>
+            </div>
+
             <div id="localAiStandaloneHelp" style="display:none;padding:10px 12px;border-radius:8px;margin-top:14px;font-size:11px;color:var(--txt2);background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.35);line-height:1.65">
                 <strong style="color:var(--txt1);display:block;margin-bottom:5px">Standalone browser mode</strong>
                 <div>Local AI works here if you <strong>do not</strong> open this file directly (file://).</div>

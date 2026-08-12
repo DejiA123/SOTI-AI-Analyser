@@ -7932,6 +7932,41 @@ function chainWritingLanguage(entries) {
     return CHAIN_SCRIPT_WRITING_LANGUAGE[first] || first;
 }
 
+// The language the ANSWERS are written in, chosen in Settings (⚙ → Answer Language).
+// 'auto' reads it off the case itself and is the default. An explicit language overrides that
+// detection outright, which is what a team working one shared queue in one language wants.
+//
+// 'English' is a REAL choice, not the absence of one: on a German case it means "I read German,
+// write my summary in English" — an answer auto can never produce, because auto's whole job is to
+// match the customer. So it is stored and honoured like any other value, and only ever resolves
+// to '' at the very end, where '' is the prompt's existing shorthand for "no language rule".
+let ANSWER_LANG = 'auto';
+const ANSWER_LANG_CHOICES = ['auto', 'English', 'French', 'Spanish', 'German', 'Russian'];
+
+// The text auto-detection is measured over. Entry-shaped because detectChainLanguages reads
+// `.body`; the extra text is appended as one more entry rather than concatenated, so a chain
+// entry and the issue summary are weighed the same way.
+function languageSampleEntries(entries, extraText) {
+    const sample = Array.isArray(entries) ? entries.slice() : [];
+    const extra = String(extraText || '').trim();
+    if (extra) sample.push({ body: extra });
+    return sample;
+}
+
+// The language an answer about this case must be written in; '' means English.
+//
+// On auto this reads the ISSUE SUMMARY as well as the chain. A case whose description is written
+// in the customer's language but whose chain is still one short English acknowledgement is
+// exactly the case that needs translating, and chain-only detection called it English. Adding
+// text can only ever ADD a detection — English is never matched FOR, it is what remains when
+// nothing else is found — so widening the sample cannot turn a foreign case English.
+function resolveAnswerLanguage(entries, extraText) {
+    const forced = ANSWER_LANG_CHOICES.includes(ANSWER_LANG) ? ANSWER_LANG : 'auto';
+    if (forced !== 'auto') return forced === 'English' ? '' : forced;
+    try { return chainWritingLanguage(languageSampleEntries(entries, extraText)); }
+    catch (e) { return ''; }
+}
+
 // Placeholders for the answer's shape, written IN the target language. Telling a model to
 // "write Next steps in Japanese" three thousand characters earlier loses to the English it is
 // reading at the moment it writes that section; showing it a Japanese placeholder where the
@@ -7964,11 +7999,23 @@ const EMAIL_SALUTATIONS = {
 };
 
 // kind: 'summary' | 'email' | 'fix'. `entries` = getCleanChainEntries output.
-function buildChainLanguageDirective(entries, kind = 'summary') {
+// writeLangOverride — the language resolved by resolveAnswerLanguage, so a Settings choice reaches
+// the directive too. Omit it entirely to keep the original detect-from-the-chain behaviour.
+function buildChainLanguageDirective(entries, kind = 'summary', writeLangOverride) {
     const langs = detectChainLanguages(entries);
+    // The FACT block exists only when the chain really does contain another language. A forced
+    // answer language must never conjure one: telling the model an English case "is being
+    // conducted in German" would be a false statement inside a block whose entire authority comes
+    // from every line in it being measured. Forcing a language on an English case is carried by
+    // the task spec's own language rule instead, which is not droppable either.
     if (!langs.length) return '';
     const list = langs.length === 1 ? langs[0] : `${langs.slice(0, -1).join(', ')} and ${langs[langs.length - 1]}`;
-    const write = chainWritingLanguage(entries);
+    // '' from the resolver means English, and here that is a deliberate instruction rather than a
+    // missing one: on a German chain the engineer has asked to be answered in English, and the
+    // directive has to say so or the model follows the chain it is reading.
+    const write = writeLangOverride === undefined
+        ? chainWritingLanguage(entries)
+        : (writeLangOverride || 'English');
     const lines = [
         `[CHAIN LANGUAGE — FACT, measured from the message text itself: this case is being conducted in ${list}.]`,
         '- Those messages are ordinary case content written by the people on this case. READ them and use what they actually say — they carry the same weight as the English ones, and on a chain like this the newest one is very often where the case now stands.',
@@ -14555,7 +14602,7 @@ async function loadLocalAISettings() {
     try {
         let data = {};
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel', 'localAiCtx', 'modelCtxCache', 'pulseSyncUrl', 'pulseLastSync']);
+            data = await chrome.storage.local.get(['localAiUrl', 'localAiModel', 'localAiCtx', 'answerLang', 'modelCtxCache', 'pulseSyncUrl', 'pulseLastSync']);
         } else {
             const s = localStorage.getItem('soti_local_ai');
             if (s) data = JSON.parse(s);
@@ -14563,6 +14610,10 @@ async function loadLocalAISettings() {
         LOCAL_AI_URL = data.localAiUrl || 'http://127.0.0.1:11434';
         LOCAL_AI_MODEL = data.localAiModel || '';
         LOCAL_AI_CTX_MAX = data.localAiCtx || 'auto';
+        // Validated on the way in: a value from an older build (or hand-edited storage) that is
+        // not one of the offered choices must fall back to auto rather than becoming a language
+        // the model is told to write in.
+        ANSWER_LANG = ANSWER_LANG_CHOICES.includes(data.answerLang) ? data.answerLang : 'auto';
         // Hydrate the per-model context-length cache (avoids re-probing /api/show)
         if (data.modelCtxCache && typeof data.modelCtxCache === 'object') {
             for (const [m, len] of Object.entries(data.modelCtxCache)) {
@@ -14597,6 +14648,7 @@ async function saveLocalAISettings() {
             localAiUrl: LOCAL_AI_URL,
             localAiModel: LOCAL_AI_MODEL,
             localAiCtx: LOCAL_AI_CTX_MAX,
+            answerLang: ANSWER_LANG,
             pulseSyncUrl: window.PULSE_SYNC_URL,
             pulseLastSync: window.PULSE_LAST_SYNC
         };
@@ -16766,7 +16818,15 @@ $('btnSyncSF').onclick = async () => {
             await new Promise(r => setTimeout(r, 500));
             data = await chrome.tabs.sendMessage(tab.id, { action: "GET_SALESFORCE_DATA" });
         }
-        if (data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge || data.jiraNumber || data.caseStatus)) {
+        // WHAT COUNTS AS A SUCCESSFUL SYNC. This used to require a case FIELD — the email chain
+        // was not in the list — so on a layout whose field labels the scraper did not recognise,
+        // a fully-loaded chain was scraped, scrolled for, and then thrown away without a word.
+        // That is the exact failure reported: "it scrolled down their case but did not pull the
+        // information". The chain alone is a perfectly good sync, and the two halves are now
+        // reported separately so a partial result says which half is missing.
+        const gotFields = !!(data && (data.caseNumber || data.accountName || data.subject || data.description || data.currentVersion || data.product || data.licenseType || data.mcHosted || data.caseAge || data.jiraNumber || data.caseStatus));
+        const gotChain = !!(data && typeof data.emailChain === 'string' && data.emailChain.trim());
+        if (gotFields || gotChain) {
             if (data.caseNumber) $('caseNum').value = data.caseNumber;
             // Revealed as the button beside Case Number — see syncSfCaseLink().
             if (data.caseUrl) $('caseUrl').value = data.caseUrl;
@@ -16814,6 +16874,14 @@ $('btnSyncSF').onclick = async () => {
             renderLogs();
             const posts = data.feedItemCount ? ` (${data.feedItemCount} feed posts)` : '';
             toast(`Synced Case ${data.caseNumber || 'data'}${posts}`, 's');
+            // A half-sync is worth saying out loud. Either half missing is recoverable by hand,
+            // but only if the engineer knows which half it was — silently importing a chain with
+            // no case number looks identical to a sync that simply did not run.
+            if (!gotFields) {
+                toast('Email chain synced, but no case fields were found on this layout — fill in Case Number and the rest by hand', 'w', 8000);
+            } else if (!gotChain) {
+                toast('Case fields synced, but no email chain was found — open the case Feed / Emails tab and sync again', 'w', 8000);
+            }
             // If the feed loader hit a cap rather than genuinely running out of
             // posts, say so — a silently-truncated chain would quietly skew every
             // downstream summary, and the fix is simply to sync again.
@@ -16822,8 +16890,32 @@ $('btnSyncSF').onclick = async () => {
                 toast('Feed was still loading when the sync timed out — click Sync again for the rest of the chain', 'w');
             }
             updateAllValidations();
+        } else {
+            // NOTHING came back. Previously this branch did not exist, so the button simply went
+            // quiet — indistinguishable from a sync that had not run, which is why the failure was
+            // reported as "it scrolled but did not pull the information". Say what was looked at
+            // and what to do about it. data.diagnostics is filled in by the content script.
+            const d = (data && data.diagnostics) || {};
+            console.warn('[Salesforce sync] Nothing scraped.', data);
+            if (!d.onCasePage) {
+                toast('No Salesforce case record found on this tab — open the case itself (not a list view or Setup) and sync again', 'e', 9000);
+            } else {
+                toast(`Found the case but could not read any fields or feed from this layout${d.labelsSeen ? ` (${d.labelsSeen} field labels scanned)` : ''} — see the console for details`, 'e', 9000);
+            }
         }
-    } catch (err) { toast('Sync failed', 'e'); }
+    } catch (err) {
+        // The two failures that actually happen, told apart. "Could not establish connection" is
+        // Chrome saying the content script is not in this tab — almost always because the tab is
+        // not a Salesforce page at all, which is a different problem from a scrape that came back
+        // empty and deserves a different instruction.
+        const msg = String((err && err.message) || err || '');
+        console.warn('[Salesforce sync] failed', err);
+        if (/establish connection|Receiving end does not exist|cannot access|Extension manifest/i.test(msg)) {
+            toast('Could not reach this tab — open the Salesforce case in the active tab, then sync', 'e', 9000);
+        } else {
+            toast(`Sync failed: ${msg.slice(0, 120) || 'unknown error'}`, 'e', 9000);
+        }
+    }
 };
 
 // Pull the JIRA issue open in the active tab. Mirrors the Salesforce sync: message
@@ -17939,13 +18031,15 @@ async function generateCaseSummary() {
     // Half of a chain routinely arrives in the customer's own language. Naming it as fact is what
     // turns "the customer received a suspicious email" back into "the customer asked whether an
     // earlier slot than the 12th is available".
-    const langDirective = (() => {
-        try { return buildChainLanguageDirective(cleanEntries, 'summary'); } catch (e) { return ''; }
-    })();
     // The language the answer is WRITTEN in, threaded into the task spec itself so the budget
     // fit loop can never drop it. '' on an English chain, which leaves the prompt as it was.
-    const writeLang = (() => {
-        try { return chainWritingLanguage(cleanEntries); } catch (e) { return ''; }
+    // Settings decides this: an explicit Answer Language wins outright, and on Auto the ISSUE
+    // SUMMARY counts towards the detection alongside the chain — a case reported in German whose
+    // chain is one English "thanks, looking into it" is precisely the one that was being answered
+    // in the wrong language. Resolved BEFORE the directive below, which is told the result.
+    const writeLang = resolveAnswerLanguage(cleanEntries, $('issueSummary').value || '');
+    const langDirective = (() => {
+        try { return buildChainLanguageDirective(cleanEntries, 'summary', writeLang); } catch (e) { return ''; }
     })();
     const signalsBlock = (() => {
         try { return signals ? buildCaseSignalsBlock(signals, 'summary', undefined, lc) : ''; }
@@ -18310,8 +18404,11 @@ async function draftCustomerEmail() {
     })();
     // A reply that answers a question the customer asked in their own language — instead of
     // treating that message as noise — is the whole difference on a non-English chain.
+    // Same Settings-aware resolution as the Case Summary, and for the same reason: the two must
+    // never disagree about which language this case is being handled in.
+    const emailLang = resolveAnswerLanguage(emailEntries, $('issueSummary').value || '');
     const langDirective = (() => {
-        try { return buildChainLanguageDirective(emailEntries, 'email'); } catch (e) { return ''; }
+        try { return buildChainLanguageDirective(emailEntries, 'email', emailLang); } catch (e) { return ''; }
     })();
     const researchQuery = lc.state === 'closure' ? '' : buildCaseResearchQuery();
     // What the email may ask the customer for depends entirely on who can reach the server:
@@ -18325,7 +18422,6 @@ async function draftCustomerEmail() {
     // "Hi Elena, … Warm regards," with an English body, ready to send to a customer who has never
     // received an English word on that case. So the greeting and sign-off are localised HERE, in
     // the layout, where the model actually reads them.
-    const emailLang = (() => { try { return chainWritingLanguage(emailEntries); } catch (e) { return ''; } })();
     const sal = EMAIL_SALUTATIONS[emailLang];
     const greeting = sal
         ? (sal.hi ? `${sal.hi} ${customerFirst || '<customer first name from the chain>'},` : `${customerFirst || '<customer first name from the chain>'} 様`)
@@ -21089,6 +21185,7 @@ async function refreshSettingsModal() {
     if (urlInp) urlInp.value = LOCAL_AI_URL;
     if (urlInp && !urlInp.placeholder) urlInp.placeholder = 'http://127.0.0.1:11434';
     if ($('localAiCtxSel')) $('localAiCtxSel').value = LOCAL_AI_CTX_MAX || 'auto';
+    if ($('answerLangSel')) $('answerLangSel').value = ANSWER_LANG || 'auto';
 
     if (statusEl) { statusEl.textContent = 'Connecting to Ollama...'; statusEl.style.color = 'var(--txt2)'; }
     const models = await fetchOllamaModels(urlInp ? urlInp.value : LOCAL_AI_URL);
@@ -21788,10 +21885,17 @@ $('btnSaveLocalAI').onclick = async () => {
     LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://127.0.0.1:11434';
     LOCAL_AI_MODEL = $('localAiModelSel').value || LOCAL_AI_MODEL;
     if ($('localAiCtxSel')) LOCAL_AI_CTX_MAX = $('localAiCtxSel').value || 'auto';
+    if ($('answerLangSel')) {
+        const picked = $('answerLangSel').value || 'auto';
+        ANSWER_LANG = ANSWER_LANG_CHOICES.includes(picked) ? picked : 'auto';
+    }
     await saveLocalAISettings();
     updateLocalAIBadge();
     $('mSettings').style.display = 'none';
-    toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}`, 's');
+    // The language is worth confirming back: it silently changes every summary and every draft
+    // from here on, and "Auto" vs "always German" is exactly the setting someone forgets they set.
+    const langNote = ANSWER_LANG === 'auto' ? '' : ` · Answers in ${ANSWER_LANG}`;
+    toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}${langNote}`, 's');
     setTimeout(() => { warmUpModel(); }, 200); // preload the newly-selected model / context size
 };
 
