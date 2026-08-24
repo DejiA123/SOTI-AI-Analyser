@@ -4,7 +4,14 @@
  * This single file runs the entire side panel: the UI, the case/state store, the
  * log-analysis pipeline, the local-AI engine, the prompts, the offline knowledge
  * search, and the self-learning loop. There is no framework and no build step —
- * it is plain JavaScript that talks directly to the DOM and to Ollama over HTTP.
+ * it is plain JavaScript that talks directly to the DOM and to the AI over HTTP.
+ *
+ * WHICH AI: by default the local Ollama, exactly as before. Every AI call in this file
+ * goes through the `AI` bridge near the AI ENGINE section, which hands the request to
+ * ai-provider.js — the translator that lets Azure OpenAI, Claude, a gateway, or a
+ * signed-in Copilot browser tab serve the same request. It speaks Ollama's /api/chat
+ * NDJSON in both directions, so nothing below that seam knows or cares. Read
+ * AI_PROVIDERS.md before switching: everything except Ollama sends case data off-device.
  *
  * READ THIS FIRST: a full plain-English explanation of how everything works and
  * WHY it was built this way lives in  PROJECT_OVERVIEW.md  (same folder).
@@ -19,6 +26,7 @@
  *  • Prompt budgeting ... getModelContextLength, getSessionCtx, computeSnippetBudget,
  *                         allocatePerFileBudgets, buildCaseContextForPrompt
  *  • AI engine .......... OllamaAI.completions.create  (sizes num_ctx, trims, streams)
+ *  • AI provider ........ AI.chat / AI.ready / AI.isLocal  → ai-provider.js (window.SotiAI)
  *  • Personas/prompts ... TIER3_IDENTITY, getLeanLogPrompt, getCompactLogPrompt,
  *                         getConversationalPrompt, getLeanQAPrompt
  *  • Intent routing ..... isLogForensicsRequest, wantsLogAnalysis
@@ -40,12 +48,19 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 2.8.0 — "Next steps" now starts where the case actually is: the newest message. Nothing read it. A chain whose last word was SOTI\'s own — "I will be in contact with the developers on MCMR-30202 first thing tomorrow to get a target build" — reached the model only through the promise block, whose instruction is "never contradict this": a request not to argue with the commitment rather than to CARRY IT OUT. The generated plan duly opened "1. Arrange a 30-minute remote session with the customer" — a session held five days earlier, ahead of the follow-up the customer had been promised in writing that morning. The newest message\'s stated action is now a signal in its own right, on both sides: SOTI\'s own undertaking opens the plan and the drafted email reports back on it, while a customer\'s "I will send it Monday" becomes a follow-up step instead of the same request under a new name. A conditional aside is not a commitment ("if it is not released yet, tell me and I will plan around it" was being reported as the outstanding next action), and neither is a three-word gesture. The commitment itself arrives whole: a tempered capture stops where the NEXT "I will" begins, so it ended "…first thing tomorrow to get", naming no deliverable — and every promise on a hard-wrapped email stopped at whatever column the mail client broke on. A session ALREADY HELD is now the fourth session state, so the On-Prem log-access rule stops mandating a meeting that has happened. An internal note survives the wrap that split it: "Prepare the / 90-day review pack" was two items and the leading-marker strip ate the number, leaving "day review pack"; "Chase Development for a target build" was in no forward-verb list, so the one agreed action on a 90-day case was filed under things ALREADY DONE and banned from the plan. Urgency and business impact quote the sentence the heading claims: "the customer explicitly demanded priority" sat over "…for your escalation" — SOTI\'s own escalation — while "we could not push the planogram to the store estate" and "still being done by hand, one device at a time" were no impact at all. A fix that has already SHIPPED is stated as fact, not left to the model: when a ticket the case already carries turns up in the Resolved Issues of a newer build, the answer says which build and that the deployment is behind it — including on a log analysis, which until now was FORBIDDEN from mentioning an upgrade at all, because research never ran on that path so no MCMR was ever verified. A case that names its own MCMR no longer switches the citation guard off: "did the agent ask to see the release notes?" is a question about the agent\'s words, and it was being inferred from case text. The 30/60/90 and the internal Problem & Resolution record get the decisive signals they never had, mapped to their own section names. And the case summary got faster by doing less: the chain-condensation pass was gated on message COUNT, so a twelve-message case spent six minutes of model time rewriting messages that had room for 260 characters into 90 — a history that came out shorter than the free one. A big case now fits the budget instead of being cut blind: the Case Summary sized its own message against “budget minus 1,700” — the amount the request trimmer promises to KEEP of the system message, not what it costs — so a case carrying a 15,348-character Salesforce Description and a 5,639-character JIRA thread built a pair of messages 7,132 characters over, the trimmer deleted [RELEASE NOTES] and half the MCMR rule off the end, and the model returned nothing at all. The system side is estimated from the case record now, and the Description — the one section with no cap while the notes, the chain and the ticket all had one — has one. And the tool stops talking to the customer: a “*Check: …*” line is the panel speaking to the ENGINEER, and Copy was stripping the italics and keeping the sentence. An internal note is read in full, too: only the text after "Next steps" was ever parsed, so the SAME template\'s "Troubleshoots done" section — where the engineer records what was actually carried out — reached nothing, and the internal Problem & Resolution record came back without the hand-set 240-second keep-alive that was the only thing keeping 2,060 devices online. That section is now read across every note, and when the finished "Solution:" still omits a workaround the case data says is in place, the omission is FLAGGED rather than filled in — which of a case\'s recorded actions IS the mitigation is a judgement, and a wrong one written into a permanent record is worse than a missing one. 92 new deterministic checks, 437 in total, run the shipping code. Previously — build 2.7.0, a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 3.0.0 — one provider, and a Salesforce sync that reads the replies. The panel shipped with four AI providers behind a picker and a banner warning that case data would leave the device; it ships with ONE now — the Copilot browser bridge, relaying through Microsoft 365 Copilot in a minimized window at 90,000 characters a message — and the picker, the relay tuning and the banner are gone from Settings along with the status dot and the power pill. A stored value always beats a default, so an install carrying the old ollama / copilot.microsoft.com / 55,000 settings would have kept them forever with nothing left in the UI able to correct them; a one-time migration rewrites those four and records that it ran, so it never overrules a later deliberate change. What the banner said is still true and has not been softened — case content leaves this device and SECURITY.md still assesses the local path only — it is just no longer a permanent notice over a decision nobody makes: that sign-off belongs to whoever ships the build. The sync, meanwhile, had been missing every REPLY to an internal note. A Chatter comment is its own article, rendered either inside the post or as a SIBLING of it depending on the Lightning release, and reading only the post body meant a case synced with the question and without the answer — on an internal note that is usually where the answer lives. Replies are now gathered from the whole scrape root and matched to their post by containment first, then by the nearest post above them; one that matches neither is counted as orphaned rather than guessed onto a post, because a reply filed under the wrong author is worse than a missing one. The post body is scoped past them too, so a note with no body of its own stops absorbing the first reply beneath it and publishing it under the wrong name. And the sync stops OPENING things. The i icon beside an email\'s recipients was being clicked from two directions, neither of them new: the feed loader, because "Show more recipients" reads exactly like the "Show more posts" it is looking for and an icon keeps its label in assistive text inside itself, where textContent finds it; and the expand-post sweep, because aria-expanded="false" marks any collapsed disclosure control and not just a post. One rule now governs every click this extension makes on a live case — never click a control that opens a popover, a menu or a dialog — and the naming half of it matches on word starts, because every one of those controls arrives plural and a trailing word boundary rejects "recipients", "details" and "addresses" alike. 64 new deterministic checks, run against the markup from the reports themselves. Previously — build 2.11.0, the JIRA ticket now quotes the evidence its own forensic report named. The \'Log Analysis\' block is filled deterministically, never by the model, precisely so it cannot drift from the analysis — and it had drifted anyway, in the way that is hardest to catch: the block was well-formed log text, correctly delimited, and about something else. On the Managed Google Play case it opened mid-stack at \'--- End of stack trace from previous location where exception was thrown ---\' and ran on into device-presence heartbeats, while the report\'s own verdict — ArgumentException: Version thrown by AppVersionService.AddAppVersion — appeared nowhere in it. The anchoring was never the problem: the throwing frame scored 40, the highest of any line in the file. Three things downstream of it were. Windows were scored by SUMMING their anchors, so two hundred consecutive DEBUG lines that merely contained \'AndroidEnterprise\' and \'AndroidWork\' scored 6 apiece and beat the one entry that named the fault — the same repetition-beats-strength mistake scoreJiraLogRelevance had already been taught one level up and windows had not. Windows were then built by chaining anything within eight lines of the previous one, so a run of weak entries adjacent to a strong one absorbed it and carried the window four hundred lines away. And the expansion guards allowed 15 lines back and 40 forward against an exception entry that is 122 lines, so even a correctly-chosen window opened inside its own stack trace. A window is now built out of whole log ENTRIES — anchors fold onto the entry that contains them, a window is seeded by the strongest entry left and grows only into neighbours that are at least half as strong, and the budget went from 3,800 characters (which could not hold ONE .NET dump) to a primary window of 12,000 that arrives whole. A second window has to earn its place at 60% of the primary\'s strength, so a ticket stops quoting \'PulseChecker enter\' and \'Extended session\' underneath a verified exception as though those were findings too. Measured on the case: the field is now the complete 121-line entry, header to closing banner, with no heartbeat traffic in it, and the derived keyword block is the single word ArgumentException. A file with no entry structure at all — an XML preference tree, a CSV — is detected by sampling rather than assumed, and gets a fixed radius instead of four hundred lines; an entry longer than any real one is clamped and its cut declared, never abandoned to a radius that would put the excerpt back where it started. 19 new deterministic checks, 204 in total. Previously — build 2.10.0, an uploaded log is not a trimmed one. Every path in this file that touches a log is a REDUCER, and the sizes they reduce to are what a chat composer holds: 240 characters per digest row, 15,000 per file, 24,000 for the whole failure index. Against the browser bridge those numbers stopped describing anything real the day the case started going up as a FILE — the ceiling there is two megabytes, measured with sentinel lines planted at the start, middle and end of the payload and all three quoted back — and the reducers went on reducing anyway. Measured on the case that turned it up: a 3.56 MB bundle reached the model as 32,907 characters, 0.92% of itself, and a 2,715,310-character ManagementService.log was allowed 15,000. The ArgumentException: Version that WAS the case — Managed Google Play refusing a product because AddAppVersion threw on its version string — got in by luck, and its thirty-frame stack, the half that says AddApprovedProduct called UpdateAllProducts called Insert, did not. Nothing announced any of it: the digest row that read \'Device (69c9c52512fd\' looks like a device id rather than half of one, and \'[secondary failure-index truncated]\' reads as tidiness. The same bundle now arrives at 1,358,354 characters with two of its three files COMPLETE and the third missing exactly one line — a 2,210,546-character Managed Home Screen configuration schema, named with its size where it sat. A file too big for the ceiling is no longer head-cut: it is kept as contiguous windows around every error, warning and exception, each grown forward over the exception block beneath it so a stack is never severed from what threw it, plus the file\'s head and its tail, with every gap declared inline by its real line numbers and by whether anything in it carried a signal. The budget is spent rather than estimated — a coarse radius ladder left 1.9 MB of a 2 MB upload unused on a log whose average line is 2.3 KB, so windows now grow outward a line at a time until the next one will not fit, and the ceiling is enforced against the RENDERED file because the gap markers are text too. Three things that were quietly costing evidence went with it: the prompt governor, whose whole justification is local prefill, was scaling a 2 MB upload down to 650 KB on a laptop under pressure to protect a CPU that never reads it; the failure index was cut at a character instead of a line boundary, which is how a device id became a fact with half its digits; and \'\\bexcept\\b\' could not see \'ArgumentException\' — there is no word boundary inside it — so a bare bracketed exception line was invisible to the prefilter, to classifyLogLine behind it and to every evidence path in the app, and the ones that did surface got through on an unrelated word. And a .har turned out to be leaving raw. send()\'s inline path had always split network captures out before scanning; buildLogAnalysisContext — the FORENSIC path, the one \'analyse the logs\' takes — never did, so the cross-log incident index, the pattern profile and the query-focused digest each read a one-line JSON capture line by line and quoted the most \'relevant\' line out of it. On an SSO capture that line is the Authorization header. Verified by planting a bearer token, a session cookie and an OAuth code in a capture and running the shipping panel over the bundle: all three came back in all three sections, bound for a third-party chat service. Raising the per-line cap for uploads would have widened it from 240 characters of a token to the whole one. The split now lives at the eight scanners themselves rather than at their call sites, because a call site can be added and a guard forgotten, and captures reach the model the way they were always meant to — as the redacted transaction analysis and evidence, under the .har.txt name the upload control accepts. The local Ollama path is untouched and proven so — 16 focus/budget combinations produce byte-identical output against the shipped build — and 49 new deterministic checks, 185 in total, run the shipping code — plus the whole thing driven end to end in a real Chromium against the real 2.7 MB log and a four-file bundle. Previously — build 2.9.0, the model is a SETTING now, not a rewrite. The panel could only ever talk to Ollama: five call sites each built their own /api/chat fetch, so "use something faster" meant editing five places and re-proving the streaming pump, the thinking-field fallback, the done_reason auto-continue and the perf instrumentation that reads eval_count out of the terminal frame. One translator (ai-provider.js) now sits under all five and speaks Ollama NDJSON in both directions, so Azure OpenAI, OpenAI, a company gateway, Claude, or a browser bridge relaying through a Copilot/Claude/ChatGPT tab the engineer is ALREADY SIGNED IN TO — no API key, the existing SSO session authenticates — all arrive as the same stream the panel already consumes, and nothing above the seam changed. Microsoft 365 Copilot has no completions endpoint and a Copilot agent runs the other way (it lets Copilot call this tool, never this tool call Copilot), so the bridge is the only keyless path that exists; it is built and it is honest about what it is. Swapping the engine also meant repairing four calibrations that exist ONLY because the local model is a CPU-bound 2-4B: getModelContextLength probed /api/show, which a cloud endpoint does not have, so it fell to the 16,384-token FAILURE default and a 200K model was handed the same amputated prompt the local path spent a release learning to avoid; isSmallLocalModel drives eighteen separate budget decisions and every one of them is compensation a hosted model does not need; getSessionCtx capped auto at 32K to protect a CPU from prefill it cannot afford, which on a rented window only starves it; and warmUpModel pinned a model in RAM, which against a hosted endpoint is one billed request for the word "ok" and against the bridge would open a tab and type into it. The bridge reads answers out of somebody else\'s rendered HTML, so its selectors are SETTINGS rather than constants — when the site moves the fix is a settings edit, not a release — its prompt cap is reported to the budgeter so the log trimmer targets what a composer will actually swallow rather than what a model could, and it streams forward-only, preferring a little duplication over a truncated answer when markdown re-renders mid-stream. And because every provider except Ollama makes SECURITY.md\'s "no cloud AI, no third-party data processor" untrue, the panel refuses to let that happen quietly: the status dot goes AMBER not green, saving confirms with a warning rather than a success tick, the diagnostics mark the provider (OFF-DEVICE), Ollama stays the default and nothing switches on its own. 33 deterministic checks pin the translation down, because a translator fails SILENTLY — a dropped system message does not throw, it just answers confidently without the SOTI rules, and a finish_reason that never becomes done_reason just stops a forensic report mid-section with nothing to resume it. Previously — build 2.8.0, "Next steps" now starts where the case actually is: the newest message. Nothing read it. A chain whose last word was SOTI\'s own — "I will be in contact with the developers on MCMR-30202 first thing tomorrow to get a target build" — reached the model only through the promise block, whose instruction is "never contradict this": a request not to argue with the commitment rather than to CARRY IT OUT. The generated plan duly opened "1. Arrange a 30-minute remote session with the customer" — a session held five days earlier, ahead of the follow-up the customer had been promised in writing that morning. The newest message\'s stated action is now a signal in its own right, on both sides: SOTI\'s own undertaking opens the plan and the drafted email reports back on it, while a customer\'s "I will send it Monday" becomes a follow-up step instead of the same request under a new name. A conditional aside is not a commitment ("if it is not released yet, tell me and I will plan around it" was being reported as the outstanding next action), and neither is a three-word gesture. The commitment itself arrives whole: a tempered capture stops where the NEXT "I will" begins, so it ended "…first thing tomorrow to get", naming no deliverable — and every promise on a hard-wrapped email stopped at whatever column the mail client broke on. A session ALREADY HELD is now the fourth session state, so the On-Prem log-access rule stops mandating a meeting that has happened. An internal note survives the wrap that split it: "Prepare the / 90-day review pack" was two items and the leading-marker strip ate the number, leaving "day review pack"; "Chase Development for a target build" was in no forward-verb list, so the one agreed action on a 90-day case was filed under things ALREADY DONE and banned from the plan. Urgency and business impact quote the sentence the heading claims: "the customer explicitly demanded priority" sat over "…for your escalation" — SOTI\'s own escalation — while "we could not push the planogram to the store estate" and "still being done by hand, one device at a time" were no impact at all. A fix that has already SHIPPED is stated as fact, not left to the model: when a ticket the case already carries turns up in the Resolved Issues of a newer build, the answer says which build and that the deployment is behind it — including on a log analysis, which until now was FORBIDDEN from mentioning an upgrade at all, because research never ran on that path so no MCMR was ever verified. A case that names its own MCMR no longer switches the citation guard off: "did the agent ask to see the release notes?" is a question about the agent\'s words, and it was being inferred from case text. The 30/60/90 and the internal Problem & Resolution record get the decisive signals they never had, mapped to their own section names. And the case summary got faster by doing less: the chain-condensation pass was gated on message COUNT, so a twelve-message case spent six minutes of model time rewriting messages that had room for 260 characters into 90 — a history that came out shorter than the free one. A big case now fits the budget instead of being cut blind: the Case Summary sized its own message against “budget minus 1,700” — the amount the request trimmer promises to KEEP of the system message, not what it costs — so a case carrying a 15,348-character Salesforce Description and a 5,639-character JIRA thread built a pair of messages 7,132 characters over, the trimmer deleted [RELEASE NOTES] and half the MCMR rule off the end, and the model returned nothing at all. The system side is estimated from the case record now, and the Description — the one section with no cap while the notes, the chain and the ticket all had one — has one. And the tool stops talking to the customer: a “*Check: …*” line is the panel speaking to the ENGINEER, and Copy was stripping the italics and keeping the sentence. An internal note is read in full, too: only the text after "Next steps" was ever parsed, so the SAME template\'s "Troubleshoots done" section — where the engineer records what was actually carried out — reached nothing, and the internal Problem & Resolution record came back without the hand-set 240-second keep-alive that was the only thing keeping 2,060 devices online. That section is now read across every note, and when the finished "Solution:" still omits a workaround the case data says is in place, the omission is FLAGGED rather than filled in — which of a case\'s recorded actions IS the mitigation is a judgement, and a wrong one written into a permanent record is worse than a missing one. 92 new deterministic checks, 437 in total, run the shipping code. Previously — build 2.7.0, a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
 const busyMap = new Map();       // caseId -> true/false
 const streamControllers = new Map(); // caseId -> AbortController
+
+// Declared HERE, not beside the Open Cases code far below: renderTabs() reads both, and a
+// const/let is in its temporal dead zone until its own line runs. Any render that happened
+// during start-up would throw rather than simply see an undefined.
+const OPEN_CASES_TAB = '__open_cases__';
+let viewMode = 'case';                 // 'case' | 'openCases'
+let openCasesList = { listName: '', scrapedAt: 0, cases: [] };
 const streamingElements = new Map(); // caseId -> live aib DOM element currently being streamed into
 
 // Keep-alive: prevent browser from throttling the side panel when user switches tabs.
@@ -193,6 +208,46 @@ function isStandalonePage() {
     return !isChromeExtension();
 }
 
+/* A GitHub-style pipe table, converted before newlines become <br>.
+ *
+ * This exists because the bridge now hands back real markdown (see domToMarkdown in
+ * copilot-bridge.js): Copilot renders a <table>, the relay writes it back out as
+ * "| Item | Value |", and without this the panel printed those pipes literally — a
+ * forensic report's Symptom-vs-Source table arrived as a smear of text and pipe
+ * characters. Header row, a --- separator row, then any number of body rows; ragged
+ * rows are padded so a short row cannot swallow the rest of the table.
+ */
+// The separator's character class is [ \t] and NOT \s on purpose: \s matches newlines, so
+// the first version ran past the separator row and swallowed the body rows into it — the
+// table rendered with its header and nothing else, and the rows leaked out underneath as
+// loose text.
+const MD_TABLE_RE = /^[ \t]*\|(.+)\|[ \t]*\r?\n[ \t]*\|(?:[ \t]*:?-{1,}:?[ \t]*\|)+[ \t]*\r?\n?((?:[ \t]*\|.*\|[ \t]*\r?\n?)*)/gm;
+
+function mdTableCells(row) {
+    return String(row).trim()
+        .replace(/^\|/, '').replace(/(?<!\\)\|[ \t]*$/, '')
+        // A cell may legitimately contain an escaped pipe — a command line, a regex, a
+        // column of alternatives. Splitting on every pipe tore those cells in half, so the
+        // split ignores any pipe a backslash has claimed.
+        .split(/(?<!\\)\|/)
+        .map(c => c.replace(/\\\|/g, '|').trim());
+}
+
+function mdTableHtml(match, headRow, bodyRows) {
+    const head = mdTableCells(headRow);
+    const rows = String(bodyRows || '').split(/\r?\n/).filter(l => /\S/.test(l)).map(mdTableCells);
+    const width = Math.max(head.length, ...rows.map(r => r.length), 1);
+    const pad = (r) => { const c = r.slice(); while (c.length < width) c.push(''); return c; };
+    const cell = (v, isHead) => isHead
+        ? `<th style="text-align:left; padding:7px 10px; border:1px solid var(--border); color:var(--blue); font-weight:700; white-space:nowrap">${v}</th>`
+        : `<td style="text-align:left; padding:7px 10px; border:1px solid var(--border); vertical-align:top">${v}</td>`;
+    const thead = `<tr>${pad(head).map(v => cell(v, true)).join('')}</tr>`;
+    const tbody = rows.map(r => `<tr>${pad(r).map(v => cell(v, false)).join('')}</tr>`).join('');
+    // The wrapper scrolls rather than the panel: a wide table must never force the whole
+    // side panel to scroll sideways.
+    return `<div style="overflow-x:auto; margin:16px 0"><table style="border-collapse:collapse; width:100%; font-size:12px">${thead}${tbody}</table></div>\n`;
+}
+
 function md(t) {
     if (!t) return "";
     // SECURITY (defence-in-depth on top of the CSP): md() output goes to innerHTML, and its
@@ -215,6 +270,13 @@ function md(t) {
             _safeImgs.push(m);
             return `%%SAFEIMG${_safeImgs.length - 1}%%`;
         });
+    // An answer saved by an EARLIER build can still carry the relay artefacts this repairs (a
+    // paragraph broken one word per line, an opening repeated where the stream was
+    // reconciled) — new answers arrive already repaired by sanitizeAssistantResponse, so this
+    // is a no-op for them. It runs here, after the app's own inline HTML has been set aside as
+    // placeholders, so a base64 image preview is never part of the text being repaired. Cheap:
+    // both passes leave immediately when their probe does not match.
+    t = repairRelayArtifacts(t);
     t = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     let html = t.trim()
         // 1. Fix token-mashing where AI forgets spaces around bold tags (e.g. the**Android**tab)
@@ -222,10 +284,26 @@ function md(t) {
         .replace(/\*\*([A-Za-z0-9])/g, '** $1')
         
         // 2. Force newlines before markdown headings (###) that got squashed inline (e.g. Procedure:### Method)
-        .replace(/([^\n])\s*(#{1,3})\s/g, '$1\n\n$2 ')
+        //
+        //    "#" IS EXCLUDED FROM THE LEAD-IN CLASS, and that is the whole correctness of this
+        //    rule. As [^\n] it matched a heading's OWN first hash: "### T" split after the
+        //    first character into "#" + "## T", so every heading rendered one level too large
+        //    with an EMPTY heading above it — "## LOG ANALYSIS REPORT" came out as <h1></h1>
+        //    followed by <h1>LOG ANALYSIS REPORT</h1>. A heading already at a line start needs
+        //    no help; this rule is only for one welded to the end of a sentence.
+        .replace(/([^\n#])[ \t]*(#{1,6})\s/g, '$1\n\n$2 ')
         
         // 3. Force newlines before numbered lists that got squashed (e.g. UUID 1. Log into)
-        .replace(/([a-zA-Z:).*\"])\s*(\d+\.\s+[A-Z])/g, (match, p1, p2, offset, string) => {
+        //    `[ \t]*` rather than `\s*`: an item ALREADY at the start of its own line needs no
+        //    help, and matching across the newline re-split it and left a blank line above it —
+        //    so a list came out with uneven gaps, one item pushed apart from the next for no
+        //    reason the reader could see. This rule is only for an item welded to a sentence.
+        //    The digits are bounded to three. A list marker is "1." or "12."; anything longer is
+        //    an identifier that happens to end a sentence, and treating one as a marker is how
+        //    "…for case C01724621. If the field confirms…" became a list item numbered
+        //    "01724621." — eight digits wrapped down the side of the panel where the step
+        //    number belongs, with the sentence torn in half around it.
+        .replace(/([a-zA-Z:).*\"])([ \t]*)(\d{1,3}\.\s+[A-Z])/g, (match, p1, gap, p2, offset, string) => {
             let before = string.slice(Math.max(0, offset - 15), offset);
             if (/(Step|Method)\s*$/i.test(before)) return match;
             // "...regression in MobiControl 2026.1.1. Checking with dev" — the trailing "1." is
@@ -233,15 +311,40 @@ function md(t) {
             // numbered list. Splitting there turned the rest of the sentence into an <ol> item
             // and swallowed the bullet that followed, tearing chain-timeline entries in half.
             if (p1 === '.' && /\d$/.test(before)) return match;
+            // NOTHING SEPARATES THEM, so they are one word. A number welded to the end of a
+            // letter or a digit is part of a token — a case number (C01724621), a port, a
+            // build — and never a list marker somebody forgot to put on its own line. A real
+            // squashed marker has a space in front of it ("the UUID 1. Log into") or follows
+            // punctuation that cannot be part of a word ("Next steps:1. Confirm").
+            if (!gap && /[a-zA-Z0-9]$/.test(p1)) return match;
             return p1 + '\n\n' + p2;
         })
         
-        // 4. Force newlines before bullet points that got squashed (e.g. Tips:- Ensure)
-        .replace(/([a-zA-Z:.])\s*([•*+-])\s+([A-Z])/g, '$1\n\n$2 $3')
+        // 4. Force newlines before bullet points that got squashed (e.g. Tips:- Ensure).
+        //    `[ \t]*` for the same reason as the rule above it.
+        .replace(/([a-zA-Z:.])[ \t]*([•*+-])[ \t]+([A-Z])/g, '$1\n\n$2 $3')
         
         // 5. Force spacing before common inline headers and guide steps (Case-insensitive, safe headers only).
         //    Longer phrases FIRST so "Case Timeline"/"Current Status" win before "Summary" could split them.
-        .replace(/(^|\W)(\*\*)?(Time of the meeting|Case Timeline|Current Status|Key Details|Troubleshooting tips|Troubleshooting steps|Troubleshoots done|Next steps|Additional information|Root cause|Resolution|Pre-requisites|Prerequisites|Summary|Step \d+|Method \d+):\s*(\*\*)?/gi, '$1\n\n**$3:** ')
+        //
+        //    THE LINE BREAK AFTER THE LABEL IS PART OF THE ANSWER. This rule used to end at
+        //    `\s*`, which swallowed whatever separated the label from what came next — and
+        //    what comes next is very often a LIST. "Troubleshoots done:\n- Customer requested…"
+        //    came out as "**Troubleshoots done:** - Customer requested…", one line, and the
+        //    bullet rules below are ^-anchored, so that first item rendered as a literal "-"
+        //    in the middle of a sentence while every later item in the same list rendered as a
+        //    bullet. Same for "Next steps:" and its "1." — exactly the shape a case summary
+        //    has, so it was visible on nearly every one.
+        //
+        //    So what follows the label decides: prose is pulled up onto the label's line as
+        //    before (a summary should not open with an empty heading), while a bullet, a
+        //    number, a heading or a table keeps its own line start.
+        .replace(/(^|\W)(\*\*)?(Time of the meeting|Case Timeline|Current Status|Key Details|Troubleshooting tips|Troubleshooting steps|Troubleshoots done|Next steps|Additional information|Root cause|Resolution|Pre-requisites|Prerequisites|Summary|Step \d+|Method \d+):[ \t]*(?:\*\*)?[ \t]*(?:\r?\n[ \t]*)*/gi,
+            (m, lead, bold, name, offset, str) => {
+                const after = str.slice(offset + m.length);
+                const opensBlock = /^(?:[-*+•]\s|\d+[.)]\s|#{1,6}\s|\||```)/.test(after);
+                return `${lead}\n\n**${name}:**` + (opensBlock ? '\n' : ' ');
+            })
 
         .replace(/```([\s\S]*?)```/g, '<div style="background:rgba(0,0,0,0.3); padding:12px; border-radius:8px; font-family:monospace; margin:15px 0; border:1px solid rgba(255,255,255,0.1); white-space:pre-wrap; word-break:break-all; font-size:12px">$1</div>')
         // Bold label glued to its text ("**Key Details:**- SOTI") — force the missing space
@@ -255,15 +358,25 @@ function md(t) {
         // start — it rendered as a literal "- **text**" while every later bullet in the same
         // list rendered correctly. The newline is stripped again after the <br>/gap conversion
         // (see the cleanup below), so no stray gap opens under a heading either.
+        // Longest run first, so #### is not consumed by the ### rule and left showing a
+        // stray leading hash. Copilot uses h4 in its report sections.
+        .replace(/^[ \t]*#{4,6}[ \t]*(.*)(\n?)/gim, '<h4 style="margin:18px 0 8px; color:var(--blue); font-weight:700; line-height:1.3">$1</h4>$2')
         .replace(/^[ \t]*###[ \t]*(.*)(\n?)/gim, '<h3 style="margin:22px 0 10px; color:var(--blue); font-weight:700; line-height:1.3">$1</h3>$2')
         .replace(/^[ \t]*##[ \t]*(.*)(\n?)/gim, '<h2 style="margin:28px 0 12px; color:var(--blue); font-weight:700; line-height:1.3">$1</h2>$2')
         .replace(/^[ \t]*#[ \t]*(.*)(\n?)/gim, '<h1 style="margin:35px 0 15px; color:var(--blue); font-weight:700; line-height:1.3">$1</h1>$2')
+        // Tables BEFORE the horizontal rule: a separator row of "| --- | --- |" must be
+        // consumed as part of its table, not mistaken for an <hr> that splits it in two.
+        .replace(MD_TABLE_RE, mdTableHtml)
         .replace(/^\s*---\s*$/gm, '<hr style="border:0; border-top:1px solid var(--border); margin:25px 0">')
         // List lines are converted BEFORE newlines become <br> — the old order ran the
         // ^-anchored list rules on a string that no longer had line starts, so only the
         // FIRST bullet of a list was ever rendered as a bullet. Each rule consumes its
         // trailing newline so the block <div> isn't followed by a stray <br>.
-        .replace(/^[ \t]*(\d+\.)[ \t]+(.*)\n?/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
+        // `\d{1,3}` for the same reason as rule 3 above: a step is numbered "1." or "12.", and a
+        // line opening with eight digits and a full stop is an identifier, not a list. Rendering
+        // one as a marker puts it in the narrow blue gutter meant for a step number, where it
+        // wraps down the side of the panel and the sentence reads as though it were cut in two.
+        .replace(/^[ \t]*(\d{1,3}\.)[ \t]+(.*)\n?/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; font-weight:bold; color:var(--blue)">$1</span><span>$2</span></div>')
         .replace(/^[ \t]*[•*+-][ \t]+(.*)\n?/gim, '<div style="margin-left:10px; margin-bottom:10px; display:flex; align-items:flex-start"><span style="min-width:25px; color:var(--blue)">•</span><span>$1</span></div>')
         .replace(/\n\n/g, '<div style="margin-bottom:18px"></div>')
         .replace(/\n/g, '<br>');
@@ -672,6 +785,128 @@ function stripEchoedDirectiveBlocks(text) {
     return head ? head + '\n' : src;
 }
 
+/* ---------------------------------------------------------------------------
+ * RELAY ARTEFACTS — repairing an answer that was READ OFF another page
+ * ---------------------------------------------------------------------------
+ * When the provider is the browser bridge, an answer is not received as a stream of
+ * tokens: it is read back out of the DOM of a chat page while that page is still
+ * writing it. Two artefacts come from that, and both were visible in one case summary:
+ *
+ *   THE WORD LADDER. M365 Copilot streams a paragraph by appending each word to it as
+ *   its own node, so a paragraph caught mid-render is a run of one-word nodes. Read as
+ *   blocks, each becomes its own line — and md() turns every newline into a <br>, so
+ *   the summary came out as a column of single words down the side of the panel.
+ *
+ *   THE RESTART. Nothing already streamed can be un-said, so when the finished page
+ *   turns out to be laid out differently from the half-rendered one, the relay appends
+ *   rather than replaces — and the answer appears twice, the interrupted copy first.
+ *
+ * Both are fixed at source in copilot-bridge.js (see domToMarkdown and reconcileTail).
+ * This is the panel's own repair for text an EARLIER build already saved into a case,
+ * and for any chat page whose shape nobody has met yet. Both passes are deliberately
+ * hard to trigger: prose is left alone unless it could not plausibly have been written
+ * the way it is stored.
+ * ------------------------------------------------------------------------- */
+
+// Cheap enough to run on every render tick: five short lines in a row, none of them
+// containing a space. No paragraph of real prose looks like that.
+const LADDER_PROBE_RE = /(?:^|\n)[^\s\n]{1,30}(?:\n[^\s\n]{1,30}){4}/;
+// Words that only ever appear inside a SENTENCE. A column of hostnames, device ids or
+// file names is a list somebody meant to write; a column containing "the", "is" and "of"
+// is a sentence that was torn apart.
+const LADDER_SENTENCE_WORDS = new Set([
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'to', 'of', 'for',
+    'on', 'in', 'at', 'by', 'and', 'or', 'that', 'this', 'with', 'from', 'as', 'it', 'its',
+    'has', 'have', 'had', 'not', 'but', 'if', 'when', 'which', 'their', 'they', 'we', 'you',
+    'either', 'both', 'after', 'before', 'into', 'over', 'under', 'than', 'then', 'so',
+    'because', 'while', 'during', 'no', 'any', 'each', 'per', 'via', 'up', 'out', 'about'
+]);
+const LADDER_MIN_RUN = 8;          // shorter runs are lists people write on purpose
+const LADDER_MIN_SENTENCE_WORDS = 2;
+
+// A line that is one bare word, carrying no markdown of its own.
+function isLadderLine(line) {
+    if (!/^\S{1,30}$/.test(line)) return false;                 // one token, no indent, no spaces
+    if (/^(?:[-*+•>#|`~]|\d+[.)]|\[)/.test(line)) return false; // a bullet, heading, quote, table or fence
+    return true;
+}
+
+// A line the rejoined sentence may be attached to: prose, rather than structure.
+function acceptsLadderTail(line) {
+    if (!line || !line.trim()) return false;
+    return !/^\s*(?:#|\||```|---)/.test(line);
+}
+
+function rejoinWordLadders(text) {
+    const src = String(text || '');
+    if (!src || !LADDER_PROBE_RE.test(src)) return src;
+    const lines = src.split('\n');
+    const evidence = _evidenceLineMask(lines);
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (evidence[i] || !isLadderLine(lines[i])) { out.push(lines[i]); continue; }
+        let j = i;
+        while (j < lines.length && !evidence[j] && isLadderLine(lines[j])) j++;
+        const run = lines.slice(i, j);
+        const sentenceWords = run.filter(w => LADDER_SENTENCE_WORDS.has(w.toLowerCase().replace(/[.,;:!?]+$/, ''))).length;
+        if (run.length < LADDER_MIN_RUN || sentenceWords < LADDER_MIN_SENTENCE_WORDS) {
+            out.push(...run);
+        } else {
+            const joined = run.join(' ');
+            const prev = out.length ? out[out.length - 1] : '';
+            // The first word of the ladder belongs to the sentence on the line above it —
+            // the page had already rendered the opening of the paragraph as one piece.
+            if (acceptsLadderTail(prev)) out[out.length - 1] = prev.replace(/\s+$/, '') + ' ' + joined;
+            else out.push(joined);
+        }
+        i = j - 1;
+    }
+    return out.join('\n');
+}
+
+// The restart: an answer whose opening is repeated further down, the first copy stopping
+// mid-sentence where the relay's read of the half-rendered page stopped. Only an exact
+// repeat of a substantial opening counts, and only when everything between the two copies
+// is itself the beginning of the second one — that is what makes it an interrupted copy
+// rather than a writer coming back to their point.
+const RESTART_MIN_HEAD = 80;
+
+function dropRestartedOpening(text) {
+    const src = String(text || '');
+    if (src.length < RESTART_MIN_HEAD * 2) return src;
+    // The repeat starts either at the very beginning, or just after a section label the
+    // page rendered before the paragraph did ("Summary: The customer, …").
+    const label = /^[A-Z][A-Za-z0-9 /&-]{0,30}:[ \t]*/.exec(src);
+    for (const start of label ? [label[0].length, 0] : [0]) {
+        const head = src.slice(start, start + RESTART_MIN_HEAD);
+        if (!/\S/.test(head) || head.length < RESTART_MIN_HEAD) continue;
+        const again = src.indexOf(head, start + RESTART_MIN_HEAD);
+        if (again < 0) continue;
+        const interrupted = src.slice(start, again);
+        const rest = src.slice(again);
+        // Whitespace-insensitive, because the interrupted copy is the one that was read
+        // off a page mid-layout and its line breaks fall in different places.
+        const flat = (s) => s.replace(/\s+/g, ' ').trim();
+        const cut = flat(interrupted);
+        const kept = flat(rest);
+        if (!kept.startsWith(cut)) continue;
+        // The copy being dropped has to be the INTERRUPTED one: a read that stopped early is
+        // strictly shorter than the finished answer. Two identical copies are something else
+        // — a screenshot pasted twice, a quote repeated on purpose — and are left alone.
+        if (kept.length <= cut.length) continue;
+        return (src.slice(0, start) + rest).replace(/\n{3,}/g, '\n\n');
+    }
+    return src;
+}
+
+// One entry point, so every consumer gets both repairs in the same order.
+function repairRelayArtifacts(text) {
+    let out = String(text || '');
+    try { out = rejoinWordLadders(out); } catch (e) { console.warn('Word-ladder repair failed', e); }
+    try { out = dropRestartedOpening(out); } catch (e) { console.warn('Restarted-answer repair failed', e); }
+    return out;
+}
+
 function sanitizeAssistantResponse(text) {
     if (!text) return "";
     
@@ -685,6 +920,13 @@ function sanitizeAssistantResponse(text) {
         .replace(/<\|think\|>[\s\S]*?<\|\/?think\|>/gi, '')
         .replace(/<\/?\|?think\|?>/gi, '')
         .trim();
+
+    // FIRST, because every rule below this point works a line at a time, and an answer read
+    // off a half-rendered chat page does not have the lines its writer intended (see
+    // repairRelayArtifacts). A guard looking for a leaked block heading cannot match one
+    // that has been broken across eight lines, and a step filter cannot judge a step that
+    // is spread down the page a word at a time.
+    cleaned = repairRelayArtifacts(cleaned);
 
     // ORDER MATTERS. A whole block copied out of the prompt is cut FIRST, while its heading is
     // still the bracketed ALL-CAPS name the dump guard recognises. Running the inline reword
@@ -1386,6 +1628,10 @@ function switchCase(id) {
         return;
     }
 
+    // Choosing a case means leaving the queue. Without this the Open Cases view stayed on
+    // top of the case the engineer had just picked, and the click looked like it did nothing.
+    hideOpenCases();
+
     // If already fully rendered on this tab, just ensure highlight is correct
     if (activeCaseId === id) {
         document.querySelectorAll('.tab-item').forEach(t =>
@@ -1583,6 +1829,25 @@ function renderTabs() {
 
     const usedIds = new Set();
 
+    // THE PINNED "OPEN CASES" TAB. Always first, never closable — it is not a case, it is the
+    // queue the cases come from. Registered in usedIds so the prune below (which deletes any
+    // .tab-item whose case no longer exists) does not treat it as an orphan and remove it.
+    let pinned = existingMap.get(OPEN_CASES_TAB);
+    if (!pinned) {
+        pinned = document.createElement('div');
+        pinned.dataset.id = OPEN_CASES_TAB;
+        pinned.draggable = false;
+        const pname = document.createElement('span');
+        pname.className = 'tab-name';
+        pname.textContent = '🗂 Open Cases';
+        pinned.appendChild(pname);
+        pinned.onclick = () => showOpenCases();
+    }
+    pinned.className = `tab-item tab-pinned${viewMode === 'openCases' ? ' active' : ''}`;
+    pinned.title = 'Your Salesforce case queue — click to see every open case and pick one to work on';
+    usedIds.add(OPEN_CASES_TAB);
+    bar.appendChild(pinned);
+
     // Two tabs opened on the SAME case number rendered as two identical "Case C01745392"
     // labels with nothing to tell them apart — and since each tab holds its own chat, logs
     // and analysis, picking the wrong one silently puts the work in the wrong place. Number
@@ -1644,7 +1909,9 @@ function renderTabs() {
         }
 
         // Always update class and label (cheap — no DOM destruction)
-        t.className = `tab-item${c.id === activeCaseId ? ' active' : ''}`;
+        // While the Open Cases view is up, NO case tab is the active one — otherwise two tabs
+        // read as selected at once and the highlight stops meaning "this is what you are seeing".
+        t.className = `tab-item${(c.id === activeCaseId && viewMode !== 'openCases') ? ' active' : ''}`;
         t.querySelector('.tab-name').textContent = label;
         usedIds.add(c.id);
 
@@ -1662,6 +1929,334 @@ function renderTabs() {
 
 
 
+
+/* ===========================================================================
+ * OPEN CASES — the engineer's Salesforce queue as a permanent tab
+ * ===========================================================================
+ * Everything the app does is per-case, which meant the only way to see what you
+ * owned was Salesforce itself. This mirrors the list view you already curated
+ * ("My Open Cases" and friends) and turns any row into a working case tab.
+ *
+ * The list is a SNAPSHOT, deliberately: it is what Salesforce showed when you
+ * pressed Sync, with the filter and sort you had applied. It is stored so the
+ * queue survives a panel reload, and stamped with its age so a three-day-old
+ * snapshot never passes for live.
+ * ========================================================================= */
+async function loadOpenCasesList() {
+    try {
+        const got = await chrome.storage.local.get('openCasesList');
+        if (got && got.openCasesList && Array.isArray(got.openCasesList.cases)) {
+            openCasesList = got.openCasesList;
+        }
+    } catch (e) { /* first run, or storage unavailable */ }
+}
+
+async function saveOpenCasesList() {
+    try { await chrome.storage.local.set({ openCasesList }); } catch (e) { /* best effort */ }
+}
+
+function showOpenCases() {
+    viewMode = 'openCases';
+    const oc = $('ocView');
+    const main = $('mainLayout');
+    const qa = $('qaBar');
+    if (oc) oc.style.display = 'flex';
+    if (main) main.style.display = 'none';
+    // Quick Options act on the ACTIVE CASE, and no case is on screen here — leaving them
+    // visible invites a click that would silently run against whatever tab was last open.
+    // Whether they were showing is remembered, so leaving restores what was there.
+    if (qa) {
+        qa.dataset.ocHidden = (qa.style.display === 'none') ? '' : '1';
+        qa.style.display = 'none';
+    }
+    renderOpenCasesList();
+    renderTabs();
+}
+
+function hideOpenCases() {
+    if (viewMode !== 'openCases') return;
+    viewMode = 'case';
+    const oc = $('ocView');
+    const main = $('mainLayout');
+    const qa = $('qaBar');
+    if (oc) oc.style.display = 'none';
+    if (main) main.style.display = '';
+    if (qa && qa.dataset.ocHidden === '1') { qa.style.display = ''; qa.dataset.ocHidden = ''; }
+    renderTabs();
+}
+
+function ocAgeLabel(ts) {
+    if (!ts) return 'not synced yet';
+    const mins = Math.floor((Date.now() - ts) / 60000);
+    if (mins < 1) return 'synced just now';
+    if (mins < 60) return `synced ${mins} min ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `synced ${hrs}h ago`;
+    return `synced ${Math.floor(hrs / 24)}d ago`;
+}
+
+function renderOpenCasesList() {
+    const list = $('ocList');
+    const meta = $('ocMeta');
+    const hint = $('ocHint');
+    const title = $('ocTitle');
+    if (!list) return;
+
+    if (meta) meta.textContent = openCasesList.cases.length
+        ? `${openCasesList.cases.length} case${openCasesList.cases.length === 1 ? '' : 's'} · ${ocAgeLabel(openCasesList.scrapedAt)}`
+        : '';
+    if (title) title.textContent = openCasesList.listName || 'Open Cases';
+    if (hint) hint.style.display = openCasesList.cases.length ? 'none' : '';
+
+    list.textContent = '';
+    if (!openCasesList.cases.length) return;
+
+    const frag = document.createDocumentFragment();
+    for (const rec of openCasesList.cases) {
+        const row = document.createElement('div');
+        row.className = 'oc-row';
+        row.title = salesforceUrlForListRow(rec)
+            ? `Open ${rec.caseNum} in Salesforce and as a working tab`
+            : `Open ${rec.caseNum} as a working tab`;
+
+        const top = document.createElement('div');
+        top.className = 'oc-row-top';
+        const num = document.createElement('span');
+        num.className = 'oc-num';
+        num.textContent = rec.caseNum;
+        top.appendChild(num);
+        row.appendChild(top);
+
+        if (rec.subject) {
+            const subj = document.createElement('div');
+            subj.className = 'oc-subject';
+            subj.textContent = rec.subject;
+            row.appendChild(subj);
+        }
+
+        const tags = document.createElement('div');
+        tags.className = 'oc-tags';
+        const addTag = (text, cls) => {
+            if (!text) return;
+            const t = document.createElement('span');
+            t.className = 'oc-tag' + (cls ? ' ' + cls : '');
+            t.textContent = text;
+            tags.appendChild(t);
+        };
+        addTag(rec.status);
+        addTag(rec.priority, /severity 1|severity 2|high|critical/i.test(rec.priority || '') ? 'sev-high'
+                            : /severity 3|medium/i.test(rec.priority || '') ? 'sev-med' : '');
+        addTag(rec.account);
+        if (rec.jira) addTag(rec.jira, 'sev-jira');
+        if (rec.ageDays) addTag(`${rec.ageDays}d old`);
+        row.appendChild(tags);
+
+        row.onclick = () => openCaseFromList(rec);
+        frag.appendChild(row);
+    }
+    list.appendChild(frag);
+}
+
+/* WHERE THIS CASE LIVES IN SALESFORCE.
+ *
+ * The row's own absolute url, captured from the Case Number link at scrape time, is the
+ * answer whenever there is one. The fallback is for two cases the first is not: a row
+ * whose Case Number cell rendered without a link, and a list scraped by an older build
+ * that stored no url at all. Both still have the record id — Salesforce puts it on the
+ * <tr> as data-row-key-value — and an id plus the org's own origin is a working record
+ * URL. The origin comes from the scrape, never from a guess: it differs per customer,
+ * and a wrong one is a login page for somebody else's Salesforce.
+ */
+function salesforceUrlForListRow(rec) {
+    if (!rec) return '';
+    if (rec.url) return rec.url;
+    const origin = (openCasesList && openCasesList.origin) || '';
+    if (!origin || !rec.recordId) return '';
+    return `${origin.replace(/\/$/, '')}/lightning/r/${rec.recordId}/view`;
+}
+
+/* Turn a queue row into a working case tab AND open the case in Salesforce.
+ *
+ * Both, not one or the other. The tab is what Sync writes into and what holds the chat;
+ * the Salesforce page is what Sync reads. Opening only the tab left the engineer with a
+ * panel telling them to go and find the case themselves — which is what the old toast
+ * here actually said — and opening only the browser tab would lose the case number the
+ * queue already knew.
+ *
+ * Reuses a panel tab already on that case number rather than making a second one: two
+ * tabs on one case each hold their own chat and logs, which is how work ends up split
+ * across them.
+ */
+function openCaseFromList(rec) {
+    if (!rec || !rec.caseNum) return;
+    const wanted = rec.caseNum.trim().toLowerCase();
+    let target = cases.find(c => (c.ci.caseNum || '').trim().toLowerCase() === wanted);
+
+    if (!target) {
+        target = getDefaultCase(`Case ${rec.caseNum}`);
+        target.ci.caseNum = rec.caseNum;
+        // Seed what the list already told us, so the tab is useful before any sync.
+        if (rec.subject && !target.ci.issueSummary) target.ci.issueSummary = rec.subject;
+        cases.push(target);
+    }
+
+    hideOpenCases();
+    renderTabs();
+    switchCase(target.id);
+    saveState();
+
+    const url = salesforceUrlForListRow(rec);
+    if (!url) {
+        // No link and no origin — an old stored list. Say what is missing rather than
+        // doing nothing, because "the click did nothing" is indistinguishable from a
+        // broken button.
+        toast(`Opened ${rec.caseNum} — this queue was synced before case links were captured. `
+            + `Press "Sync from Salesforce" on the list to refresh it.`, 'w', 8000);
+        return;
+    }
+
+    openSalesforceRecordTab(url, rec.caseNum);
+}
+
+/* Bring the case up in the browser. Focuses a tab ALREADY on that record instead of
+ * opening a second one — the queue is worked by clicking down a list, and a fresh tab
+ * per click buries the engineer in duplicates of pages they already have open. */
+function openSalesforceRecordTab(url, caseNum) {
+    if (!isChromeExtension() || !chrome.tabs || !chrome.tabs.create) {
+        // Standalone page: no tabs API, so hand over the link instead of failing quietly.
+        try { window.open(url, '_blank', 'noopener'); } catch (e) { /* popup blocked */ }
+        return;
+    }
+
+    // Match on the record id rather than the whole URL: Salesforce rewrites its own
+    // addresses as you navigate (workspace tabs, /view vs /related/…), so the tab showing
+    // this case usually does not have the string we opened it with.
+    let id = '';
+    const m = String(url).match(/\/lightning\/r\/(?:[^/]+\/)?([A-Za-z0-9]{15,18})\//);
+    if (m) id = m[1];
+
+    const focus = (tab) => {
+        try {
+            chrome.tabs.update(tab.id, { active: true });
+            if (tab.windowId != null && chrome.windows && chrome.windows.update) {
+                chrome.windows.update(tab.windowId, { focused: true });
+            }
+        } catch (e) { /* the tab went away between query and update */ }
+    };
+
+    try {
+        chrome.tabs.query({}, (tabs) => {
+            const existing = id && (tabs || []).find(t => t.url && t.url.includes(id));
+            if (existing) {
+                focus(existing);
+                toast(`${caseNum} is already open in Salesforce — syncing…`, 'i');
+                // Already loaded, so there is nothing to wait for. The small delay is for
+                // the tab switch itself: the sync reads the ACTIVE tab, and chrome.tabs
+                // .update resolves before the activation has actually taken effect.
+                setTimeout(() => syncFromSalesforce(), 400);
+                return;
+            }
+            chrome.tabs.create({ url, active: true }, (tab) => {
+                if (chrome.runtime.lastError || !tab) return;
+                toast(`Opened ${caseNum} in Salesforce — syncing when the case has loaded…`, 'i', 8000);
+                syncWhenTabIsReady(tab.id, caseNum);
+            });
+        });
+    } catch (e) {
+        chrome.tabs.create({ url, active: true });
+    }
+}
+
+/* WAIT FOR THE CASE TO ACTUALLY BE THERE, then sync.
+ *
+ * `status === 'complete'` is necessary and nowhere near sufficient. Lightning is a single
+ * page app: the document finishes loading long before the case record exists, and the feed
+ * it is opened for arrives later still. Syncing at 'complete' scrapes an empty shell and
+ * reports a case with no fields — the failure that looks exactly like a broken scraper.
+ *
+ * So 'complete' only starts the second wait: ask the content script whether it can see a
+ * case yet, and go when it says yes. That is the same question the sync asks, so the
+ * answer cannot disagree with what the sync is about to find. The poll is bounded — past
+ * the ceiling it syncs anyway rather than hanging, because a sync that returns "no fields
+ * found" is at least an answer, and the panel already explains that one.
+ */
+function syncWhenTabIsReady(tabId, caseNum) {
+    if (!chrome.tabs || !chrome.tabs.onUpdated) return;
+
+    const POLL_MS = 700;
+    const MAX_WAIT_MS = 25000;
+    const started = Date.now();
+    let done = false;
+
+    const finish = (why) => {
+        if (done) return;
+        done = true;
+        try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch (e) {}
+        console.log(`[Salesforce sync] auto-sync for ${caseNum}: ${why}`);
+        syncFromSalesforce();
+    };
+
+    // Is the record on screen yet? GET_SALESFORCE_CASE_READY is answered by the content
+    // script without scrolling or scraping anything, so polling it is cheap and leaves the
+    // engineer's page alone until the real sync runs.
+    const poll = () => {
+        if (done) return;
+        if (Date.now() - started > MAX_WAIT_MS) return finish('gave up waiting, syncing anyway');
+        let replied = false;
+        try {
+            chrome.tabs.sendMessage(tabId, { action: 'GET_SALESFORCE_CASE_READY' }, (res) => {
+                // lastError just means the content script is not up yet — keep waiting.
+                const gone = chrome.runtime.lastError;
+                replied = true;
+                if (!gone && res && res.ready) return finish('case is on screen');
+                setTimeout(poll, POLL_MS);
+            });
+        } catch (e) {
+            setTimeout(poll, POLL_MS);
+        }
+        // sendMessage can drop its callback entirely while a tab is navigating.
+        setTimeout(() => { if (!replied && !done) poll(); }, POLL_MS * 3);
+    };
+
+    const onUpdated = (id, changeInfo) => {
+        if (id !== tabId || changeInfo.status !== 'complete') return;
+        try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch (e) {}
+        poll();
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+
+    // A tab that was already loaded when we attached fires no 'complete' at all.
+    setTimeout(() => { if (!done) poll(); }, 1500);
+}
+
+async function syncCaseListFromSalesforce() {
+    const btn = $('btnSyncCaseList');
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) { toast('No active tab to read the case list from', 'e'); return; }
+
+        const data = await chrome.tabs.sendMessage(tab.id, { action: 'GET_SALESFORCE_CASE_LIST' });
+        if (!data || !Array.isArray(data.cases) || !data.cases.length) {
+            // Said plainly, because the usual cause is being on a case RECORD rather than the
+            // list — an error about "no data" would send the engineer looking for a bug.
+            toast('No case rows found. Open a Salesforce case LIST view (e.g. My Open Cases) and try again.', 'e');
+            return;
+        }
+        openCasesList = data;
+        await saveOpenCasesList();
+        renderOpenCasesList();
+        toast(`Synced ${data.cases.length} case${data.cases.length === 1 ? '' : 's'}`, 's');
+    } catch (e) {
+        toast('Could not read that tab. Open your Salesforce case list and try again.', 'e');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = old || 'Sync from Salesforce'; }
+    }
+}
+
+if ($('btnSyncCaseList')) $('btnSyncCaseList').onclick = syncCaseListFromSalesforce;
+loadOpenCasesList().then(() => { if (viewMode === 'openCases') renderOpenCasesList(); });
 
 const SOTI_KB = {
     common: {
@@ -1790,7 +2385,18 @@ function normalizeLogSignature(text) {
 
 const EXCEPTION_CLASS_PATTERN = String.raw`((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?:Exception|Error)|[A-Za-z_]\w*(?:Exception|Error)|AggregateException|SqlException|SQLException|TimeoutException|SocketException|WebException|IOException|UnauthorizedAccessException|InvalidOperationException|NullReferenceException|OutOfMemoryException|StackOverflowException|AuthenticationException|SecurityException|TypeError|ReferenceError|RangeError|SyntaxError|ValueError|KeyError|IndexError|RuntimeError|OSError)`;
 
-const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port|sso|oauth|saml|oidc|idp|issuer|identityserver|identity|unauthor|forbidden|logon|login|redirect|authoriz|entity|token|429|403|401|404|500|502|503|permission|granted|access\s+right|accesscontrol|principal)\b|^\s*at\s+/i;
+// A COMPOUND CLASS NAME IS A SIGNAL. "\bexcept\b" cannot see "ArgumentException": there is
+// no word boundary before "Except" inside it, and none after "Except" either — so the line
+//
+//     [ArgumentException: Version]
+//
+// was invisible to this prefilter, to classifyLogLine behind it, and therefore to every
+// evidence path in the app. The ones that DID surface only got through on an unrelated word:
+// "[LdapException: The LDAP server is unavailable.]" was picked up by "unavail", not by being
+// an exception at all. `\w(?:Exception|Error)\b` matches the SUFFIX instead of the word, which
+// is what an exception class actually looks like — and it costs nothing on a line that carries
+// neither string.
+const FAST_FORENSIC_PREFILTER = /\b(error|err|warn|warning|fail|except|fatal|critic|panic|sever|cannot|can't|unable|deny|denied|refus|reject|block|abort|crash|fault|corrupt|invalid|unsupport|timeout|deadlock|rollback|unreach|unavail|mismat|malform|miss|expir|revok|hresult|win32|mcmr|mobicontrol|mcau|customaction|1603|returning|value\s+3|fqdn|uri|validation|cert|tls|ssl|connection|refused|econnrefused|etimedout|deploy|database|sql|db|server|dns|http|port|sso|oauth|saml|oidc|idp|issuer|identityserver|identity|unauthor|forbidden|logon|login|redirect|authoriz|entity|token|429|403|401|404|500|502|503|permission|granted|access\s+right|accesscontrol|principal)\b|\w(?:Exception|Error)\b|^\s*at\s+/i;
 
 const DEFAULT_LINE_CLASSIFICATION = {
     categories: [],
@@ -3238,6 +3844,7 @@ function findMsiRootCause(lines, minIdx = 0) {
 }
 
 async function buildInstallerFailureAnalysis(logs, opts = {}) {
+    logs = withoutNetworkCaptures(logs);   // a capture is not an installer log — see withoutNetworkCaptures()
     if (!logs || logs.length === 0) return "";
     const lean = !!opts.lean; // lean = tiny prompt for CPU-bound models (fast prefill)
 
@@ -3559,6 +4166,77 @@ function isHarContent(fileName, content) {
     return /"log"\s*:/.test(head) && /"entries"\s*:/.test(head) && /"request"\s*:/.test(head);
 }
 
+/* KEEP THE LINE SCANNERS OFF A NETWORK CAPTURE.
+ *
+ * A .har is JSON, and every scanner below this line reads a log LINE BY LINE. On a capture
+ * that combination is bad twice over. It is useless — a one-line JSON document has no
+ * timestamps, no severities and no exception classes to find, which is why HAR evidence has
+ * its own parser. And it is DANGEROUS, because a capture records whole requests: the
+ * Authorization headers, the cookies and, on an SSO capture, the id_tokens and authorization
+ * codes of the session it recorded. A scanner that quotes "the highest-scoring line" out of
+ * one is quoting a bearer token into a prompt bound for a third-party chat service.
+ *
+ * send()'s inline path always split captures out before scanning. buildLogAnalysisContext —
+ * the FORENSIC path — never did, so on a bundle carrying an SSO capture the cross-log incident
+ * index, the pattern profile and the query-focused digest each carried the raw token. Verified
+ * by planting a bearer token, a cookie and an auth code in a capture and running the shipping
+ * panel over the bundle: all three came back in all three sections.
+ *
+ * The split now lives at the scanners themselves rather than at their call sites, because a
+ * call site can be added and a guard forgotten. Captures still reach the model — as the
+ * redacted transaction evidence buildHarEvidence produces, which is the form that was always
+ * meant to carry them.
+ */
+function withoutNetworkCaptures(logs) {
+    if (!logs || !logs.length) return logs || [];
+    return logs.filter(l => !isHarContent((l && l.name) || "", (l && l.content) || ""));
+}
+
+// COPILOT WILL NOT TAKE A .har. Measured against the live upload control on
+// m365.cloud.microsoft, its accept list is .txt/.log/.json/.csv/.md/.xml and friends —
+// .har is not on it and neither is .zip. A capture that arrives as "capture.har" is
+// therefore renamed to "capture.har.txt" everywhere the model sees it. Only the extension
+// moves; the bytes are untouched, and the original name stays visible inside it so a
+// finding is still citable to the file the engineer actually uploaded.
+function harTxtName(fileName) {
+    const n = String(fileName || "capture.har");
+    return /\.har$/i.test(n) ? n + ".txt" : n;
+}
+
+// STRIP THE CREDENTIALS OUT OF A CAPTURE BEFORE IT LEAVES THE BROWSER.
+//
+// A HAR records whole requests, so it carries Authorization headers, Cookie and Set-Cookie
+// values, and — in an SSO capture, which is most of the ones worth analysing — the
+// authorization codes and id/access tokens that ride in redirect URLs. Sending those to a
+// third-party chat service is a data-loss incident dressed up as a support ticket, and the
+// model needs none of them to find a redirect loop: what matters is WHICH endpoint was
+// called and WHAT it returned, never the bearer value.
+//
+// Deliberately blunt. A token this misses is a token that leaves, so the patterns match the
+// NAME of the secret rather than trying to recognise its shape, and the replacement keeps a
+// length hint because "the cookie was 4 KB" is occasionally the finding.
+function redactHarSecrets(text) {
+    let s = String(text || "");
+    // Never redact a redaction. The material is rebuilt on the condensation and fallback
+    // paths, so this function can legitimately run over its own output — and without this
+    // guard the second pass ate its own marker ("[REDACTED 9 chars] 25 chars]"), which
+    // corrupts the evidence even though it leaks nothing.
+    const done = (v) => /^\[REDACTED/.test(v);
+    // Header objects: {"name":"authorization","value":"Bearer ey..."}
+    s = s.replace(/("name"\s*:\s*"(?:authorization|cookie|set-cookie|x-api-key|api-key|proxy-authorization)"\s*,\s*"value"\s*:\s*")([^"]*)(")/gi,
+        (m, a, v, b) => done(v) ? m : `${a}[REDACTED ${v.length} chars]${b}`);
+    // Token-bearing query/body parameters, in URLs and in "name"/"value" pairs alike.
+    s = s.replace(/((?:access_token|id_token|refresh_token|client_secret|code|session_state|state|assertion|password|pwd|secret)=)([^&"'\s\\]{8,})/gi,
+        (m, k, v) => done(v) ? m : `${k}[REDACTED ${v.length} chars]`);
+    s = s.replace(/("name"\s*:\s*"(?:access_token|id_token|refresh_token|client_secret|code|assertion|password|secret)"\s*,\s*"value"\s*:\s*")([^"]*)(")/gi,
+        (m, a, v, b) => done(v) ? m : `${a}[REDACTED ${v.length} chars]${b}`);
+    // Bare JWTs anywhere else (three base64url segments). Conservative on length so an
+    // ordinary dotted identifier is not mangled.
+    s = s.replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+        (m) => `[REDACTED JWT ${m.length} chars]`);
+    return s;
+}
+
 function buildHarAnalysis(content, fileName = "capture.har") {
     let har;
     try { har = JSON.parse(content); } catch (e) { return ""; }
@@ -3632,6 +4310,113 @@ function buildHarAnalysis(content, fileName = "capture.har") {
     if (signals.length) report += `\nKey signals: ${signals.join('; ')}.\n`;
     report += `=== END HAR NETWORK CAPTURE ANALYSIS ===`;
     return report;
+}
+
+/* THE CAPTURE ITSELF, DISTILLED — not truncated.
+ *
+ * Measured against a real Web Console capture (mobicontrol.etz.nl, 41.2 MB, 114
+ * transactions): 39 of those transactions are JavaScript bundles, response bodies account
+ * for 9.3 million characters, the largest single body is 1.3 million — and the whole case
+ * turns on ONE transaction, an HTTP 500. A head-slice of the first 400 KB therefore lands
+ * inside a minified vendor bundle and never reaches the 500 at all. Copilot read exactly
+ * that and reported, correctly, that it had been handed CSS and cached assets instead of
+ * evidence.
+ *
+ * So every transaction is kept — as one line of fact — and the volume is taken out of the
+ * BODIES instead, which is where it actually lives:
+ *   · a body that can carry a diagnosis (JSON, XML, HTML, plain text) is kept, capped;
+ *   · script, style, font, image, media and octet-stream bodies are dropped with their
+ *     size noted, because a minified bundle has never once explained a failure;
+ *   · headers are kept minus the credential-bearing ones, which redactHarSecrets would
+ *     blank anyway and which cost bytes to carry blanked.
+ *
+ * FAILURES COME FIRST. Errors, then redirects, then auth/SSO traffic, then everything
+ * else — so that if anything downstream trims the tail, what it removes is the successful
+ * fetch of a font file and never the 500.
+ */
+const HAR_BODY_DROP = /^(?:application\/(?:javascript|x-javascript|ecmascript|octet-stream|font-woff2?|manifest\+json|wasm)|text\/(?:css|javascript)|image\/|font\/|audio\/|video\/|x-unknown)/i;
+
+function buildHarEvidence(content, fileName = "capture.har", opts = {}) {
+    let har;
+    try { har = JSON.parse(content); } catch (e) { return ""; }
+    const entries = (har && har.log && har.log.entries) || [];
+    if (!entries.length) return "";
+
+    const BODY_CAP = opts.bodyCap || 3000;
+    const TOTAL_CAP = opts.totalCap || 220000;
+    const HDR_SKIP = /^(?:authorization|cookie|set-cookie|x-api-key|api-key|proxy-authorization)$/i;
+    const hostOf = u => { try { return new URL(u).host; } catch (e) { return ""; } };
+    const pathOf = u => { try { const p = new URL(u); return p.pathname + (p.search || ""); } catch (e) { return String(u || ""); } };
+    const num = n => (typeof n === 'number' && isFinite(n) && n >= 0) ? Math.round(n) : null;
+
+    const rows = entries.map((e, i) => {
+        const req = e.request || {}, res = e.response || {};
+        const status = res.status || 0;
+        const url = req.url || "";
+        const path = pathOf(url);
+        const mime = String((res.content && res.content.mimeType) || "").split(";")[0] || "none";
+        const text = (res.content && res.content.text) || "";
+        const ms = num(e.time);
+        // A status of 0 is not a 500. It means the transaction never completed — aborted,
+        // blocked, or simply not captured — and a Web Console capture is full of them for
+        // workers and prefetches. Ranking those alongside real HTTP failures pushed the one
+        // 500 in a 114-transaction capture down the page, which is precisely the mistake
+        // this ordering exists to prevent. They are kept, and they rank below auth traffic.
+        const isHttpErr = status >= 400;
+        const isIncomplete = status === 0;
+        const isErr = isHttpErr || isIncomplete;
+        const isRedir = status >= 300 && status < 400;
+        const isAuth = /oauth|sso|saml|auth|logon|login|token|idp|signin/i.test(path);
+        const isApi = /json|xml/i.test(mime);
+
+        let head = `#${i + 1} ${String(e.startedDateTime || "").replace('T', ' ').replace(/Z$/, '').slice(0, 23)} | ` +
+                   `${req.method || "?"} ${hostOf(url)}${path} -> ${status}${res.statusText ? ' ' + res.statusText : ''}` +
+                   `${ms != null ? ` | ${ms} ms` : ''} | ${mime}${text ? ` ${text.length.toLocaleString()} chars` : ''}`;
+        const redirect = res.redirectURL || ((res.headers || []).find(h => /^location$/i.test(h.name)) || {}).value || "";
+        if (redirect) head += `\n    redirect -> ${redirect}`;
+
+        // Headers only where they can matter: a failure, a redirect, or an auth call. On a
+        // 200 that fetched a stylesheet they are pure volume.
+        if (isErr || isRedir || isAuth) {
+            const hdrs = (req.headers || []).filter(h => !HDR_SKIP.test(h.name || "")).slice(0, 8)
+                .map(h => `${h.name}=${String(h.value || "").slice(0, 120)}`).join('; ');
+            if (hdrs) head += `\n    req headers: ${hdrs}`;
+        }
+
+        if (text) {
+            if (HAR_BODY_DROP.test(mime)) {
+                head += `\n    [body omitted — ${mime}, ${text.length.toLocaleString()} chars of static asset, no diagnostic value]`;
+            } else {
+                const b = text.length > BODY_CAP
+                    ? text.slice(0, BODY_CAP) + ` …[body truncated, ${(text.length - BODY_CAP).toLocaleString()} more chars]`
+                    : text;
+                head += `\n    body: ${b.replace(/\s+/g, ' ')}`;
+            }
+        }
+        // HTTP failures first, then redirects, then auth, then the incomplete ones, then
+        // API calls, then everything else.
+        const rank = isHttpErr ? 0 : isRedir ? 1 : isAuth ? 2 : isIncomplete ? 3 : isApi ? 4 : 5;
+        return { rank, i, text: head };
+    });
+
+    rows.sort((a, b) => (a.rank - b.rank) || (a.i - b.i));
+
+    const counts = rows.reduce((m, r) => { m[r.rank] = (m[r.rank] || 0) + 1; return m; }, {});
+    let out = `\n\n=== NETWORK CAPTURE — DISTILLED TRANSACTIONS (${fileName}) ===\n` +
+              `${entries.length} transaction(s). Ordered by diagnostic weight, NOT chronologically: ` +
+              `${counts[0] || 0} HTTP failure(s), ${counts[1] || 0} redirect(s), ${counts[2] || 0} auth call(s), ` +
+              `${counts[3] || 0} incomplete (status 0 — aborted, blocked or not captured), ` +
+              `${counts[4] || 0} API call(s), ${counts[5] || 0} static asset(s). ` +
+              `Static-asset response bodies (scripts, styles, fonts, images) are omitted by design and their absence is NOT a gap in the evidence. ` +
+              `The "#n" prefix is the transaction's original position in the capture.\n\n`;
+    let dropped = 0;
+    for (const r of rows) {
+        if (out.length + r.text.length > TOTAL_CAP) { dropped++; continue; }
+        out += r.text + '\n';
+    }
+    if (dropped) out += `\n[${dropped} further transaction(s) omitted to fit the budget — all of them ranked below the failures, redirects and auth calls listed above.]\n`;
+    out += `=== END NETWORK CAPTURE ===\n`;
+    return out;
 }
 
 function isExceptionContinuationLine(line) {
@@ -3742,9 +4527,43 @@ async function extractExceptionBlocksFromLogUncached(log) {
     return blocks;
 }
 
+// Does THIS turn's log evidence leave the panel as an UPLOADED FILE rather than as text
+// typed into a chat composer?
+//
+// Almost every cap in this file — per line, per file, per section — exists for one reason:
+// prompt text is scarce. A composer holds ~12,000 characters, so an evidence row that runs
+// to 3 KB of JSON crowds out ten other rows, and keeping its head (where the timestamp, the
+// severity and the exception class live) is the right trade.
+//
+// None of that reasoning survives an upload. The evidence is no longer competing for room
+// in a message box: it is a file, and the ceiling is the one ai-provider.js measured against
+// the live upload control rather than one a composer imposes. When this is true, every
+// character those caps remove is evidence removed for nothing.
+//
+// Asked of the provider on each call rather than cached: the engineer can switch provider
+// between two turns of the same case, and a stale answer here would either starve an upload
+// or hand a composer a payload it cannot take.
+function logsUploadAsFile() {
+    try { return providerAttachesCaseData(); } catch (e) { return false; }
+}
+
+// The per-line ceiling once the evidence is uploaded. Raised to a size no real log line
+// reaches rather than removed outright, because "no cap at all" would let one pathological
+// file — a data export whose every row is 4 MB on a single line — consume the whole upload
+// on its own and push every other file out of it. 12,000 characters clears the longest
+// genuine line this app has seen (a WCF parameter dump with a country list in it) by an
+// order of magnitude.
+//
+// What the old 200-320 char cap actually cost, from the field: an isDeviceSupported line
+// arrived as "…Device (69c9c52512fd" — the device id cut in half, in an index whose entire
+// job is to say which line to go and read — and an ERROR line was severed from the stack
+// trace that said where it came from.
+const UPLOADED_EVIDENCE_LINE_CAP = 12000;
+
 function truncateLogLine(line, max = 320) {
     if (!line) return "";
-    return line.length > max ? `${line.slice(0, max)}...` : line;
+    const cap = logsUploadAsFile() ? Math.max(max, UPLOADED_EVIDENCE_LINE_CAP) : max;
+    return line.length > cap ? `${line.slice(0, cap)}...` : line;
 }
 
 function createSignalSummary() {
@@ -4751,6 +5570,7 @@ const LOG_PATTERN_CHECKS = [
 ];
 
 async function buildLogPatternProfile(logs) {
+    logs = withoutNetworkCaptures(logs);   // see withoutNetworkCaptures()
     if (!logs || logs.length === 0) return "";
     let report = `\n\n=== LOG PATTERN & KEYWORD PROFILE ===\n`;
     report += `Whole-file scan using signal rules, keyword patterns, and normalized failure signatures (not line-by-line narration).\n`;
@@ -4860,6 +5680,7 @@ async function buildLogPatternProfile(logs) {
 }
 
 async function buildInstallerPatternSummary(logs) {
+    logs = withoutNetworkCaptures(logs);   // see withoutNetworkCaptures()
     if (!logs || logs.length === 0) return "";
     let combinedHeader = "";
     let returnCode = "";
@@ -4917,6 +5738,7 @@ async function buildInstallerPatternSummary(logs) {
 }
 
 async function buildMandatoryForensicChecklist(logs) {
+    logs = withoutNetworkCaptures(logs);   // see withoutNetworkCaptures()
     if (!logs || logs.length === 0) return "";
     const lines = [];
     for (const log of logs) {
@@ -5038,15 +5860,31 @@ function firstPromptDataSectionIdx(text) {
     return m ? m.index : -1;
 }
 async function getPromptCharBudget() {
-    if (!LOCAL_AI_MODEL) return Math.floor(650000 * 2.5); // cloud path (legacy generous budget)
-    const { hardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
+    const activeModel = AI.model();
+    if (!activeModel) return Math.floor(650000 * 2.5); // nothing selected — legacy generous budget
+    const { hardMax } = await getHardCtxMax(activeModel);
     const small = isSmallLocalModel();
-    // 'auto': small/CPU models budget against ~4K (fast prefill); larger models 32K.
+    // 'auto': small/CPU models budget against ~4K (fast prefill); larger LOCAL models 32K.
+    // A hosted model pays no prefill penalty for a bigger prompt, so its auto target is the
+    // same 64K getSessionCtx() gives it — otherwise the budgeter would keep assembling
+    // prompts sized for a CPU and the extra window would go unused.
     // An explicit Context Size setting is honoured as the target directly.
+    // The third and last place the 64K bound is applied. Missing this one would leave the
+    // ASSEMBLY budget at ~152K even after the two ceilings above were lifted — the panel
+    // would still refuse to build a prompt bigger than the old limit, and the extra room
+    // would sit unused. When the case is uploaded, the ceiling is the attachment's.
+    const autoTarget = small
+        ? SMALL_PROMPT_BUDGET_CTX
+        : (AI.isLocal() ? 32768 : (providerAttachesCaseData() ? hardMax : 65536));
     const target = (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto')
         ? hardMax
-        : (small ? Math.min(SMALL_PROMPT_BUDGET_CTX, hardMax) : Math.min(32768, hardMax));
-    const numPredict = small ? 1024 : 4096;
+        : Math.min(autoTarget, hardMax);
+    // The answer reservation has to scale with the window, not sit at a flat 4096. Against
+    // the browser bridge's ~4,800-token ceiling a fixed 4096 reserves 85% of the budget for
+    // the reply and leaves 260 characters for the case — so the floor below fires and the
+    // real budget is a guess, not a calculation. A quarter of the window, capped where it
+    // always was, leaves the big-window paths untouched.
+    const numPredict = small ? 1024 : Math.min(4096, Math.max(512, Math.floor(target * 0.25)));
     const CHARS_PER_TOKEN = 2.5; // measured: gemma tokenizes log text at ~2.55 chars/token
     const raw = Math.floor((target - numPredict - 600) * CHARS_PER_TOKEN);
     // POWER GOVERNOR: shrink the prompt when the machine is under pressure, and
@@ -5055,14 +5893,23 @@ async function getPromptCharBudget() {
     // is the cheapest lever available for keeping the panel responsive. The
     // Log-Intelligence pre-analysis means a smaller budget still carries the
     // high-signal evidence, it just carries fewer raw lines around it.
-    return Math.max(2000, Math.floor(raw * Power.knobs.promptScale));
+    //
+    // NOT WHEN THE CASE IS UPLOADED. The lever's whole justification is prefill, and
+    // prefill happens on the machine that runs the model. An uploaded case is read by
+    // somebody else's hardware; the only cost here is assembling the string, which is a
+    // couple of megabytes against log text already resident by the tens. Applying the
+    // scale there did real harm and bought nothing measurable: on a "minimal" tier under
+    // pressure it is 0.33, so a laptop quietly cut a 2 MB upload to 650 KB — evidence
+    // dropped to protect a CPU that was never going to be asked to read it.
+    const prefillScale = logsUploadAsFile() ? 1 : Power.knobs.promptScale;
+    return Math.max(2000, Math.floor(raw * prefillScale));
 }
 
 // Char budget left for LOG SNIPPETS after everything else (system prompt, case data,
 // manifest/profile/incident, history) is accounted for. This is what stops the case
 // info / email chain from pushing the logs out of the context window.
 async function computeSnippetBudget(numFiles, overheadChars = 0) {
-    if (!LOCAL_AI_MODEL) return 650000;
+    if (!AI.model()) return 650000;
     const small = isSmallLocalModel();
     const total = await getPromptCharBudget();
     const budget = total - Math.max(0, overheadChars);
@@ -10119,9 +10966,8 @@ function parseChainDigestLines(out) {
 async function summarizeChainBatch(batch, opts = {}) {
     const empty = new Map();
     try {
-        if (!LOCAL_AI_MODEL) return empty;
-        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
-        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        if (!AI.ready()) return empty;
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(AI.model() || '');
         const listed = batch.map((it, i) =>
             `[${i + 1}] ${it.date}${it.role ? ` — ${it.sender} (${it.role})` : ` — ${it.sender}`}:\n"""${it.text}"""`
         ).join('\n\n');
@@ -10147,28 +10993,23 @@ RULES:
 
 MESSAGES:
 ${listed}`;
-        const res = await fetch(`${baseUrl}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: opts.signal || null,
-            body: JSON.stringify({
-                model: LOCAL_AI_MODEL,
-                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-                stream: false,
-                keep_alive: -1,
-                ...(isThinkingModel ? { think: false } : {}),
-                options: {
-                    // The SESSION context size, never a bespoke one: changing num_ctx between
-                    // requests makes Ollama re-allocate the KV cache (a full model reload, tens
-                    // of seconds on CPU) and this path issues many calls in a row.
-                    num_ctx: opts.numCtx || 8192,
-                    temperature: 0.0,
-                    top_p: 0.9,
-                    repeat_penalty: 1.1,
-                    num_predict: Math.min(1400, Math.round(maxWords * 2.4) * n + 120)
-                }
-            })
-        });
+        const res = await AI.chat({
+            model: AI.model(),
+            messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+            stream: false,
+            keep_alive: -1,
+            ...(isThinkingModel ? { think: false } : {}),
+            options: {
+                // The SESSION context size, never a bespoke one: changing num_ctx between
+                // requests makes Ollama re-allocate the KV cache (a full model reload, tens
+                // of seconds on CPU) and this path issues many calls in a row.
+                num_ctx: opts.numCtx || 8192,
+                temperature: 0.0,
+                top_p: 0.9,
+                repeat_penalty: 1.1,
+                num_predict: Math.min(1400, Math.round(maxWords * 2.4) * n + 120)
+            }
+        }, { signal: opts.signal || null });
         if (!res.ok) return empty;
         const data = await res.json();
         const msg = data.message || {};
@@ -10199,9 +11040,8 @@ function chainDigestLineIsEcho(line, source) {
 // the caller then ships the deterministic report on its own.
 async function writeChainNarrative(brief, opts = {}) {
     try {
-        if (!LOCAL_AI_MODEL) return '';
-        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
-        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        if (!AI.ready()) return '';
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(AI.model() || '');
         const system = 'You are a senior SOTI support engineer writing a briefing for a colleague who is picking up this case. You use ONLY the facts given to you. You never invent a fact, a date, a name, a version or an outcome, and you never copy the input back verbatim.';
         const user = `Here is a mechanically-extracted digest of a SOTI support case's entire email chain. Every date, name and event in it is exact.
 
@@ -10212,19 +11052,14 @@ Write EXACTLY these two sections and nothing else — no preamble, no heading ab
 Overview: 4 to 7 sentences of continuous prose. What the customer reported, on what product/environment, what the technical symptom is, what support and development have done about it across the case, and how the case has developed. Name people and dates where they matter. Do NOT write a bullet list here and do NOT restate the timeline message by message.
 
 Current status: 2 to 4 sentences. Where the case stands RIGHT NOW, based on the newest entries only, naming who said what and when, plus what is outstanding.`;
-        const res = await fetch(`${baseUrl}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: opts.signal || null,
-            body: JSON.stringify({
-                model: LOCAL_AI_MODEL,
-                messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-                stream: false,
-                keep_alive: -1,
-                ...(isThinkingModel ? { think: false } : {}),
-                options: { num_ctx: opts.numCtx || 8192, temperature: 0.1, top_p: 0.9, repeat_penalty: 1.1, num_predict: 700 }
-            })
-        });
+        const res = await AI.chat({
+            model: AI.model(),
+            messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+            stream: false,
+            keep_alive: -1,
+            ...(isThinkingModel ? { think: false } : {}),
+            options: { num_ctx: opts.numCtx || 8192, temperature: 0.1, top_p: 0.9, repeat_penalty: 1.1, num_predict: 700 }
+        }, { signal: opts.signal || null });
         if (!res.ok) return '';
         const data = await res.json();
         const msg = data.message || {};
@@ -10386,7 +11221,7 @@ async function buildCaseHistoryLines(ci, opts = {}) {
     const out = new Map();
     try {
         const raw = ((ci && ci.email_chain) || '').trim();
-        if (!raw || !LOCAL_AI_MODEL) return out;
+        if (!raw || !AI.ready()) return out;
         const entries = getCleanChainEntries(raw);
         if (!entries.length) return out;
         const oldestFirst = entries.slice().reverse();
@@ -10410,7 +11245,7 @@ async function buildCaseHistoryLines(ci, opts = {}) {
         // past it keeps its deterministic gist.
         const MAX_BATCHES = small ? 20 : 12;
         const run = batches.slice(0, MAX_BATCHES);
-        const numCtx = await getSessionCtx(LOCAL_AI_MODEL).catch(() => 8192);
+        const numCtx = await getSessionCtx(AI.model()).catch(() => 8192);
         let done = 0;
         // onProgress(done, total) reports work COMPLETED, so it runs 0 → total and the caller can
         // show a true percentage. It used to report the pass about to START (done + 1), which both
@@ -10485,7 +11320,7 @@ async function buildFullChainSummary(ci, opts = {}) {
     const MAX_BATCHES = small ? 30 : 15;
     const runBatches = batches.slice(0, MAX_BATCHES);
 
-    const numCtx = await getSessionCtx(LOCAL_AI_MODEL).catch(() => 8192);
+    const numCtx = await getSessionCtx(AI.model()).catch(() => 8192);
     let done = 0;
     for (const batch of runBatches) {
         if (opts.signal && opts.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
@@ -10714,6 +11549,7 @@ function buildCaseHeadline(maxChars = 160) {
 // is to match a resolved-issue line against what the LOG shows rather than against the case's
 // prose. The signature terms lead: on a case whose description is thin, they are all there is.
 function buildLogFixScanQuery(logs, ci) {
+    logs = withoutNetworkCaptures(logs);   // see withoutNetworkCaptures()
     let sig = [];
     try { sig = (collectLogSignatureTerms(logs) || []).slice(0, 8); } catch (e) { sig = []; }
     let symptom = '';
@@ -10779,6 +11615,29 @@ function allocatePerFileBudgets(logs, totalBudget, minPerFile = 4000) {
     return budgets;
 }
 
+// Bound the secondary failure index WITHOUT leaving a row half-written.
+//
+// The old cut was `slice(0, cap)`, and what it produced is the reason this function exists:
+//
+//   12. …:Line 4796 … ERROR [DS] (159): isDeviceSupported: Device (69c9c52512fd
+//   [secondary failure-index truncated — …]
+//
+// A device id severed at "69c9c52512fd" is not a shorter citation, it is a WRONG one — it
+// reads as a fact, it can be quoted back, and nothing about it announces that it is half a
+// value. Cutting on the last line boundary before the cap keeps every row that survives
+// whole, and the notice then says plainly how much of the index is not there.
+function trimFailureIndex(text, cap) {
+    const src = String(text || '');
+    if (src.length <= cap) return src;
+    const notice = "\n[Secondary failure index bounded here to leave room for the log files themselves — the rows above are complete and the omitted rows are lower-scoring repeats of the same signatures. The raw logs are the source; go to them for anything this index does not show.]\n";
+    const room = Math.max(0, cap - notice.length);
+    let cut = src.lastIndexOf('\n', room);
+    // No line break anywhere near the limit (one enormous row): cut at the limit rather
+    // than throw the whole index away, but never leave a partial row pretending to be whole.
+    if (cut < room * 0.6) cut = room;
+    return src.slice(0, cut).replace(/\s+$/, '') + notice;
+}
+
 async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 0, focusText = "") {
     if (!logs || logs.length === 0) return "";
     const { terms, matcher } = extractFocusTerms(focusText);
@@ -10793,11 +11652,21 @@ async function buildLogAnalysisContext(logs, lastSentAt = 0, externalOverhead = 
     // material; they are placed AFTER the digest and the incident index is BOUNDED, so the answer
     // evidence leads and is never the part a downstream context trim eats.
     const leadHeader = `\n\n[LOG ANALYSIS DATA — ${logs.length} file(s)]\n${multiFileCoverageDirective(logs)}`;
-    const manifestSection = await buildFileManifest(ranked, lastSentAt, { compactAfter: small ? 10 : 24 });
+    // compactAfter collapses the tail of a big bundle to bare names so a 50-file DebugReport
+    // cannot spend the whole window on a file list. When every one of those files is being
+    // uploaded whole, collapsing the list is describing a shortage that is not there — and the
+    // per-file "Top signals" line is exactly what tells the model which of the fifty to open.
+    const manifestSection = await buildFileManifest(ranked, lastSentAt, { compactAfter: logsUploadAsFile() ? 250 : (small ? 10 : 24) });
     let secondary = await buildLogPatternProfile(logs);
     secondary += await buildCrossLogIncidentIndex(logs, { patternMode: false });
-    const secondaryCap = small ? 2200 : 24000;
-    if (secondary.length > secondaryCap) secondary = secondary.slice(0, secondaryCap) + "\n[secondary failure-index truncated — the query-focused evidence above is the primary source for this question.]\n";
+    // 24,000 characters is what a chat composer can spare for a secondary index. It is not
+    // what an upload can spare, and cutting the index at a character was producing exactly
+    // the failure the engineer reported: a row that stopped at "Device (69c9c52512fd"
+    // followed by "[secondary failure-index truncated]". The index is BOUNDED either way —
+    // an unbounded one on a 50-file bundle would crowd out the raw logs it exists to point
+    // at — but the bound is now sized against what is actually carrying it.
+    const secondaryCap = logsUploadAsFile() ? 250000 : (small ? 2200 : 24000);
+    if (secondary.length > secondaryCap) secondary = trimFailureIndex(secondary, secondaryCap);
     // Spend the room that is ACTUALLY left after the whole prompt (system rules + case/research +
     // history + header + manifest + the bounded secondary), NOT an inflated per-file floor. On a
     // small/CPU model this is only a few thousand chars, so buildConcentratedSnippets puts the budget
@@ -11167,6 +12036,7 @@ async function buildRawLogCoverage(content, lines, rankedRootCandidates, parsedB
 }
 
 async function buildCrossLogIncidentIndex(logs, options = {}) {
+    logs = withoutNetworkCaptures(logs);   // see withoutNetworkCaptures()
     if (!logs || logs.length === 0) return "";
     const patternMode = options.patternMode !== false;
 
@@ -11709,6 +12579,7 @@ function assembleSnippet(focusBlock, mainBody, limit) {
 // word. Returns deduped, globally score-sorted hits (with file + line + timestamp). Bounded per
 // file so one noisy log can't dominate. Never throws.
 async function collectFocusLines(logs, matcher, weights, terms) {
+    logs = withoutNetworkCaptures(logs);   // see withoutNetworkCaptures()
     const hits = [];
     if (!matcher) return hits;
     // Score against EVERY query term, each with a floored weight. Using weights.entries() would drop
@@ -11767,6 +12638,613 @@ async function collectFocusLines(logs, matcher, weights, terms) {
 //   PHASE 2 — full forensic detail for the top-ranked file(s) with whatever budget remains.
 // Files that don't fit are named (they're already in the manifest/incident index) so the model
 // knows they were scanned, not ignored.
+/* ============================================================================
+ * QUERY-FOCUSED CROSS-FILE DIGEST
+ * ============================================================================
+ * Scan every file for lines matching the reported issue, score each line by the
+ * combined weight of the domain terms it hits, and keep the highest-scoring lines
+ * ACROSS ALL FILES (grouped by file). Scoring per LINE — not per file — is what
+ * guarantees the smoking-gun line ("SUCCESS, Install policies, APN") survives even
+ * when it lives in a file that isn't the single most "relevant" one overall.
+ *
+ * Lifted out of buildConcentratedSnippets so the prompt-text path and the upload
+ * path build the same index from the same code. They ask for different sizes of it
+ * — a composer wants a few thousand characters, an upload wants a proper index over
+ * evidence that is present in full underneath — but neither wants its own copy of
+ * the ranking, the near-duplicate suppression or the per-file ordering.
+ *
+ * Returns { text, digestedFrom } rather than appending, because the caller decides
+ * where the block sits and what follows it.
+ * ------------------------------------------------------------------------- */
+async function buildCrossFileFocusDigest(ranked, budget, matcher, terms, weights, opts = {}) {
+    const out = { text: "", digestedFrom: new Set() };
+    if (!ranked || !ranked.length || !matcher || budget <= 0) return out;
+    const small = opts.small != null ? opts.small : isSmallLocalModel();
+    // A digest row is a POINTER when the file it points into is uploaded whole, and the
+    // whole of the evidence when it is not. Hence two line caps, not one.
+    const lineCap = opts.lineCap || 240;
+    const scored = await collectFocusLines(ranked, matcher, weights, terms);
+    if (!scored.length) return out;
+
+    // Lines-per-file adapts to how many files actually have matches: DEPTH when few files
+    // hold the evidence (show more of each), BREADTH when many do (show the top lines of more
+    // files, since the answer's file is likelier to be one of the ~10 shown than the top one).
+    const filesWithHits = new Set(scored.map(h => h.file)).size;
+    const maxLinesPerFile = opts.maxLinesPerFile
+        || (filesWithHits <= 6 ? (small ? 16 : 34) : (small ? 6 : 12));
+
+    // Group hits by file and order files by their single best (highest-scoring) line, so the
+    // file that holds the strongest evidence leads. WITHIN each file, order lines by score
+    // DESCENDING (then line number) and cap per file — this is what makes the smoking-gun line
+    // ("SUCCESS, Install policies, APN", score high) appear instead of being crowded out by
+    // earlier, lower-scoring matches from the same file. Capping per file lets several files
+    // each contribute their few best lines rather than one noisy file consuming the budget.
+    const byFile = new Map();
+    for (const h of scored) {
+        if (!byFile.has(h.file)) byFile.set(h.file, { best: h.score, rows: [] });
+        const g = byFile.get(h.file);
+        g.rows.push(h); if (h.score > g.best) g.best = h.score;
+    }
+    const fileOrder = [...byFile.entries()].sort((a, b) => b[1].best - a[1].best).map(e => e[0]);
+    let body = "";
+    let used = 0;
+    for (const file of fileOrder) {
+        if (used >= budget) break;
+        // Near-duplicates are capped BEFORE the per-file slice. One event that hits 15
+        // devices logs 15 lines that differ only by device id and timestamp, all scoring
+        // identically — and they took every slot: a management-service log contributed
+        // eleven copies of "presence flag left as CONNECTED …" and not one of the DISTINCT
+        // lines that explained why (the idle sweep, the un-notified teardown, the
+        // keep-alive default the upgrade changed, the state flip to OFFLINE). Two copies
+        // prove the pattern; the rest only prove it again.
+        const DUP_PER_SIGNATURE = 2;
+        const sigCount = new Map();
+        let suppressed = 0;
+        const rows = byFile.get(file).rows
+            .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
+            .filter(h => {
+                const sig = logLineSignature(h.text);
+                const n = (sigCount.get(sig) || 0) + 1;
+                sigCount.set(sig, n);
+                if (n > DUP_PER_SIGNATURE) { suppressed++; return false; }
+                return true;
+            })
+            .slice(0, maxLinesPerFile)
+            .sort((a, b) => a.lineNum - b.lineNum); // chronological within the chosen top lines
+        let seg = `\n### ${file}\n`;
+        let any = false;
+        for (const h of rows) {
+            // Cap each digest line: a few files log 400-char JSON blobs whose head carries the
+            // signal — truncating them lets MANY more files fit the digest instead of one file's
+            // verbose lines consuming the whole budget. The cap is raised, not applied, when the
+            // file itself is going up whole: there the row is a pointer into content the reader
+            // already has, and a pointer cut mid-token points nowhere.
+            const text = h.text.length > lineCap ? h.text.slice(0, lineCap) + '…' : h.text;
+            const row = `Line ${h.lineNum}${h.ts ? ` @ ${h.ts}` : ""}: ${text}\n`;
+            if (used + seg.length + row.length > budget) break;
+            seg += row; any = true;
+        }
+        // The suppressed copies are still FACTS about scale — how many devices/objects the
+        // same event hit — so their count is stated rather than silently dropped.
+        if (any && suppressed > 0) {
+            seg += `(+${suppressed} more line${suppressed === 1 ? '' : 's'} in this file identical in form to ones above, differing only in device/id/timestamp — the same events repeating across the estate.)\n`;
+        }
+        if (any) { body += seg; used += seg.length; out.digestedFrom.add(ranked.find(l => (l.name || "Attached log") === file) || {}); }
+    }
+    if (body) {
+        out.text = `\n=== QUERY-FOCUSED EVIDENCE ACROSS FILES (lines matching the reported issue; INFO/SUCCESS lines included on purpose — a feature the product logs as installed/success but that is ABSENT on the device is itself the finding, not a non-event) ===\n`
+            + body
+            + `\n=== END QUERY-FOCUSED EVIDENCE ===\n`;
+    }
+    return out;
+}
+
+/* ============================================================================
+ * VERBATIM LOG DELIVERY — what goes up when the evidence leaves as a FILE
+ * ============================================================================
+ * WHY THIS EXISTS
+ * ----------------------------------------------------------------------------
+ * Everything else in this section is a DIGEST: the panel reads the logs, scores
+ * the lines, keeps the strongest few thousand characters per file and sends those.
+ * That is the right answer for a CPU-bound local model with a 16K window, and it
+ * is what this app was built around.
+ *
+ * It is the wrong answer for an upload, and it was failing in a way that reads as
+ * success. A digest row arrived as:
+ *
+ *   …ERROR [DS] (159): isDeviceSupported: Device (69c9c52512fd
+ *   [secondary failure-index truncated — …]
+ *
+ * — a device id cut in half and an index that stopped mid-sentence. Worse than the
+ * cosmetics: a ManagementService.log carrying an `ArgumentException: Version` and
+ * the 30-frame stack under it (AddAppVersion ← AndroidWorkProductProvider.Insert ←
+ * AddApprovedProduct — the actual root cause of a Managed Google Play approval
+ * failing) never reached the model AT ALL, because the file's whole allocation was
+ * 15,000 characters and the exception sat past it. The model then answered
+ * confidently from what it did get, and nothing downstream could tell that the
+ * decisive evidence had been left on the floor.
+ *
+ * So when the case goes up as a FILE, the logs go up AS THEMSELVES. The digest
+ * above stays — it is a genuinely good index and it tells the model where to look
+ * first — but it stops being the only thing the model can see.
+ *
+ * WHEN A FILE STILL WILL NOT FIT
+ * ----------------------------------------------------------------------------
+ * The upload ceiling is real (ai-provider.js measured it: sentinel lines planted at
+ * the start, middle and end of the payload were all quoted back at 2.10 MB, and the
+ * supported figure stops where the evidence stops). A 40 MB DebugReport does not
+ * fit whatever anyone would prefer, so the question is not whether to reduce it but
+ * HOW — and a blind head-cut is the one answer that is always wrong, because it
+ * throws away the end of the run, which is where failures live.
+ *
+ * Instead the file is kept as CONTIGUOUS WINDOWS around every line carrying a
+ * forensic signal, each window grown forward over the exception block that follows
+ * it, plus the file's head (the preamble: product build, OS, install path) and its
+ * tail (the newest events). Every gap between windows is DECLARED, with its exact
+ * line range and whether anything in it carried a signal — so "line 4,000 to line
+ * 51,880 is routine traffic" is a statement the reader can act on, and a gap that
+ * did drop something says so instead of pretending.
+ * ------------------------------------------------------------------------- */
+
+// A line's claim on space when a file is too big to go up whole. 0 = ordinary traffic.
+// Deliberately coarse: this decides which WINDOWS survive, not which lines — a window is
+// kept or dropped whole, because half an exception block is not weaker evidence, it is
+// misleading evidence.
+function verbatimLineWeight(intel) {
+    if (!intel) return 0;
+    if (intel.hasException) return 5;
+    const sev = intel.severityToken || "";
+    if (/^(FATAL|CRITICAL|PANIC|SEVERE)$/i.test(sev)) return 5;
+    if (/^ERROR$/i.test(sev)) return 4;
+    if (intel.hasErrorWord) return 3;
+    if (/^WARN/i.test(sev)) return 2;
+    if (intel.hasStackFrame) return 2;
+    if (intel.isForensic) return 1;
+    return 0;
+}
+
+// Does this line belong to the block ABOVE it rather than starting its own event?
+// A .NET or Java exception dump is one event written across thirty lines: the message
+// names the fault and the frames under it say where it came from. A window that stops at
+// a fixed radius hands the reader an exception with no origin, which is precisely the
+// failure this whole section exists to stop — so a window follows its block to the end.
+//
+// Blank lines count: the dump the field case turned on ("* Exception: Version *" boxed in
+// asterisks) puts one between the ERROR line and the banner, and stopping there would cut
+// the exception off from its own name.
+function isVerbatimContinuationLine(line) {
+    const t = line == null ? "" : String(line);
+    if (!t.trim()) return true;
+    if (isStackTraceLine(t)) return true;
+    // A banner or a bracketed exception name — the shape a boxed .NET dump uses.
+    if (/^\s*\*{3,}\s*$/.test(t)) return true;
+    if (/^\s*\*.*\*\s*$/.test(t)) return true;
+    if (/^\s*\[[A-Za-z_][\w.]*(Exception|Error)\b/.test(t)) return true;
+    // A continuation is never a NEW timestamped event; anything that opens with one is.
+    if (extractLogTimestamp(t)) return false;
+    // Indented text under an event (WCF parameter dumps, SQL statements, JSON payloads).
+    return /^\s{2,}\S/.test(t) && t.length < 4000;
+}
+
+// How much of a file the windower keeps around each signal, tried widest-first. Whichever
+// radius fits the file's allocation is the one used, so a file with three exceptions in it
+// gets generous context and a file that is one continuous wall of errors still gets in.
+const VERBATIM_RADII = [
+    { before: 25, after: 80 },
+    { before: 12, after: 40 },
+    { before: 6,  after: 16 },
+    { before: 2,  after: 6 },
+    { before: 0,  after: 1 }
+];
+// The preamble and the newest events are kept whatever else goes. The head carries the
+// product build, the OS and the install path (extractServerOsFromLogs reads it from there);
+// the tail is where a run that died actually died.
+const VERBATIM_HEAD_LINES = 150;
+const VERBATIM_TAIL_LINES = 150;
+// A window may follow its exception block this far and no further — a corrupt file that is
+// one 200,000-line stack trace must not be able to swallow the whole upload.
+const VERBATIM_BLOCK_MAX = 500;
+// Below this a file's slice is too small to be worth windowing into fragments; it gets its
+// head and its tail and says so.
+const VERBATIM_MIN_PER_FILE = 24000;
+
+// Merge overlapping/adjacent windows in ascending order. Windows arrive sorted by start
+// (they are built from ascending line indices), so one pass is enough.
+function mergeVerbatimWindows(wins) {
+    const out = [];
+    for (const w of wins) {
+        const last = out[out.length - 1];
+        if (last && w.start <= last.end + 1) {
+            last.end = Math.max(last.end, w.end);
+            last.weight = Math.max(last.weight, w.weight);
+            last.hits += w.hits;
+        } else {
+            out.push({ start: w.start, end: w.end, weight: w.weight, hits: w.hits });
+        }
+    }
+    return out;
+}
+
+// The lines of `log` that carry a forensic signal, and how strongly, as parallel arrays.
+// Uses the intel precomputeLogIntel already built for this exact file (the same pass the
+// digest, the incident index and the panel's own badges are drawn from), and falls back to
+// a direct classify only when that cache is unavailable.
+async function verbatimSignalIndex(log, lines) {
+    const idx = [];
+    const wt = [];
+    try { await precomputeLogIntel(log); } catch (e) { /* fall through to the direct scan */ }
+    const pre = log && log.precomputedIntel;
+    if (pre && pre.prefilteredIndices && pre.intelCache) {
+        for (const i of pre.prefilteredIndices) {
+            const w = verbatimLineWeight(pre.intelCache[i]);
+            if (w > 0) { idx.push(i); wt.push(w); }
+        }
+        return { idx, wt };
+    }
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line || !FAST_FORENSIC_PREFILTER.test(line.length > 1500 ? line.slice(0, 1500) : line)) continue;
+        const w = verbatimLineWeight(classifyLogLine(line.length > 1500 ? line.slice(0, 1500) : line, true));
+        if (w > 0) { idx.push(i); wt.push(w); }
+    }
+    return { idx, wt };
+}
+
+// Build the kept-windows for one file at a given radius. Head and tail are windows too,
+// carried at the top weight so they are never the part that is dropped.
+function verbatimWindowsAt(total, signals, radius) {
+    const wins = [];
+    if (total <= 0) return wins;
+    const head = Math.min(VERBATIM_HEAD_LINES, total) - 1;
+    if (head >= 0) wins.push({ start: 0, end: head, weight: 6, hits: 0 });
+    for (let k = 0; k < signals.idx.length; k++) {
+        const i = signals.idx[k];
+        wins.push({
+            start: Math.max(0, i - radius.before),
+            end: Math.min(total - 1, i + radius.after),
+            weight: signals.wt[k],
+            hits: 1
+        });
+    }
+    const tailStart = Math.max(0, total - VERBATIM_TAIL_LINES);
+    wins.push({ start: tailStart, end: total - 1, weight: 6, hits: 0 });
+    wins.sort((a, b) => a.start - b.start || a.end - b.end);
+    return mergeVerbatimWindows(wins);
+}
+
+// Grow every window forward over the exception block that follows it, then re-merge —
+// growing can make two windows touch.
+function growVerbatimWindows(wins, lines) {
+    const total = lines.length;
+    for (const w of wins) {
+        let j = w.end + 1, grown = 0;
+        while (j < total && grown < VERBATIM_BLOCK_MAX && isVerbatimContinuationLine(lines[j])) {
+            w.end = j; j++; grown++;
+        }
+    }
+    return mergeVerbatimWindows(wins);
+}
+
+function verbatimWindowCost(wins, lines) {
+    let n = 0;
+    for (const w of wins) {
+        for (let i = w.start; i <= w.end; i++) n += (lines[i] ? lines[i].length : 0) + 1;
+    }
+    return n;
+}
+
+// Cut ONE window down to `room`, from its MIDDLE. The opening of a window carries the event
+// that earned it and the closing carries where that event led, so a window that has to lose
+// something loses what is between them — and the renderer then declares that as a gap like
+// any other, because it is one.
+//
+// Returns 0, 1 or 2 windows. Two means the middle went; one means the whole window fitted
+// after all, or only its head could be afforded.
+function shrinkVerbatimWindow(w, lines, room) {
+    const len = i => (lines[i] ? lines[i].length : 0) + 1;
+    if (room <= 0) return [];
+    let a = w.start - 1, b = w.end + 1, spent = 0;
+    // Grow from both ends inwards, alternating, so a window is never reduced to its head.
+    while (a + 1 <= b - 1) {
+        const nextA = a + 1, nextB = b - 1;
+        if (nextA > nextB) break;
+        const cA = len(nextA);
+        if (spent + cA > room) break;
+        a = nextA; spent += cA;
+        if (a + 1 > b - 1) break;
+        const cB = len(nextB);
+        if (spent + cB > room) break;
+        b = nextB; spent += cB;
+    }
+    const head = a >= w.start ? { start: w.start, end: a, weight: w.weight, hits: w.hits } : null;
+    const tail = b <= w.end ? { start: b, end: w.end, weight: w.weight, hits: 0 } : null;
+    if (head && tail && head.end + 1 >= tail.start) {
+        return [{ start: w.start, end: w.end, weight: w.weight, hits: w.hits }];
+    }
+    return [head, tail].filter(Boolean);
+}
+
+/* SPEND WHAT IS LEFT.
+ *
+ * The radius ladder is coarse by necessity — one step of radius costs (lines added × line
+ * length), and a ManagementService.log averages 2.3 KB per line because half its entries are
+ * WCF parameter dumps. On the engineer's 2.7 MB file that made the ladder useless on its own:
+ * radius 2/6 wanted more than the whole upload, radius 0/1 fitted in 61,000 characters, and
+ * the ladder duly chose 61,000 — leaving 1.9 MB of a 2 MB upload UNUSED and the "Parameters
+ * inspector" block that carried the failing product id outside every window.
+ *
+ * So the ladder picks a starting shape and this spends the rest of the room on it, growing
+ * every window outward a line at a time until the next line would not fit. Growth doubles its
+ * step each round so a file with short lines converges in a few dozen rounds instead of tens
+ * of thousands, and every line is still cost-checked individually before it is committed —
+ * the step decides how FAST the window grows, never how far past the ceiling.
+ */
+function expandVerbatimWindows(wins, lines, budget) {
+    const total = lines.length;
+    const len = i => (lines[i] ? lines[i].length : 0) + 1;
+    let cost = verbatimWindowCost(wins, lines);
+    if (!wins.length || cost >= budget) return wins;
+    let list = wins.map(w => ({ start: w.start, end: w.end, weight: w.weight, hits: w.hits }));
+    let step = 1;
+    for (let round = 0; round < 64 && cost < budget; round++) {
+        let progress = false;
+        for (let k = 0; k < list.length; k++) {
+            const w = list[k];
+            const prev = list[k - 1];
+            const next = list[k + 1];
+            for (let n = 0; n < step; n++) {
+                const b = w.start - 1;
+                if (b < 0 || (prev && b <= prev.end)) break;
+                const c = len(b);
+                if (cost + c > budget) break;
+                w.start = b; cost += c; progress = true;
+            }
+            for (let n = 0; n < step; n++) {
+                const f = w.end + 1;
+                if (f >= total || (next && f >= next.start)) break;
+                const c = len(f);
+                if (cost + c > budget) break;
+                w.end = f; cost += c; progress = true;
+            }
+        }
+        list = mergeVerbatimWindows(list);
+        if (!progress) break;
+        step = Math.min(step * 2, 4096);
+    }
+    return list;
+}
+
+/* THE GUARANTEE. Everything above is best-effort selection; this is the step that makes the
+ * result FIT, and it has to hold for the two shapes selection cannot help with:
+ *
+ *   · a file where every line carries a signal — a Deployment Server log that is 20,000
+ *     consecutive ERRORs. Every window touches its neighbour, so they all merge into ONE
+ *     window covering the file, and "drop the weakest" has nothing to drop;
+ *   · a budget smaller than the file's own head and tail, which are never dropped.
+ *
+ * Both are handled the same way: windows are visited in the order they must survive (head
+ * and tail first at weight 6, then by signal strength) and each is given what is left,
+ * shrunk from the middle if it does not fit. A budget this small produces a heavily gapped
+ * file — and every one of those gaps is stated, which is the whole point.
+ */
+function fitVerbatimWindows(wins, lines, budget) {
+    if (verbatimWindowCost(wins, lines) <= budget) return wins;
+    const order = wins.map((w, i) => ({ w, i }))
+        .sort((a, b) => b.w.weight - a.w.weight || b.w.hits - a.w.hits || a.i - b.i);
+    let left = budget;
+    const kept = [];
+    for (const { w } of order) {
+        if (left <= 0) break;
+        const cost = verbatimWindowCost([w], lines);
+        if (cost <= left) { kept.push(w); left -= cost; continue; }
+        const pieces = shrinkVerbatimWindow(w, lines, left);
+        for (const p of pieces) { kept.push(p); left -= verbatimWindowCost([p], lines); }
+    }
+    kept.sort((a, b) => a.start - b.start || a.end - b.end);
+    return mergeVerbatimWindows(kept);
+}
+
+/* RENDER the chosen windows, declaring every gap between them.
+ *
+ * A gap is not a detail to tidy away: it is the one thing that tells a reader this file is
+ * not whole and exactly where it is not. So each one names its real line range and says what
+ * was in it — routine traffic, a count of signal lines that did NOT make it, or (the case
+ * that produced a 2.2 MB single line in the field) one entry simply too large to carry.
+ */
+function renderVerbatimWindows(wins, lines, signals) {
+    const total = lines.length;
+    const parts = [];
+    let keptLines = 0;
+    let gaps = 0;
+    let cursor = 0;
+    const signalsInRange = (a, b) => {
+        let n = 0;
+        for (let k = 0; k < signals.idx.length; k++) {
+            const i = signals.idx[k];
+            if (i >= a && i <= b) n++;
+            else if (i > b) break;
+        }
+        return n;
+    };
+    const gapMarker = (from, to) => {
+        // ONE line, and an enormous one: that is not "a range was dropped", it is a single
+        // entry that would not fit. Naming its size is what stops the omission reading as an
+        // arbitrary cut — line 306 of a real ManagementService.log is a 2,213,814-character
+        // Managed Home Screen configuration schema, which is 81% of the whole file.
+        if (from === to) {
+            const size = lines[from - 1] ? lines[from - 1].length : 0;
+            if (size > 100000) {
+                return `[… line ${from} of this file omitted: a single ${size.toLocaleString()}-character entry, too large to carry inside the upload allowance. Everything around it is present. …]`;
+            }
+        }
+        const missed = signalsInRange(from - 1, to - 1);
+        return missed > 0
+            ? `[… lines ${from}-${to} of this file omitted to fit the upload ceiling — ${missed} line${missed === 1 ? '' : 's'} in that range carried an error/warning/exception signal and ${missed === 1 ? 'is' : 'are'} NOT shown. Say so if the answer depends on that range; do not treat this file as complete. …]`
+            : `[… lines ${from}-${to} of this file omitted: routine traffic — no error, warning, exception or stack-trace line among them. …]`;
+    };
+    for (const w of wins) {
+        if (w.start > cursor) { parts.push(gapMarker(cursor + 1, w.start)); gaps++; }
+        for (let i = w.start; i <= w.end; i++) parts.push(lines[i]);
+        keptLines += (w.end - w.start + 1);
+        cursor = w.end + 1;
+    }
+    if (cursor < total) { parts.push(gapMarker(cursor + 1, total)); gaps++; }
+    return { body: parts.join('\n'), keptLines, gaps };
+}
+
+/* ONE FILE, whole if it fits and honestly windowed if it does not.
+ * Returns { body, complete, keptLines, totalLines, gaps }. */
+async function buildVerbatimLogBody(log, budget) {
+    const content = log && log.content ? log.content : "";
+    const lines = (log && log.lines) || (content ? content.split('\n') : []);
+    const total = lines.length;
+    if (!total) return { body: "", complete: true, keptLines: 0, totalLines: 0, gaps: 0 };
+
+    // THE ONLY OUTCOME WORTH HAVING. Everything below this line is the consolation prize.
+    if (content.length <= budget) {
+        return { body: content, complete: true, keptLines: total, totalLines: total, gaps: 0 };
+    }
+
+    const signals = await verbatimSignalIndex(log, lines);
+
+    let wins = null;
+    for (const radius of VERBATIM_RADII) {
+        const candidate = growVerbatimWindows(verbatimWindowsAt(total, signals, radius), lines);
+        wins = wins || candidate;
+        if (verbatimWindowCost(candidate, lines) <= budget) { wins = candidate; break; }
+        wins = candidate;
+    }
+
+    // Still over at the tightest radius: drop the weakest windows whole. Head and tail carry
+    // weight 6 and a real exception carries 5, so what goes is the low-signal middle — and it
+    // goes in a defined order (weakest, then fewest hits, then latest in the file) so the same
+    // bundle always produces the same upload.
+    if (verbatimWindowCost(wins, lines) > budget) {
+        const order = wins.map((w, i) => ({ w, i }))
+            .sort((a, b) => a.w.weight - b.w.weight || a.w.hits - b.w.hits || b.i - a.i);
+        const dropped = new Set();
+        let cost = verbatimWindowCost(wins, lines);
+        for (const o of order) {
+            if (cost <= budget) break;
+            if (o.w.weight >= 6) continue;             // never the head or the tail
+            dropped.add(o.i);
+            cost -= verbatimWindowCost([o.w], lines);
+        }
+        wins = wins.filter((w, i) => !dropped.has(i));
+    }
+    // And the guarantee, for the shapes dropping cannot reach.
+    wins = fitVerbatimWindows(wins, lines, budget);
+    // Then spend whatever the ladder's coarse steps left on the table.
+    wins = expandVerbatimWindows(wins, lines, budget);
+
+    // THE CEILING IS THE RENDERED FILE, NOT THE LINES INSIDE IT. Every gap marker is ~140
+    // characters of the panel's own prose, and a heavily gapped file carries dozens of them —
+    // enough to put the block over an allowance the window arithmetic thought it had met.
+    // Measuring the finished text and re-fitting against what it actually cost is the only
+    // check that cannot be argued with; three passes is ample, because each one removes at
+    // least the surplus it measured.
+    let out = renderVerbatimWindows(wins, lines, signals);
+    for (let pass = 0; pass < 3 && out.body.length > budget; pass++) {
+        const over = out.body.length - budget;
+        wins = fitVerbatimWindows(wins, lines, Math.max(0, verbatimWindowCost(wins, lines) - over - 200));
+        out = renderVerbatimWindows(wins, lines, signals);
+    }
+    if (out.body.length > budget) out = { body: out.body.slice(0, Math.max(0, budget)), keptLines: out.keptLines, gaps: out.gaps };
+
+    return { body: out.body, complete: false, keptLines: out.keptLines, totalLines: total, gaps: out.gaps };
+}
+
+/* EVERY FILE, delimited exactly the way the attachment pointer in ai-provider.js promises
+ * the model they will be — "=== FILE: <path> ===" / "=== END: <path> ===" — so a finding is
+ * cited against the inner log it came from and not against the uploaded container. */
+async function buildVerbatimLogSection(logs, budget) {
+    if (!logs || !logs.length) return "";
+    const FRAMING = 1600;                       // the header, the directive and the closing tally
+    const room = budget - FRAMING;
+    if (room <= 0) return "";
+
+    // allocatePerFileBudgets can overshoot its own total: when several files are each floored
+    // at minPerFile the floors can add up past the pool. That is harmless where a per-file cap
+    // dominates, and it is NOT harmless here — an overshoot is an upload the site rejects. So
+    // the allocation is advisory and the running total is the authority: every file is offered
+    // what is genuinely left, never what the split hoped it could have.
+    const budgets = allocatePerFileBudgets(logs, room, VERBATIM_MIN_PER_FILE);
+    const bodies = [];
+    const partial = [];
+    const omitted = [];
+    let spent = 0;
+    let wholeCount = 0;
+
+    for (const log of logs) {
+        const raw = log.name || "Attached log";
+        // A HAR IS NEVER UPLOADED RAW. A network capture records whole requests, so it holds
+        // the Authorization headers, the cookies and — on an SSO capture — the id_tokens and
+        // authorization codes of the session it recorded. Sending those to a third-party chat
+        // service is a data-loss incident dressed up as a support ticket, and no answer needs
+        // them to find a redirect loop. So a capture goes up as the same REDACTED transaction
+        // evidence the inline path builds, under the .txt name Copilot's upload control will
+        // actually take, and its raw JSON never leaves the panel.
+        const har = isHarContent(raw, log.content || "");
+        const name = har ? harTxtName(raw) : raw;
+        const marker = `\n=== FILE: ${name} ===\n`;
+        const closer = `\n=== END: ${name} ===\n`;
+        // The framing is charged against the file's own slice, not against the section's
+        // slack, so a bundle of 200 files cannot walk past the ceiling 300 characters at a
+        // time. 520 covers the longest of the two per-file notes below with room to spare.
+        const framing = marker.length + closer.length + 520;
+        const left = room - spent - framing;
+        if (left < 800) { omitted.push(name); continue; }
+        // What this file needs to go up WHOLE. When that fits in what is left, the split's
+        // arithmetic is beside the point: a 340-byte agent config does not need a
+        // 24,000-character slice and must not be dropped for failing to be given one — which
+        // is exactly what the floor below did to it before this line existed.
+        const want = (log.content || "").length + 200;
+        const share = Math.min(left, Math.max(budgets.get(log) || 0, Math.min(want, left)));
+        if (share < Math.min(800, want)) { omitted.push(name); continue; }
+        if (har) {
+            // The ANALYSIS (what failed, in what order, against which host) and the EVIDENCE
+            // (every transaction as one line of fact) — the same pair the inline path builds,
+            // and both through redactHarSecrets. Measured on a 30-transaction SSO capture,
+            // redaction took the analysis from 20,415 characters to 6,479: the tokens were two
+            // thirds of it, and the model needs none of them to find a redirect loop.
+            let distilled = "";
+            try { distilled = redactHarSecrets(buildHarAnalysis(log.content || "", name)); }
+            catch (e) { console.warn('HAR analysis failed', e); }
+            try { distilled += redactHarSecrets(buildHarEvidence(log.content || "", name, { totalCap: Math.max(2000, share - distilled.length) })); }
+            catch (e) { console.warn('HAR evidence failed', e); }
+            if (!distilled.trim()) { omitted.push(name); continue; }
+            const block = marker
+                + `[NETWORK CAPTURE, originally "${raw}". Every transaction in the capture is listed below as one line of fact, failures first. Credentials, cookies and tokens are replaced with [REDACTED …] markers and static-asset response bodies are omitted — that is deliberate and permanent, not a gap in the evidence.]\n`
+                + distilled + closer;
+            bodies.push(block);
+            spent += block.length;
+            wholeCount++;
+            continue;
+        }
+        const built = await buildVerbatimLogBody(log, share);
+        if (!built.body) { omitted.push(name); continue; }
+        const note = built.complete
+            ? `[COMPLETE — all ${built.totalLines.toLocaleString()} lines of this file, verbatim, nothing removed.]\n`
+            : `[PARTIAL — ${built.keptLines.toLocaleString()} of ${built.totalLines.toLocaleString()} lines. This file was larger than the upload ceiling, so it is kept as contiguous windows around every error/warning/exception line (each window follows its exception block to the end) plus the file's head and tail. Every omitted range is marked inline with its exact line numbers. Line numbers below are the file's REAL ones — cite them as they appear.]\n`;
+        const block = marker + note + built.body + closer;
+        bodies.push(block);
+        spent += block.length;
+        if (built.complete) wholeCount++; else partial.push(`${name} (${built.keptLines.toLocaleString()}/${built.totalLines.toLocaleString()} lines, ${built.gaps} declared gap${built.gaps === 1 ? '' : 's'})`);
+    }
+    if (!bodies.length) return "";
+
+    let head = `\n\n=== COMPLETE LOG FILES — VERBATIM ===\n`
+        + `THIS IS THE PRIMARY EVIDENCE. The index above only says where to look first; these are the log files themselves, uploaded as they were collected.\n`
+        + `- Every file is delimited by "=== FILE: <path> ===" and "=== END: <path> ===". Cite findings against those inner paths and their REAL line numbers, never against the uploaded container file.\n`
+        + `- Each file states whether it is COMPLETE or PARTIAL directly under its marker. Where a file is PARTIAL, the omitted ranges are named inline with exact line numbers — read those markers and say so rather than describing the file as whole.\n`
+        + `- You are looking at the raw log. Do not report that evidence was summarised, truncated or unavailable when the file above it says COMPLETE.\n`;
+    let tally = `\n=== END COMPLETE LOG FILES (${bodies.length} file(s): ${wholeCount} complete`;
+    if (partial.length) tally += `; partial — ${partial.join(', ')}`;
+    if (omitted.length) tally += `; NOT included for want of room — ${omitted.slice(0, 40).join(', ')}${omitted.length > 40 ? `, +${omitted.length - 40} more` : ''} (these appear in the file manifest and the failure index only; say so if the answer would depend on them)`;
+    tally += `) ===\n`;
+    return head + bodies.join('') + tally;
+}
+
 async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weights) {
     if (!logs || !logs.length) return "";
     const small = isSmallLocalModel();
@@ -11778,83 +13256,42 @@ async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weigh
     let spent = 0;
     const digestedFrom = new Set();
 
-    // PHASE 1 — GLOBAL query-focused digest. Scan every file for lines matching the reported issue,
-    // score each line by the combined weight of the domain terms it hits, and keep the highest-
-    // scoring lines ACROSS ALL FILES (grouped by file, newest budget first). Scoring per line — not
-    // per file — is what guarantees the smoking-gun line ("SUCCESS, Install policies, APN") survives
-    // even when it lives in a file that isn't the single most "relevant" one overall. This block
-    // LEADS the evidence, so the downstream context trim (which keeps the head) can never drop it.
+    // THE EVIDENCE GOES UP AS A FILE — so it goes up as ITSELF.
+    //
+    // Everything below this branch is a digest, sized for a chat composer. None of those
+    // sizes describe anything real once the case is uploaded: perFileCap would hand a
+    // 2.7 MB ManagementService.log a 15,000-character allowance and drop the exception that
+    // explains the case, while the upload it is being trimmed for holds two megabytes.
+    //
+    // The query-focused index is still built — it is a genuinely useful "look here first",
+    // and it costs a rounding error against the budget — but it is now an index over
+    // evidence the model can actually go and read, so its rows are pointers rather than the
+    // whole of what is known.
+    if (logsUploadAsFile()) {
+        const indexBudget = Math.max(4000, Math.min(140000, Math.floor(realBudget * 0.08)));
+        const digest = await buildCrossFileFocusDigest(ranked, indexBudget, matcher, terms, weights, {
+            small: false,
+            lineCap: UPLOADED_EVIDENCE_LINE_CAP,
+            maxLinesPerFile: 60
+        });
+        const verbatim = await buildVerbatimLogSection(ranked, Math.max(0, realBudget - digest.text.length));
+        // No verbatim section means no room at all was left for one — never silently fall
+        // through to the digest-only layout, which would look identical and say nothing.
+        if (!verbatim) {
+            return digest.text + `\n[The uploaded case had no room left for the raw log files, so only the index above was sent. Treat it as an index, not as the whole log, and say so if the answer needs a line it does not show.]\n`;
+        }
+        return digest.text + verbatim;
+    }
+
+    // PHASE 1 — GLOBAL query-focused digest, sized for the prompt. This block LEADS the
+    // evidence, so the downstream context trim (which keeps the head) can never drop it.
     if (matcher) {
         const phase1Budget = small ? Math.min(Math.floor(realBudget * 0.8), 5200) : Math.floor(realBudget * 0.55);
-        const scored = await collectFocusLines(ranked, matcher, weights, terms);
-        if (scored.length) {
-            // Lines-per-file adapts to how many files actually have matches: DEPTH when few files
-            // hold the evidence (show more of each), BREADTH when many do (show the top lines of more
-            // files, since the answer's file is likelier to be one of the ~10 shown than the top one).
-            const filesWithHits = new Set(scored.map(h => h.file)).size;
-            const maxLinesPerFile = filesWithHits <= 6 ? (small ? 16 : 34) : (small ? 6 : 12);
-            // Group hits by file and order files by their single best (highest-scoring) line, so the
-            // file that holds the strongest evidence leads. WITHIN each file, order lines by score
-            // DESCENDING (then line number) and cap per file — this is what makes the smoking-gun line
-            // ("SUCCESS, Install policies, APN", score high) appear instead of being crowded out by
-            // earlier, lower-scoring matches from the same file. Capping per file lets several files
-            // each contribute their few best lines rather than one noisy file consuming the budget.
-            const byFile = new Map();
-            for (const h of scored) {
-                if (!byFile.has(h.file)) byFile.set(h.file, { best: h.score, rows: [] });
-                const g = byFile.get(h.file);
-                g.rows.push(h); if (h.score > g.best) g.best = h.score;
-            }
-            const fileOrder = [...byFile.entries()].sort((a, b) => b[1].best - a[1].best).map(e => e[0]);
-            let body = "";
-            let used = 0;
-            for (const file of fileOrder) {
-                if (used >= phase1Budget) break;
-                // Near-duplicates are capped BEFORE the per-file slice. One event that hits 15
-                // devices logs 15 lines that differ only by device id and timestamp, all scoring
-                // identically — and they took every slot: a management-service log contributed
-                // eleven copies of "presence flag left as CONNECTED …" and not one of the DISTINCT
-                // lines that explained why (the idle sweep, the un-notified teardown, the
-                // keep-alive default the upgrade changed, the state flip to OFFLINE). Two copies
-                // prove the pattern; the rest only prove it again.
-                const DUP_PER_SIGNATURE = 2;
-                const sigCount = new Map();
-                let suppressed = 0;
-                const rows = byFile.get(file).rows
-                    .sort((a, b) => b.score - a.score || a.lineNum - b.lineNum)
-                    .filter(h => {
-                        const sig = logLineSignature(h.text);
-                        const n = (sigCount.get(sig) || 0) + 1;
-                        sigCount.set(sig, n);
-                        if (n > DUP_PER_SIGNATURE) { suppressed++; return false; }
-                        return true;
-                    })
-                    .slice(0, maxLinesPerFile)
-                    .sort((a, b) => a.lineNum - b.lineNum); // chronological within the chosen top lines
-                let seg = `\n### ${file}\n`;
-                let any = false;
-                for (const h of rows) {
-                    // Cap each digest line: a few files log 400-char JSON blobs whose head carries the
-                    // signal — truncating them lets MANY more files fit the digest instead of one file's
-                    // verbose lines consuming the whole budget.
-                    const text = h.text.length > 240 ? h.text.slice(0, 240) + '…' : h.text;
-                    const row = `Line ${h.lineNum}${h.ts ? ` @ ${h.ts}` : ""}: ${text}\n`;
-                    if (used + seg.length + row.length > phase1Budget) break;
-                    seg += row; any = true;
-                }
-                // The suppressed copies are still FACTS about scale — how many devices/objects the
-                // same event hit — so their count is stated rather than silently dropped.
-                if (any && suppressed > 0) {
-                    seg += `(+${suppressed} more line${suppressed === 1 ? '' : 's'} in this file identical in form to ones above, differing only in device/id/timestamp — the same events repeating across the estate.)\n`;
-                }
-                if (any) { body += seg; used += seg.length; digestedFrom.add(logs.find(l => (l.name || "Attached log") === file) || {}); }
-            }
-            if (body) {
-                ctx += `\n=== QUERY-FOCUSED EVIDENCE ACROSS FILES (lines matching the reported issue; INFO/SUCCESS lines included on purpose — a feature the product logs as installed/success but that is ABSENT on the device is itself the finding, not a non-event) ===\n`
-                    + body
-                    + `\n=== END QUERY-FOCUSED EVIDENCE ===\n`;
-                spent += ctx.length;
-            }
+        const digest = await buildCrossFileFocusDigest(ranked, phase1Budget, matcher, terms, weights, { small });
+        if (digest.text) {
+            ctx += digest.text;
+            spent += ctx.length;
+            for (const l of digest.digestedFrom) digestedFrom.add(l);
         }
     }
 
@@ -11871,13 +13308,19 @@ async function buildConcentratedSnippets(logs, realBudget, matcher, terms, weigh
     // slices (a 50-file DebugReport cannot fit), but nothing that fits is starved by a
     // file that happened to sort first. A single-file upload still gets the whole
     // budget, because then there is only one slice.
+    // A capture is excluded here for the same reason it is excluded from every other line
+    // scanner (see withoutNetworkCaptures): getSmartLogSnippet picks "the most relevant raw
+    // lines", and on a HAR the most relevant raw line is the one holding the bearer token.
+    // Captures still travel — redacted — through buildVerbatimLogSection and, on the inline
+    // path, through buildHarAnalysis/buildHarEvidence.
+    const expandable = withoutNetworkCaptures(ranked);
     const perFileCap = small ? 3200 : 15000;
     const perFileMin = small ? 700 : 2500;
     const budgetLeft = () => Math.max(0, realBudget - spent);
-    const expandCount = Math.max(1, Math.min(ranked.length, Math.floor(budgetLeft() / perFileMin)));
+    const expandCount = Math.max(1, Math.min(expandable.length, Math.floor(budgetLeft() / perFileMin)));
     const deferred = [];
-    for (let idx = 0; idx < ranked.length; idx++) {
-        const log = ranked[idx];
+    for (let idx = 0; idx < expandable.length; idx++) {
+        const log = expandable[idx];
         if (idx >= expandCount) { deferred.push(log); continue; }
         // Recomputed each time so budget a file did not use rolls forward to the next.
         const share = Math.floor(budgetLeft() / (expandCount - idx));
@@ -12628,6 +14071,50 @@ VERSIONING (always apply):
     3. **STATUS**: (Ready / Partial / Awaiting Context).
     4. **NEXT STEP**: (The one best action the agent should take).`;
 }
+
+// --- FRONTIER PROFILE (Copilot / Azure / Claude) ---------------------------------
+// The full rules block above is ~11,000 characters, and most of that length is there to
+// hold a 2-4B local model on the rails: formatting instructions, banned-phrase lists,
+// anti-hallucination lectures, and the same version-disambiguation stated three times.
+// A frontier model needs none of it — and on the browser bridge every instruction
+// character displaces case evidence, so the verbosity is not merely wasteful, it is paid
+// for in log lines that never reach the model.
+//
+// WHAT IS DELIBERATELY KEPT, and why none of it is model-compensation:
+//   • the audience contract — who the reader is cannot be inferred from the case data;
+//   • the version mapping — MobiControl and Android Agent share a version SHAPE, so the
+//     product must be chosen by name, and no amount of intelligence resolves that;
+//   • release-notes fidelity — a better model is MORE likely to produce a plausible
+//     MCMR code, not less, so the verbatim rule earns its place;
+//   • newest-first chain precedence, and the ban on printing bracketed block names.
+// Everything the panel computes deterministically (CASE STATE, LOG ACCESS, DECISIVE
+// SIGNALS, MCMR RULE, CASE HISTORY) travels in the user message and is untouched by this.
+function getFrontierQAPrompt() {
+    return `${TIER3_BASE_IDENTITY}
+
+AUDIENCE: you are talking to a SOTI Technical Support Agent — your colleague, who owns this case. NEVER the customer. The case data is the CUSTOMER's problem, supplied as context; the customer is not in this chat.
+- "You" means the agent. Refer to the customer in the third person.
+- Never use customer-service phrasing ("thank you for reaching out", "sorry for the inconvenience"), and never tell the agent to contact SOTI Support — they ARE SOTI Support. Escalation is internal: L3/SME, a JIRA, the product team.
+- Write every fix as an action for the AGENT, or as something the agent asks the customer to do.
+- If asked for a reply or email, write it FROM SOTI Support TO the customer, ready to send.
+
+GROUNDING: this prompt carries live data fetched from SOTI Pulse and SOTI Docs. Answer from it. Never fall back on generic IT knowledge, never send the agent to a website or to support, and never mention a knowledge cutoff. If something is not in the data, say so in one short phrase and move on.
+
+PRODUCTS AND VERSIONS: MobiControl Console/Server, Android Agent and Identity are separate products whose version numbers look alike, so pick the list by the PRODUCT NAMED in the question, never by which number is higher — "MobiControl"/"console"/"server"/an unqualified "latest version" means the MobiControl list; "agent"/"Android Agent"/"AEA" means the Android Agent list; "Identity" means the Identity list. For a bare version question, answer in one sentence and stop.
+
+RELEASE NOTES: in SOTI terms these are the Resolved Issues. Quote each MCMR code and its description verbatim — never paraphrase, translate, expand or explain them. A fix belongs to the version in the "FIXED IN VERSION X" header above it, never the customer's own version. Keep console data and agent data separate. If no release notes are supplied, do not mention release notes or MCMR codes at all.
+
+CURRENT STATE: the email chain is ordered NEWEST FIRST and overrides the issue summary, which is only the original report and is often superseded. Base "where things stand" and "what next" on the newest messages, and never re-propose something the chain has moved past.
+
+TROUBLESHOOTING: when asked how to fix the case, never answer that there is insufficient information. Produce a numbered plan where each step names one action, the exact artefact it acts on (the named log file and its server role, the service, console path, port, SQL object or error string, plus the time window when it matters), and what result confirms or rules out the cause.
+
+NEVER print the bracketed ALL-CAPS block names from this prompt — they are briefing labels the agent cannot see. Write the finding itself instead.
+
+Start with the answer. No preamble, no closing remarks.
+
+Topology: Web Console is hosted inside SOTI Management Service (never IIS). Management Service <-> SQL <-> Deployment Server <-> Device Agent. Ports 5494, 13131, 2197, 443.`;
+}
+
 
 function getLeanLogPrompt() {
     return `${TIER3_IDENTITY}
@@ -14498,17 +15985,74 @@ function updateVersionDropdowns() {
 // loop (search "el.onchange = onFieldCommit") runs later and would silently overwrite it.
 // That loop is where the product-change → updateVersionDropdowns() rebuild lives.
 
-// --- AI ENGINE (LOCAL — OLLAMA) ---
+// --- AI ENGINE ---
+// The local Ollama engine is the DEFAULT and its behaviour here is unchanged. Which
+// backend actually serves a request is decided one layer down, in ai-provider.js
+// (window.SotiAI) — see that file's header for the contract. Everything in this
+// section that asks "how big is the window / how slow is this model / is it even
+// configured" has to ask the provider layer, because those answers are what the
+// prompt budgeter spends, and a cloud model's answers are nothing like a CPU's.
 let LOCAL_AI_URL = 'http://127.0.0.1:11434';
 let LOCAL_AI_MODEL = '';
 let LOCAL_AI_MODELS = [];
 let LOCAL_AI_CTX_MAX = 'auto'; // user cap for num_ctx: 'auto' or a number (as string)
 const MODEL_CTX_CACHE = new Map(); // model name → native context_length from /api/show
 
+// Provider bridge. Defined defensively so a missing/blocked ai-provider.js costs the
+// alternative backends — not the application, which falls straight back to Ollama.
+const AI = {
+    get on() { return typeof window !== 'undefined' && !!window.SotiAI; },
+    id() { return this.on ? window.SotiAI.providerId() : 'ollama'; },
+    isLocal() { return this.on ? window.SotiAI.isLocal() : true; },
+    model() { return this.on ? (window.SotiAI.activeModel() || LOCAL_AI_MODEL) : LOCAL_AI_MODEL; },
+    // "Is there something to call?" — for Ollama that means a model is selected; for a
+    // cloud provider it means the endpoint/key are filled in. The old `if (!LOCAL_AI_MODEL)`
+    // guards meant the first, and would have dead-ended every non-local provider.
+    ready() {
+        if (!this.on || this.isLocal()) return !!LOCAL_AI_MODEL;
+        return window.SotiAI.isConfigured();
+    },
+    describe() { return this.on ? window.SotiAI.describe() : `Local — ${LOCAL_AI_MODEL || 'no model'}`; },
+    chat(payload, init) {
+        if (this.on) {
+            // Name the relayed conversation after the case that is open, so the Copilot
+            // history reads as a list of case numbers instead of anonymous requests.
+            // Read at call time rather than cached: the case number is edited in place and
+            // tabs are switched mid-session.
+            try {
+                const el = $('caseNum');
+                window.SotiAI.setConversationLabel((el && el.value) || '');
+            } catch (e) { /* no case number is not an error — the title falls back */ }
+            return window.SotiAI.chat(payload, init);
+        }
+        return fetch(`${LOCAL_AI_URL.replace(/\/$/, '')}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: (init && init.signal) || null,
+            body: JSON.stringify(payload)
+        });
+    }
+};
+
+// Is a hosted frontier model answering? Decides which RULES profile is sent: the long
+// scaffolded one that a 2-4B local model needs, or the short one that says the same
+// non-negotiable things once. Deliberately NOT the same question as isSmallLocalModel(),
+// which governs how much DATA to include — this governs how much INSTRUCTION.
+function FRONTIER_RULES() {
+    return !!(AI.on && !AI.isLocal());
+}
+
 // Probe Ollama for the model's true context window (e.g. gemma e2b/e4b = 131072).
 // Cached in memory + chrome.storage so the probe runs once per model.
 async function getModelContextLength(model) {
     const FALLBACK = 16384; // legacy behaviour if /api/show is unavailable
+    // A non-local provider has no /api/show. Probing it would fail and quietly hand the
+    // budgeter the 16K fallback — which is how a 200K model ends up being fed the same
+    // amputated prompt the local path exists to work around. Ask the provider instead.
+    if (AI.on && !AI.isLocal()) {
+        const w = window.SotiAI.getContextWindow(model);
+        if (w) return w;
+    }
     if (!model) return FALLBACK;
     if (MODEL_CTX_CACHE.has(model)) return MODEL_CTX_CACHE.get(model);
     try {
@@ -14544,16 +16088,41 @@ async function getModelContextLength(model) {
     return FALLBACK;
 }
 
+// Is the case material leaving as a FILE rather than as message text? When it is, the
+// composer-shaped ceilings below stop describing anything real — the evidence is uploaded,
+// not typed, and the model reads it by retrieval rather than by holding it in one prompt.
+function providerAttachesCaseData() {
+    try {
+        return !!(AI.on && window.SotiAI && typeof window.SotiAI.attachesCaseData === 'function'
+                  && window.SotiAI.attachesCaseData());
+    } catch (e) { return false; }
+}
+
 // Resolve the effective num_ctx ceiling: min(model's native window, user setting; 'auto' → 65536)
 async function getHardCtxMax(model) {
     const modelMax = await getModelContextLength(model);
-    const userCap = (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto') ? (parseInt(LOCAL_AI_CTX_MAX, 10) || 65536) : 65536;
+    // The 64K 'auto' bound exists for two reasons, and NEITHER survives an attachment: it
+    // protects a local CPU from a prefill it cannot afford, and it stops a runaway case
+    // billing a 200K prompt to a metered API. The browser bridge has no prefill cost here
+    // and no per-token bill — it rides a seat the engineer already pays for — so applying
+    // that bound to it was trimming a 2 MB-capable upload down to ~150K characters for no
+    // benefit anyone receives. An EXPLICIT Context Size setting still wins, always.
+    const attaching = providerAttachesCaseData();
+    const userCap = (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto')
+        ? (parseInt(LOCAL_AI_CTX_MAX, 10) || 65536)
+        : (attaching ? modelMax : 65536);
     return { modelMax, userCap, hardMax: Math.max(2048, Math.min(modelMax, userCap)) };
 }
 
 // Small / CPU-bound models (2b, e2b, e4b, 7b…). On CPU these are slow per token, so
 // they get compact prompts and small contexts for fast, reliable analysis.
 function isSmallLocalModel() {
+    // This one predicate drives ~18 budget decisions across the file: snippet sizes,
+    // protected history turns, evidence caps, whether the lean prompts are used at all.
+    // Every one of them is compensating for a CPU-bound 2-4B model. A hosted frontier
+    // model needs none of that compensation, so the honest answer for any non-local
+    // provider is simply "no" — which unlocks the full prompts with no other edit.
+    if (AI.on && !AI.isLocal()) return false;
     return !!(LOCAL_AI_MODEL && /(0\.5b|1\.5b|1b|2b|3b|4b|mini|3\.2|7b|8b|9b|e2b|e4b)/i.test(LOCAL_AI_MODEL));
 }
 
@@ -14564,6 +16133,24 @@ function isSmallLocalModel() {
 async function getSessionCtx(model) {
     const { hardMax } = await getHardCtxMax(model);
     if (LOCAL_AI_CTX_MAX && LOCAL_AI_CTX_MAX !== 'auto') return hardMax;
+    // The 32K auto ceiling below exists to protect a CPU from a prefill it cannot afford —
+    // num_ctx costs KV-cache memory locally. A hosted model has neither problem: its prefill
+    // is seconds and its window is rented, so the ceiling that helps Ollama only starves it.
+    // Auto goes to 64K there, still bounded so a runaway case cannot bill a 200K prompt.
+    //
+    // CLAMPED TO hardMax, and that clamp is not cosmetic. Math.max(8192, …) is a FLOOR, and
+    // a floor above the real ceiling silently wins: the browser bridge reports a ~4,800-token
+    // window (what a chat composer will actually swallow), the floor raised it to 8,192, and
+    // the trimmer duly built a 16,987-character prompt for a box capped at 12,000 — which the
+    // adapter then had to reject. A budget must never exceed what the backend accepts.
+    // Same exception as getHardCtxMax: when the case is uploaded rather than typed, the 64K
+    // cloud bound is measuring a constraint that is not there. hardMax is already the
+    // attachment's own ceiling in that case, so it is used as-is.
+    if (AI.on && !AI.isLocal()) {
+        return providerAttachesCaseData()
+            ? Math.max(2048, hardMax)
+            : Math.max(2048, Math.min(hardMax, 65536));
+    }
     // Auto used to clamp every "small" model to 8192 REGARDLESS of what it supports. On
     // gemma4:e2b — whose /api/show reports a 131072 window — that produced a request logged as
     // "modelMax: 131072, hardMax: 65536, set num_ctx: 8192", and the prompt trimmer then had to
@@ -14572,12 +16159,18 @@ async function getSessionCtx(model) {
     // is for), so starving it bought no speed and cost the answer its evidence. Auto now gives
     // every model the same working window it can actually hold, which also keeps ONE num_ctx
     // across the session so Ollama never reloads the model between turns.
-    return Math.max(8192, Math.min(32768, hardMax));
+    // Same clamp discipline as the cloud branch above: the 8192 floor may never lift the
+    // budget above what the model actually holds.
+    return Math.min(hardMax, Math.max(8192, Math.min(32768, hardMax)));
 }
 
 // Preload the model at the session num_ctx so the user's FIRST query is already warm
 // (avoids paying the model-load cost on the first real request). Best-effort, non-blocking.
 async function warmUpModel() {
+    // Warm-up buys a loaded model and a pinned KV cache — both Ollama concepts. Against a
+    // hosted endpoint it buys one billed request for the word "ok", and against the browser
+    // bridge it would open a tab and type into it. Local only.
+    if (AI.on && !AI.isLocal()) return;
     if (!LOCAL_AI_MODEL) return;
     try {
         const sessionCtx = await getSessionCtx(LOCAL_AI_MODEL);
@@ -14631,8 +16224,11 @@ async function loadLocalAISettings() {
         
         window.PULSE_LAST_SYNC = data.pulseLastSync || null;
 
-        // Auto-detect and select the first available model if none is set
-        if (!LOCAL_AI_MODEL) {
+        // Auto-detect and select the first available model if none is set. Skipped when a
+        // non-local provider is active: probing 127.0.0.1 there is a guaranteed-failing
+        // request on a machine that may not have Ollama installed at all, and it would log
+        // a scary "not reachable" warning about an engine nothing is going to use.
+        if (!LOCAL_AI_MODEL && AI.isLocal()) {
             const models = await fetchOllamaModels(LOCAL_AI_URL);
             if (models.length > 0) {
                 LOCAL_AI_MODEL = pickPreferredOllamaModel(models);
@@ -14743,30 +16339,58 @@ function updateLocalAIBadge() {
     const chatIn = $('chatIn');
     
     if (!pill) return;
-    pill.style.display = 'flex';
-    
-    if (LOCAL_AI_MODEL) {
-        let cleanName = LOCAL_AI_MODEL.replace(/:latest$/i, '');
-        dot.style.background = '#22c55e';
+
+    // THE STATUS DOT IS NOT SHOWN. It earned a permanent place in the header when the
+    // provider was a choice: green meant the answer came from this machine, amber meant
+    // it did not, and that was worth a light you could not miss. There is no choice now
+    // — the relay is the only provider — so the dot had one state to report and reported
+    // it forever.
+    //
+    // Everything below still runs. The colour and the tooltip stay accurate against the
+    // live provider, so restoring the indicator is this one line back to 'flex'; nothing
+    // else has to be rebuilt. What is genuinely lost until then is the at-a-glance
+    // "nothing is configured" signal — that case now shows only in the placeholder and
+    // in whatever the first request comes back with.
+    pill.style.display = 'none';
+
+    if (AI.ready()) {
+        // Amber, not green, for anything that is not the local engine — it still means a
+        // different machine is answering, and the dot is the only always-visible statement
+        // of which one. It no longer reads as a warning, though: the relay is what this
+        // build ships with, so the tooltip names the connection instead of protesting it.
+        dot.style.background = AI.isLocal() ? '#22c55e' : '#f59e0b';
         dot.classList.add('on');
         statusTxt.style.display = 'none';
-        pill.title = `Connected — ${cleanName}`;
+        pill.title = AI.isLocal()
+            ? `Connected — ${AI.model().replace(/:latest$/i, '')}`
+            : 'Copilot connection';
         if (chatIn) chatIn.placeholder = `Ask AI anything...`;
     } else {
         dot.style.background = 'var(--warn)';
         dot.classList.remove('on');
         statusTxt.style.display = 'none';
-        pill.title = 'No Ollama model selected';
+        pill.title = AI.isLocal() ? 'No Ollama model selected' : `${AI.describe()} — open Settings (⚙)`;
         if (chatIn) chatIn.placeholder = `Ask AI anything...`;
     }
 }
 
-// Ollama-powered AI engine (streaming, OpenAI-compatible endpoint)
+// The AI engine (streaming). The request it builds is Ollama's /api/chat body, and that
+// stays true whichever backend serves it: ai-provider.js translates the body on the way
+// out and translates the answer back into Ollama's NDJSON on the way in, so everything
+// below this line — the budgeter, the trimmer, the instrumented stream, and every consumer
+// of it — is backend-agnostic without knowing it. The name is kept for the same reason.
 const OllamaAI = {
     completions: {
         create: async (req) => {
-            const model = LOCAL_AI_MODEL || req.model;
-            if (!model) throw new Error('No model selected. Open Settings (⚙) and pick an Ollama model.');
+            const model = AI.model() || req.model;
+            if (!model) {
+                throw new Error(AI.isLocal()
+                    ? 'No model selected. Open Settings (⚙) and pick an Ollama model.'
+                    : 'The AI provider is not configured. Open Settings (⚙) → AI Provider and finish setting it up.');
+            }
+            if (!AI.ready()) {
+                throw new Error(`${AI.describe()}. Open Settings (⚙) → AI Provider to finish setting it up.`);
+            }
 
             // Flatten any multimodal content — local models are text-only
             const messages = req.messages.map(m => {
@@ -14855,8 +16479,13 @@ const OllamaAI = {
             // before it reaches a CPU-bound model. Floored so a critical machine
             // still gets a usable prompt rather than a stub.
             const powerKnobs = Power.knobs;
+            // Exempt for the same reason getPromptCharBudget() is: this scale is a prefill
+            // brake, and an uploaded case is not prefilled here. Left in, this gate would
+            // undo the sizing the assembler just did and trim the evidence back off the end
+            // of a payload that was built to fit the upload exactly.
+            const prefillScale = logsUploadAsFile() ? 1 : powerKnobs.promptScale;
             const maxAllowedChars = Math.max(2000, Math.floor(
-                (budgetCtx - basePredict - 600) * CHARS_PER_TOKEN * powerKnobs.promptScale
+                (budgetCtx - basePredict - 600) * CHARS_PER_TOKEN * prefillScale
             ));
             if (totalChars > maxAllowedChars) {
                 // 1. Drop OLDER history first, but PROTECT the most recent turns so the model always
@@ -15009,25 +16638,20 @@ const OllamaAI = {
             });
             Power.markActive(180000);
 
-            const doOllamaFetch = (ctx) => fetch(`${baseUrl}/api/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                signal: req.signal || null,  // AbortController signal for per-case cancellation
-                body: JSON.stringify({
-                    model,
-                    messages,
-                    stream: true,
-                    keep_alive: -1, // Keep model loaded indefinitely for instant subsequent responses
-                    ...(isThinkingModelReq ? { think: false } : {}), // Disable internal thinking phase so output goes to content
-                    options: {
-                        num_ctx: ctx,
-                        temperature: 0.0,
-                        repeat_penalty: 1.1,
-                        top_p: 0.9,
-                        num_predict: numPredict // Use standard calculated budget, -1 can cause instant aborts
-                    }
-                })
-            });
+            const doOllamaFetch = (ctx) => AI.chat({
+                model,
+                messages,
+                stream: true,
+                keep_alive: -1, // Keep model loaded indefinitely for instant subsequent responses
+                ...(isThinkingModelReq ? { think: false } : {}), // Disable internal thinking phase so output goes to content
+                options: {
+                    num_ctx: ctx,
+                    temperature: 0.0,
+                    repeat_penalty: 1.1,
+                    top_p: 0.9,
+                    num_predict: numPredict // Use standard calculated budget, -1 can cause instant aborts
+                }
+            }, { signal: req.signal || null });  // AbortController signal for per-case cancellation
 
             // The fetch can reject with a bare TypeError "Failed to fetch" when the connection
             // never completes — Ollama not running, or a long CPU prefill whose pending request
@@ -15045,13 +16669,17 @@ const OllamaAI = {
                 } catch (netErr2) {
                     if (netErr2 && netErr2.name === 'AbortError') { perfRun.end({ error: 'aborted' }); throw netErr2; }
                     perfRun.end({ error: 'unreachable' });
-                    throw new Error(`Couldn't reach the local AI at ${baseUrl}. Make sure Ollama is running (try \`ollama serve\`) and that the model "${model}" is installed. If the log is very large, the analysis can take a while on a CPU — try again, lower Context Size in Settings (⚙), or remove very large files.`);
+                    throw new Error(AI.isLocal()
+                        ? `Couldn't reach the local AI at ${baseUrl}. Make sure Ollama is running (try \`ollama serve\`) and that the model "${model}" is installed. If the log is very large, the analysis can take a while on a CPU — try again, lower Context Size in Settings (⚙), or remove very large files.`
+                        : `Couldn't reach ${AI.describe()}. Check the endpoint, key and network in Settings (⚙) → AI Provider — or switch back to Ollama to keep working offline.`);
                 }
             }
             if (!res.ok) {
                 const err = await res.text();
-                // GPU/RAM exhaustion: retry once with a halved context window
-                if (/memory|oom|cudamalloc|allocate|vram/i.test(err) && numCtx > 8192) {
+                // GPU/RAM exhaustion: retry once with a halved context window. Local only —
+                // num_ctx is an Ollama allocation knob, so retrying a hosted 4xx with a
+                // smaller one re-sends the identical request and just burns a second call.
+                if (AI.isLocal() && /memory|oom|cudamalloc|allocate|vram/i.test(err) && numCtx > 8192) {
                     numCtx = Math.max(8192, Math.floor(numCtx / 2 / 1024) * 1024);
                     console.warn(`[Ollama Request] OOM detected — retrying with num_ctx: ${numCtx}`);
                     try { toast('GPU memory tight — retried with a smaller context. Consider lowering Context Size in Settings (⚙).', 'w', 6000); } catch (e) {}
@@ -15061,7 +16689,7 @@ const OllamaAI = {
                 if (!res.ok) {
                     const err2 = res.bodyUsed ? err : await res.text();
                     perfRun.end({ error: `http-${res.status}` });
-                    throw new Error(`Ollama error ${res.status}: ${err2}`);
+                    throw new Error(`${AI.isLocal() ? 'Ollama' : AI.describe()} error ${res.status}: ${err2}`);
                 }
             }
 
@@ -15178,6 +16806,7 @@ async function persistLearnedInsights(insights) {
 }
 
 function collectLogSignatureTerms(logs) {
+    logs = withoutNetworkCaptures(logs);   // a bearer token is not a learned signature — see withoutNetworkCaptures()
     const sigs = [];
     for (const l of (logs || []).slice(0, 8)) {
         const intel = l && l.panelIntel;
@@ -15963,7 +17592,10 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
             } else if (hasLogs && !needsDeepPulse) {
                 corePrompt = getConversationalPrompt(isSmallModel);
             } else {
-                corePrompt = getLeanQAPrompt(isSmallModel);
+                // A hosted model gets the short rules. The long ones exist to keep a small
+                // local model on the rails; against Copilot they buy nothing and cost the
+                // case ~8,000 characters of evidence out of the same prompt budget.
+                corePrompt = FRONTIER_RULES() ? getFrontierQAPrompt() : getLeanQAPrompt(isSmallModel);
             }
 
             // Detect ALL products present across the attached logs — filename heuristics
@@ -16205,11 +17837,37 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
                     const rankedLogs = [...nonHarLogs].sort((a, b) => scoreFileRelevance(b, terms, matcher, termWeights) - scoreFileRelevance(a, terms, matcher, termWeights));
                     // File inventory. Placed AFTER the query-focused digest below (reference material),
                     // so on a tiny model the evidence — not the 50-line file list — leads the window.
-                    let manifestSection = await buildFileManifest(rankedLogs.concat(harLogs), c.lastSentAt || 0, { compactAfter: isSmallModel ? 10 : 24 });
+                    let manifestSection = await buildFileManifest(rankedLogs.concat(harLogs), c.lastSentAt || 0, { compactAfter: logsUploadAsFile() ? 250 : (isSmallModel ? 10 : 24) });
                     // HAR network captures are JSON — the line scanner can't read them, so parse them
                     // into HTTP-transaction evidence (4xx/5xx, redirects, OAuth/SSO error codes, FQDN).
+                    //
+                    // THE ANALYSIS ALONE IS NOT THE CAPTURE. It caps at 25 transactions, and a HAR is
+                    // excluded from every other evidence path above (correctly — the line scanners
+                    // cannot read JSON), so on a HAR-only case it was the ONLY thing the model ever
+                    // saw. buildHarEvidence() supplies the rest: every transaction as one line of
+                    // fact, failures first, with static-asset bodies dropped rather than the tail of
+                    // the capture truncated.
+                    //
+                    // Both blocks are REDACTED. A HAR records whole requests, so it carries the
+                    // Authorization headers, cookies and — in an SSO capture — the id_tokens and
+                    // authorization codes of the session it recorded. Measured on a 30-transaction
+                    // capture, redaction took the analysis from 20,415 characters to 6,479: the
+                    // tokens were two thirds of it. Sending those to a third-party chat service is a
+                    // data-loss incident dressed up as a support ticket, and the model needs none of
+                    // them to find a redirect loop.
+                    //
+                    // The file is renamed .txt because Copilot's upload control lists
+                    // .txt/.log/.json/.csv/.md and does not list .har — measured against the live
+                    // control, not assumed.
                     for (const l of harLogs) {
-                        try { manifestSection += buildHarAnalysis(l.content || "", l.name || "capture.har"); } catch (e) { console.warn('HAR analysis failed', e); }
+                        const shownName = harTxtName(l.name || "capture.har");
+                        try { manifestSection += redactHarSecrets(buildHarAnalysis(l.content || "", shownName)); } catch (e) { console.warn('HAR analysis failed', e); }
+                        try {
+                            const distilled = redactHarSecrets(buildHarEvidence(l.content || "", shownName));
+                            if (distilled) {
+                                manifestSection += `\n\n=== FILE: ${shownName} ===\n[Network capture, originally "${l.name || "capture.har"}". Renamed .txt for upload; credentials, cookies and tokens replaced with [REDACTED …] markers; static-asset response bodies omitted.]\n${distilled}\n=== END: ${shownName} ===\n`;
+                            }
+                        } catch (e) { console.warn('HAR evidence failed', e); }
                     }
                     // Secondary evidence: the CROSS-LOG INCIDENT INDEX (per-line failure citations) + the
                     // LOG PATTERN PROFILE (summary counts). These are FAILURE-keyword driven — invaluable
@@ -16219,8 +17877,10 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
                     const incidentIndex = await buildCrossLogIncidentIndex(nonHarLogs, { patternMode: true });
                     const patternProfile = await buildLogPatternProfile(nonHarLogs);
                     let secondary = isSmallModel ? (incidentIndex + patternProfile) : (patternProfile + incidentIndex);
-                    const secondaryCap = isSmallModel ? 2200 : 24000;
-                    if (secondary.length > secondaryCap) secondary = secondary.slice(0, secondaryCap) + "\n[secondary failure-index truncated — the query-focused evidence above is the primary source for this question.]\n";
+                    // Same bound, same reason as buildLogAnalysisContext: sized against what
+                    // carries it, and cut on a line boundary so no row is left half-written.
+                    const secondaryCap = logsUploadAsFile() ? 250000 : (isSmallModel ? 2200 : 24000);
+                    if (secondary.length > secondaryCap) secondary = trimFailureIndex(secondary, secondaryCap);
                     // Concentrate the budget genuinely left over onto the top-ranked files, led by their
                     // query-focused evidence, so a 50- or 100-file bundle can no longer bury the one file
                     // that holds the answer past the model's context window. ORDER = symptom → digest →
@@ -16346,7 +18006,7 @@ ${imgContext}`;
             modelMessages = [{ role: 'system', content: sysPrompt }, ...history];
         }
 
-        const selectedModel = LOCAL_AI_MODEL || null;
+        const selectedModel = AI.model() || null;
 
         // Create a per-case AbortController so navigating away or switching cases
         // does NOT cancel the ongoing stream — only an explicit stop would.
@@ -16405,7 +18065,7 @@ ${imgContext}`;
         };
 
         // Detect if this is a thinking/reasoning model (Gemma 4, QwQ, etc.) (substring match to support GGUF/custom names)
-        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(AI.model() || '');
 
         const renderUpdate = () => {
             if (!pendingRender) return;
@@ -16757,6 +18417,31 @@ function exportSession() {
 
 // --- BOOT ---
 $('btnSend').onclick = send;
+
+// Take the engineer back up to Meeting Notes and leave them ready to type. Two things
+// have to happen in the right order for that to work:
+//
+//   1. ensureChatScrollListener() first, so _chatStick registers the move away from the
+//      bottom. Without it, a stream that is still writing would scroll the notes straight
+//      back off screen a moment after they arrived — the listener is normally bound by
+//      addMsg(), which has not necessarily run yet.
+//   2. focus({ preventScroll: true }), because focusing an off-screen control makes the
+//      browser jump to it INSTANTLY, which cancels the smooth scroll half way and lands
+//      the view somewhere nobody asked for. Suppress that and let the scroll finish.
+if ($('btnJumpNotes')) {
+    $('btnJumpNotes').onclick = () => {
+        ensureChatScrollListener();
+        const chat = $('chatMsgs');
+        if (chat) chat.scrollTo({ top: 0, behavior: 'smooth' });
+        const notes = $('meetingNotes');
+        if (!notes) return;
+        notes.focus({ preventScroll: true });
+        // Caret at the END. The box ships pre-filled with headings, and dropping the caret
+        // at position 0 would have every note typed in front of them.
+        try { notes.setSelectionRange(notes.value.length, notes.value.length); } catch (e) { /* not fatal */ }
+    };
+}
+
 $('chatIn').oninput = function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; };
 $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
 
@@ -16797,7 +18482,14 @@ $('chatIn').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.prevent
     }
 });
 
-$('btnSyncSF').onclick = async () => {
+/* THE SYNC ITSELF, as a function rather than only a click handler.
+ *
+ * Opening a case from the Open Cases queue runs this straight afterwards, and it has to be
+ * the SAME sync the button runs — a second implementation beside it would drift, and the
+ * one that drifted would be the one nobody presses by hand and therefore nobody notices.
+ * The button below just calls it.
+ */
+async function syncFromSalesforce() {
     if (!isChromeExtension()) {
         toast('Salesforce sync requires the Chrome extension', 'w');
         return;
@@ -16874,13 +18566,42 @@ $('btnSyncSF').onclick = async () => {
             renderLogs();
             const posts = data.feedItemCount ? ` (${data.feedItemCount} feed posts)` : '';
             toast(`Synced Case ${data.caseNumber || 'data'}${posts}`, 's');
+
+            // WHAT THE SCRAPE ACTUALLY READ, on a sync that WORKED. The diagnostics block
+            // below only prints when nothing came back at all, which is the one case where
+            // this was never the question: replies to internal notes went missing for two
+            // builds while the chain, the fields and the post count all looked healthy, and
+            // there was nothing anywhere to compare against the case on screen. Now there is.
+            const dg = (data && data.diagnostics) || {};
+            console.log(`[Salesforce sync] ${data.feedItemCount || 0} feed posts, `
+                + `${dg.feedCommentsSeen || 0} replies read`
+                + (dg.feedCommentsOrphaned ? `, ${dg.feedCommentsOrphaned} reply(ies) found but not matched to a post` : '')
+                + `. If the case shows replies and this says 0, the feed layout has changed — send this line with the report.`);
             // A half-sync is worth saying out loud. Either half missing is recoverable by hand,
             // but only if the engineer knows which half it was — silently importing a chain with
             // no case number looks identical to a sync that simply did not run.
             if (!gotFields) {
                 toast('Email chain synced, but no case fields were found on this layout — fill in Case Number and the rest by hand', 'w', 8000);
             } else if (!gotChain) {
-                toast('Case fields synced, but no email chain was found — open the case Feed / Emails tab and sync again', 'w', 8000);
+                // The sync opens the Feed sub-tab itself now (activateFeedTab in content.js),
+                // so "open the Feed tab and sync again" is the wrong instruction whenever it
+                // already did — and telling someone to do a thing that has just been done for
+                // them is how they stop believing the messages. What is left to say depends on
+                // how far it got.
+                const ft = data.feedTab || {};
+                const WHY_NO_CHAIN = {
+                    // Opened for them, and still nothing on screen — usually a feed that was
+                    // still mounting when the loader looked.
+                    opened: 'the Feed tab was opened but no posts rendered — give it a moment and sync again',
+                    'clicked-no-feed': 'the Feed tab was opened but no posts rendered — give it a moment and sync again',
+                    // The feed was already in front of them, so there is nothing to open and
+                    // nothing to retry: this case has no chain on it.
+                    'already-showing': 'the case Feed has no posts to read',
+                    'already-active': 'the case Feed has no posts to read',
+                    // Nothing on the layout named itself the feed, so this one is still manual.
+                    'no-feed-tab': 'no Feed tab could be found on this layout — open the case Feed / Emails tab yourself and sync again'
+                };
+                toast(`Case fields synced, but ${WHY_NO_CHAIN[ft.reason] || 'no email chain was found — open the case Feed / Emails tab and sync again'}`, 'w', 8000);
             }
             // If the feed loader hit a cap rather than genuinely running out of
             // posts, say so — a silently-truncated chain would quietly skew every
@@ -16916,7 +18637,9 @@ $('btnSyncSF').onclick = async () => {
             toast(`Sync failed: ${msg.slice(0, 120) || 'unknown error'}`, 'e', 9000);
         }
     }
-};
+}
+
+$('btnSyncSF').onclick = () => syncFromSalesforce();
 
 // Pull the JIRA issue open in the active tab. Mirrors the Salesforce sync: message
 // the content script, and if it is not there yet (the tab was already open when the
@@ -17097,6 +18820,27 @@ const renderLogs = () => {
     if (!list || !none) return;
     const c = cases.find(x => x.id === activeCaseId);
     if (!c) return;
+
+    // THE LOGS SECTION ONLY EXISTS ONCE THERE ARE LOGS. Most cases never carry one, and an
+    // empty "Logs" section inside Case Info was a permanent row that did nothing but take
+    // space and invite a click. Files arrive through the composer's attach button (or by
+    // dropping them on the app), so nothing depends on this section being visible to get
+    // logs in — it is where you MANAGE them once they are in, and where Analyse Now lives.
+    const logsPanel = $('panelR');
+    if (logsPanel) {
+        const hasLogs = c.logs.length > 0;
+        logsPanel.style.display = hasLogs ? '' : 'none';
+        // Appearing collapsed would hide Analyse Now behind another click at exactly the
+        // moment the engineer wants it, so the section opens itself the first time files land.
+        if (hasLogs && logsPanel.dataset.autoOpened !== '1') {
+            logsPanel.dataset.autoOpened = '1';
+            const body = $('bodyR');
+            if (body) body.style.display = '';
+            if ($('iconR')) $('iconR').textContent = '▼';
+            logsPanel.classList.remove('collapsed');
+        }
+        if (!hasLogs) logsPanel.dataset.autoOpened = '';
+    }
     const hasCaseInfo = c.ci && (c.ci.caseNum || c.ci.issueSummary);
     none.textContent = hasCaseInfo ? 'Upload logs if available for deeper analysis.' : 'No files uploaded yet.';
     none.style.display = c.logs.length > 0 ? 'none' : 'block';
@@ -17681,6 +19425,25 @@ $('btnAnalyse').onclick = async () => {
         $('panelL').classList.add('collapsed');
     }
 
+    // CANCELLING STOPS THE RUN THAT IS IN FLIGHT, and the case it belongs to is captured
+    // here rather than read at click time: the analysis is pinned to c.id, and an engineer
+    // who switches tabs while it runs would otherwise cancel whatever case they had moved to.
+    // The controller is created downstream by send(), so it is looked up on click, not now.
+    const cancelBtn = $('btnCancelRun');
+    if (cancelBtn) {
+        cancelBtn.style.display = '';
+        cancelBtn.onclick = () => {
+            const ctrl = streamControllers.get(c.id);
+            if (ctrl) { try { ctrl.abort(); } catch (e) { /* already finished */ } }
+            cancelBtn.style.display = 'none';
+            const lbl = $('progLbl');
+            const fill = $('progFill');
+            if (lbl) lbl.textContent = 'Analysis cancelled';
+            if (fill) { fill.style.animation = 'none'; fill.style.width = '100%'; fill.style.background = 'var(--txt2, #9aa4b2)'; }
+            toast('Log analysis cancelled', 'i');
+        };
+    }
+
     // Yield control to let the browser paint the "Analysing logs..." progress indicator
     await paintYield();
 
@@ -17690,8 +19453,15 @@ $('btnAnalyse').onclick = async () => {
     // the user to whatever tab they open while it runs.
     await send('Analyse', true, { caseId: c.id });
 
-    // Mark as completed
-    if (pLbl && pFill) {
+    // The run is over either way, so the escape hatch goes.
+    const cancelled = cancelBtn && cancelBtn.style.display === 'none' && $('progLbl')
+        && $('progLbl').textContent === 'Analysis cancelled';
+    if (cancelBtn) { cancelBtn.style.display = 'none'; cancelBtn.onclick = null; }
+
+    // Mark as completed — but NEVER over a cancellation. An aborted send() still returns
+    // normally here, and stamping "Log Analysis Completed" over the engineer's own cancel
+    // would report a finished analysis that never finished.
+    if (pLbl && pFill && !cancelled) {
         pLbl.textContent = "Log Analysis Completed";
         pFill.style.animation = 'none';
         pFill.style.transform = 'none';
@@ -17702,6 +19472,12 @@ $('btnAnalyse').onclick = async () => {
         setTimeout(() => {
             if (pWrap) pWrap.style.display = 'none';
         }, 6000);
+    } else if (cancelled) {
+        // The cancelled label needs to clear itself too, or the progress strip sits there
+        // reading "Analysis cancelled" over the next thing the engineer does.
+        setTimeout(() => {
+            if (pWrap) pWrap.style.display = 'none';
+        }, 4000);
     }
 
     $('chatIn').focus();
@@ -18813,7 +20589,29 @@ const wireQuickAction = (id, fn) => {
 };
 wireQuickAction('qaCaseSummary', generateCaseSummary);
 wireQuickAction('qaDraftEmail', draftCustomerEmail);
-wireQuickAction('qa306090', generate306090Analysis);
+/* "How to get started" is two pages: getting the case in, then working with logs. Wrapping
+ * rather than stopping at the ends — with two pages a disabled arrow is just a dead control. */
+(function wireHowToPager() {
+    const pages = [...document.querySelectorAll('[data-howto-page]')];
+    const dots = [...document.querySelectorAll('[data-howto-dot]')];
+    if (pages.length < 2) return;
+    let at = 0;
+    const show = (i) => {
+        at = (i + pages.length) % pages.length;
+        pages.forEach((p, n) => { p.style.display = n === at ? '' : 'none'; });
+        dots.forEach((d, n) => { d.classList.toggle('is-on', n === at); });
+    };
+    const prev = $('howtoPrev');
+    const next = $('howtoNext');
+    if (prev) prev.onclick = () => show(at - 1);
+    if (next) next.onclick = () => show(at + 1);
+    dots.forEach((d, n) => { d.style.cursor = 'pointer'; d.onclick = () => show(n); });
+    show(0);
+})();
+
+// 30/60/90 has no button any more — see the note where it used to live in the HTML. The
+// generator itself is KEPT and still reachable, because asking for a 30/60/90 in the chat
+// is now the way in; deleting it would delete the analysis, not just the shortcut.
 wireQuickAction('qaProbRes', generateProblemResolutionSummary);
 // Exporting the session stays on the ⋮ menu (btnExport) — it was listed in both places.
 wireQuickAction('qaJira', openJiraReview);
@@ -18997,21 +20795,56 @@ function extractForensicRootCauseForJira(c) {
 
         const statements = [];
 
-        // "| <finding> | ROOT CAUSE |" rows of the Symptom-vs-Source table.
+        // ROWS OF THE SYMPTOM-VS-SOURCE TABLE, whichever column carries the classification.
+        //
+        // This used to read only the LAST cell, which assumed "| <finding> | ROOT CAUSE |".
+        // A hosted model writes the table the other way round — "| Root Cause | Unknown
+        // HostException resolving A006413… | Primary causal event |" — so the last cell said
+        // "Primary causal event", nothing matched, and the whole root-cause extraction came
+        // back empty. With nothing to anchor on, JIRA log selection fell through to error
+        // DENSITY and picked audit.log, whose thousands of repeated SUCCESS lines outnumber
+        // the handful of lines that actually explain the case.
         for (const row of text.split('\n')) {
-            const mm = row.match(/^\s*\|(.+)\|([^|]*)\|\s*$/);
-            if (mm && /root\s*cause/i.test(mm[2]) && !/^[\s:\-]+$/.test(mm[1])) {
-                statements.push({ text: mm[1], w: 6 });
+            if (!/^\s*\|/.test(row)) continue;
+            const cells = row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(s => s.trim());
+            if (cells.length < 2) continue;
+            if (cells.every(cl => /^[\s:\-]*$/.test(cl))) continue;          // separator row
+            // A cell that is ONLY the words "root cause" is a classification label; the
+            // finding is every other cell on that row.
+            const marker = cells.findIndex(cl => /^\**\s*root\s*cause\s*\**$/i.test(cl));
+            if (marker >= 0) {
+                const rest = cells.filter((_, i) => i !== marker).join(' ').trim();
+                if (rest) statements.push({ text: rest, w: 6 });
+                continue;
+            }
+            if (/root\s*cause/i.test(cells[cells.length - 1])) {
+                const rest = cells.slice(0, -1).join(' ').trim();
+                if (rest) statements.push({ text: rest, w: 6 });
             }
         }
-        // The "**Root Cause:** <one sentence>" verdict.
-        const verdict = text.match(/\*\*\s*Root Cause\s*:?\s*\*\*\s*([^\n]+)/i);
-        if (verdict) statements.push({ text: verdict[1], w: 5 });
+        // The "Root Cause: <one sentence>" verdict. The bold markers are OPTIONAL and a
+        // leading blockquote ">" is tolerated — the observed verdict arrived as
+        // "**root cause:** > Device-side DNS resolution failure…", which the old
+        // bold-only pattern matched but a plain "Root Cause: …" heading did not.
+        // "Root Cause vs Symptom" is a section title, not a verdict, so it is excluded.
+        const verdict = text.match(/(?:^|\n)[ \t>]*\**\s*Root Cause\b(?!\s*vs)\s*:?\s*\**[ \t>]*([^\n]{4,})/i);
+        if (verdict) statements.push({ text: verdict[1].replace(/^[>\s]+/, ''), w: 5 });
         // The Propagation Path chain — step 1 is the earliest causal error.
         const prop = text.match(/#+\s*(?:\d+\.\s*)?(?:THE\s+)?Propagation Path[^\n]*\n([\s\S]*?)(?=\n#+\s|\n\*\*\s*Root Cause|$)/i);
         if (prop) {
-            const steps = prop[1].split('\n').filter(l => /^\s*\d+[.)]\s+\S/.test(l));
-            steps.forEach((s, idx) => statements.push({ text: s.replace(/^\s*\d+[.)]\s*/, ''), w: idx === 0 ? 5 : 3 }));
+            let steps = prop[1].split('\n')
+                .filter(l => /^\s*\d+[.)]\s+\S/.test(l))
+                .map(l => l.replace(/^\s*\d+[.)]\s*/, ''));
+            if (!steps.length) {
+                // Rendered as a FENCED CODE BLOCK of alternating fact and arrow lines rather
+                // than a numbered list — which is what the relay now returns, because that is
+                // how the model actually formats the chain. The arrows are punctuation
+                // between steps, not steps.
+                steps = prop[1].replace(/```[a-zA-Z]*\n?/g, '\n').split('\n')
+                    .map(l => l.trim())
+                    .filter(l => l && !/^[-–—>↓v^|\s]+$/.test(l));
+            }
+            steps.forEach((s, idx) => statements.push({ text: s, w: idx === 0 ? 5 : 3 }));
         }
         if (!statements.length) continue;
 
@@ -19039,10 +20872,27 @@ function extractForensicRootCauseForJira(c) {
             grab(/\.(?:log|txt|json|xml|har|out|err|trace|csv)\s*:\s*(\d{1,8})\b/gi);
         }
 
+        // THE FILE THE REPORT ITSELF NAMED. This was being thrown away: "mobicontrol.log:
+        // Line 4366" gave up its line number and lost the file it belonged to, leaving the
+        // ticket to work out from vocabulary alone which log to quote — which it got wrong,
+        // because an audit log that records the server hostname on every successful
+        // connection looks far more "relevant" by word count than the one file holding the
+        // exception. The report already answered the question; this reads the answer.
+        const files = new Map();
+        for (const st of statements) {
+            const clean = jiraUnmarkdown(st.text);
+            for (const mm of clean.matchAll(/([A-Za-z0-9_][\w.\-]{0,80}\.(?:log|txt|json|xml|har|out|err|trace|csv))\b/gi)) {
+                const base = String(mm[1]).split(/[\\/]/).pop().toLowerCase();
+                if (!base) continue;
+                if (!files.has(base) || files.get(base) < st.w) files.set(base, st.w);
+            }
+        }
+
         const needles = [...byNeedle.values()].sort((a, b) => (b.w - a.w) || (b.s.length - a.s.length));
         const lineRefs = [...refs.entries()].map(([n, w]) => ({ n, w }));
-        if (!needles.length && !lineRefs.length) continue;
-        return { needles: needles.slice(0, 24), lineRefs };
+        const fileRefs = [...files.entries()].map(([name, w]) => ({ name, w })).sort((a, b) => b.w - a.w);
+        if (!needles.length && !lineRefs.length && !fileRefs.length) continue;
+        return { needles: needles.slice(0, 24), lineRefs, files: fileRefs };
     }
     return null;
 }
@@ -19342,7 +21192,13 @@ function scoreJiraLogRelevance(log, issueTerms, cited, forensic) {
             let rs = 0, rh = 0;
             const cmp = low || (low = scan.toLowerCase());
             for (const nd of rootNeedles) if (cmp.includes(nd.low)) { rs += nd.w; rh++; }
-            if (rh >= 2 || rs >= 8) rootAnchors.push({ idx: i, score: Math.min(rs, 60) });
+            // TWO independent fragments, or one exceptionally strong combination. The bar
+            // for a single fragment was 8, which is exactly what one high-weight needle
+            // scores on its own — so every audit line that merely NAMED the server host
+            // qualified as root-cause evidence, and 3,000 of them buried the one line that
+            // actually carried the exception. Naming the host the case is about is not a
+            // finding; naming it alongside the failure is.
+            if (rh >= 2 || rs >= 12) rootAnchors.push({ idx: i, score: Math.min(rs, 60) });
         }
         const isErr = JIRA_ERROR_LINE_RX.test(scan);
         if (isErr) {
@@ -19383,7 +21239,14 @@ function scoreJiraLogRelevance(log, issueTerms, cited, forensic) {
     if (cited) score += cited.count * 40;
     // A file that actually contains the forensic root-cause text IS the file the
     // ticket should quote, whatever the issue-term arithmetic says.
-    score += Math.min(rootAnchors.length, 200) * 3;
+    //
+    // Scored on the STRENGTH of the best evidence, not on how many lines carry some of it.
+    // Counting anchors rewarded repetition: an audit log that writes the server hostname on
+    // every successful connection produced hundreds of weak "root anchors" and buried the
+    // one file holding the exception, which had three strong ones. Three lines that name the
+    // failure are worth more than a thousand that merely mention the host.
+    const strongestRoot = rootAnchors.reduce((m, a) => (a.score > m ? a.score : m), 0);
+    score += strongestRoot * 10 + Math.min(rootAnchors.length, 25) * 1;
     score += Math.min(errCount, 500) * 0.05;
     // Files with (almost) no timestamped entries — file listings, XML preference dumps —
     // are poor JIRA evidence; strongly prefer real timestamped logs.
@@ -19419,10 +21282,42 @@ function selectPrimaryJiraLog(c, triageContent, issueText, forensic) {
     if (!logs.length) return null;
     const issueTerms = deriveJiraIssueTerms(issueText);
     const cited = parseTriageCitations(triageContent);
+
+    // THE REPORT'S OWN CHOICE OUTRANKS THE ARITHMETIC. When the forensic analysis cites a
+    // file by name ("mobicontrol.log:Line 4366"), that is a direct statement about which log
+    // explains the case — far better evidence than any keyword score, and it is not a close
+    // call. Relevance scoring still decides between files the report named, and still decides
+    // everything when it named none.
+    const namedByReport = new Set(
+        (forensic && Array.isArray(forensic.files) ? forensic.files : []).map(f => f.name)
+    );
+
+    // RANKED IN TIERS, because these are not comparable quantities and adding them up lets
+    // the weakest evidence outvote the strongest:
+    //
+    //   1. the file the report NAMED           — a direct statement, not an inference
+    //   2. any file carrying root-cause TEXT   — verified evidence beats keyword arithmetic
+    //   3. relevance score                     — decides within a tier, as before
+    //
+    // Tier 2 is what this comment always claimed and the arithmetic never enforced. Measured
+    // on the failing case: audit.log scored 256 on term hits alone with ZERO root anchors,
+    // mobicontrol.log scored 228 while holding the one line containing the exception. Summed,
+    // the file that explained nothing won by 28 points. Tiered, it cannot win at all.
     let best = null;
     for (const log of logs) {
-        const rel = scoreJiraLogRelevance(log, issueTerms, cited.get(jiraLogBaseName(log.name).toLowerCase()), forensic);
-        if (!best || rel.score > best.score) best = { log, ...rel };
+        const base = jiraLogBaseName(log.name).toLowerCase();
+        const rel = scoreJiraLogRelevance(log, issueTerms, cited.get(base), forensic);
+        const cand = {
+            log,
+            named: namedByReport.has(base) ? 1 : 0,
+            hasRootEvidence: (rel.rootAnchors && rel.rootAnchors.length) ? 1 : 0,
+            ...rel
+        };
+        const better = !best
+            || cand.named > best.named
+            || (cand.named === best.named && cand.hasRootEvidence > best.hasRootEvidence)
+            || (cand.named === best.named && cand.hasRootEvidence === best.hasRootEvidence && cand.score > best.score);
+        if (better) best = cand;
     }
     return best;
 }
@@ -19438,10 +21333,75 @@ function jiraIsNewLogEntry(s) {
     return /^(\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}|\d{2}-\d{2} \d{2}:\d{2}:\d{2}|\[\d{1,2}:\d{2}:\d{2}[.:,]\d{1,3}\]|\d{1,2}:\d{2}:\d{2}[.:,]\d{1,3}[\s|]|MSI \([^)\n]{1,12}\) \([^)\n]{1,12}\) \[\d{1,2}:\d{2}:\d{2}|Action (?:start |ended )?\d{1,2}:\d{2}:\d{2}[:.]|CustomAction \S|Calling custom action |SFXCA: |=== )/.test(s || '');
 }
 
-// Build the verbatim Log Analysis evidence from ONE log: cluster the anchor lines,
-// expand each cluster to whole log entries (keeping multi-line payloads such as the
-// APN "writeprivateprofstring" script intact), then emit the strongest windows in
-// chronological order within a fixed size budget.
+// A log ENTRY is the unit, not a line. One `[timestamp] ERROR …` entry can be a single line
+// or — for a .NET exception dump, an MSI script body, a WCF parameter dump — a hundred and
+// twenty. Every window below is expressed in whole entries, because half an exception is not
+// weaker evidence than a whole one, it is MISLEADING evidence: the observed failure quoted a
+// JIRA "Log Analysis" field that began mid-stack at "--- End of stack trace ---" and ran on
+// into unrelated heartbeat traffic, which reads as a finding and is not one.
+//
+// Bounded so a corrupt file that never writes another timestamp cannot make one "entry" out
+// of the whole log.
+const JIRA_ENTRY_MAX_LINES = 400;
+
+// Some attached files have no entry structure at all — an exported XML preference tree, a
+// file listing, a CSV. There is no header to snap to there, so a walk that runs to its guard
+// would quote four hundred lines around one hit. Those files get a fixed radius instead,
+// which keeps the excerpt the size an engineer can read.
+const JIRA_UNSTRUCTURED_RADIUS = 20;
+
+// Does this file write log ENTRIES at all? Asked once per file and cached, because the answer
+// decides how BOTH ends of every window are found and the two must agree — an entry that
+// starts at a header and ends four hundred lines later at the guard is not an entry, it is a
+// walk that gave up. Sampled across the whole file rather than from its head: a bundle's
+// first lines are often a banner, and a HAR or a CSV has no headers anywhere.
+const _jiraStructured = new WeakMap();
+function jiraHasEntryStructure(lines) {
+    if (!Array.isArray(lines) || !lines.length) return false;
+    const cached = _jiraStructured.get(lines);
+    if (cached !== undefined) return cached;
+    const step = Math.max(1, Math.floor(lines.length / 300));
+    let seen = 0, sampled = 0;
+    for (let i = 0; i < lines.length && sampled < 300; i += step) {
+        sampled++;
+        if (jiraIsNewLogEntry(lines[i])) seen++;
+    }
+    // One header in three hundred sampled lines is not a structured log; it is a dump with a
+    // date in it. Two percent is comfortably below the density of even a very chatty
+    // multi-line-entry log and comfortably above noise.
+    const structured = sampled > 0 && (seen / sampled) >= 0.02;
+    _jiraStructured.set(lines, structured);
+    return structured;
+}
+
+function jiraEntryStart(lines, i) {
+    const from = Math.max(0, Math.min(i, lines.length - 1));
+    if (!jiraHasEntryStructure(lines)) return Math.max(0, from - JIRA_UNSTRUCTURED_RADIUS);
+    let s = from;
+    let guard = 0;
+    while (s > 0 && !jiraIsNewLogEntry(lines[s]) && guard++ < JIRA_ENTRY_MAX_LINES) s--;
+    // The top of the file is a real boundary; anything else that is not a header means the
+    // walk gave up rather than arrived, and a fixed radius beats four hundred lines of it.
+    if (s === 0 || jiraIsNewLogEntry(lines[s])) return s;
+    return Math.max(0, from - JIRA_UNSTRUCTURED_RADIUS);
+}
+function jiraEntryEnd(lines, i) {
+    const from = Math.max(0, Math.min(i, lines.length - 1));
+    if (!jiraHasEntryStructure(lines)) return Math.min(lines.length - 1, from + JIRA_UNSTRUCTURED_RADIUS);
+    let e = from;
+    let guard = 0;
+    while (e + 1 < lines.length && !jiraIsNewLogEntry(lines[e + 1]) && guard++ < JIRA_ENTRY_MAX_LINES) e++;
+    // Ran to the guard rather than to the next entry: this entry is longer than any real one.
+    // It is CLAMPED, not abandoned — the window still opens on the entry's real header, and
+    // the size budget below cuts the tail with a notice that says it did. Falling back to a
+    // radius around the anchor here would put the excerpt back where it started: opening
+    // mid-stack on whichever frame happened to match.
+    return e;
+}
+
+// Build the verbatim Log Analysis evidence from ONE log: fold the anchor lines onto the log
+// ENTRIES that contain them, group adjacent entries into windows, and emit the strongest
+// windows in chronological order within a fixed size budget.
 function buildJiraLogEvidence(log, sel) {
     const lines = jiraLogLines(log);
     if (!lines.length || !sel) return '';
@@ -19472,39 +21432,83 @@ function buildJiraLogEvidence(log, sel) {
     if (!byIdx.size) for (const a of (sel.errorAnchors || [])) bump(a, false);
     if (!byIdx.size) return '';
 
-    const sorted = [...byIdx.values()].sort((a, b) => a.idx - b.idx);
+    // FOLD ONTO ENTRIES. An anchor that lands on the fourteenth frame of a stack trace is
+    // evidence about the ENTRY that threw, not about that frame, and scoring it per line is
+    // what let a 122-line dump be represented by whichever line happened to sit in the middle
+    // of it.
+    const entries = new Map();   // entry start index -> { start, end, score, root, hits }
+    for (const a of [...byIdx.values()].sort((x, y) => x.idx - y.idx)) {
+        const start = jiraEntryStart(lines, a.idx);
+        let e = entries.get(start);
+        if (!e) { e = { start, end: jiraEntryEnd(lines, start), score: 0, root: 0, hits: 0 }; entries.set(start, e); }
+        if (a.score > e.score) e.score = a.score;
+        if (a.root  > e.root)  e.root  = a.root;
+        e.hits++;
+    }
+
+    const ordered = [...entries.values()].sort((a, b) => a.start - b.start);
+
+    // GROUP BY SEEDING FROM THE STRONGEST, NOT BY CHAINING FROM THE FIRST.
+    //
+    // Walking the entries in order and joining anything within eight lines of the previous
+    // one looks like grouping and is really a chain reaction: on a Management Service log the
+    // DEBUG device-presence entries are one line each and every one of them anchors weakly
+    // (a NetMQ payload names "AndroidEnterprise" and "AndroidWork"), so entry 100 joined 101
+    // joined 102 … all the way into the exception entry at 394, and the "window" was four
+    // hundred lines of heartbeat traffic that happened to end at the evidence. Trimmed to fit
+    // the field, it showed the heartbeats and never reached the exception at all.
+    //
+    // So a window is SEEDED by the strongest entry left and grows only into neighbours that
+    // are themselves strong — at least half the seed's score. Ordinary traffic sitting next
+    // to a failure is context, not evidence, and it does not get to carry the window away.
+    const ABSORB_RATIO = 0.5;
+    const GROUP_GAP = 8;
+    const strength = (e) => (e.root * 1000) + e.score;
+    const seeds = [...ordered].sort((x, y) => strength(y) - strength(x));
+    const taken = new Set();
     const clusters = [];
-    let cur = null;
-    for (const a of sorted) {
-        if (cur && a.idx - cur.end <= 8) {
-            cur.end = a.idx;
-            cur.score += a.score;
-            cur.rootScore += a.root;
-        } else {
-            cur = { start: a.idx, end: a.idx, score: a.score, rootScore: a.root };
-            clusters.push(cur);
+    for (const seed of seeds) {
+        if (taken.has(seed.start)) continue;
+        taken.add(seed.start);
+        const cl = { start: seed.start, end: seed.end, score: seed.score, root: seed.root, entries: 1 };
+        const bar = strength(seed) * ABSORB_RATIO;
+        const pos = ordered.indexOf(seed);
+        for (let i = pos - 1; i >= 0; i--) {
+            const e = ordered[i];
+            if (taken.has(e.start) || cl.start - e.end > GROUP_GAP || strength(e) < bar) break;
+            taken.add(e.start); cl.start = e.start; cl.entries++;
+            if (e.score > cl.score) cl.score = e.score;
         }
+        for (let i = pos + 1; i < ordered.length; i++) {
+            const e = ordered[i];
+            if (taken.has(e.start) || e.start - cl.end > GROUP_GAP || strength(e) < bar) break;
+            taken.add(e.start); cl.end = Math.max(cl.end, e.end); cl.entries++;
+            if (e.score > cl.score) cl.score = e.score;
+        }
+        clusters.push(cl);
     }
+    clusters.sort((a, b) => a.start - b.start);
 
-    // Expand each window with real context first, then snap outward to entry
-    // boundaries so multi-line payloads (stack traces, script bodies) stay intact.
-    // A bare snap alone gives a one-entry excerpt no engineer can read in isolation.
-    const CTX_BEFORE = 15, CTX_AFTER = 18;
+    // A window is already whole entries, so there is no padding to add and no boundary to
+    // snap to. What a SHORT window still needs is somewhere to sit: on a log whose entries
+    // are one line each, a single-entry window is a single line and tells an engineer
+    // nothing. A dump that is already long is self-contained and gets nothing added.
+    const CONTEXT_ENTRIES = 2;
+    const MIN_WINDOW_LINES = 6;
     for (const cl of clusters) {
-        let s = Math.max(0, cl.start - CTX_BEFORE), guard = 0;
-        while (s > 0 && !jiraIsNewLogEntry(lines[s]) && guard++ < 15) s--;
-        cl.start = s;
-        let e = Math.min(lines.length - 1, cl.end + CTX_AFTER);
-        guard = 0;
-        while (e + 1 < lines.length && !jiraIsNewLogEntry(lines[e + 1]) && guard++ < 40) e++;
-        cl.end = e;
+        if (cl.end - cl.start + 1 >= MIN_WINDOW_LINES) continue;
+        for (let n = 0; n < CONTEXT_ENTRIES && cl.start > 0; n++) cl.start = jiraEntryStart(lines, cl.start - 1);
+        for (let n = 0; n < CONTEXT_ENTRIES && cl.end + 1 < lines.length; n++) cl.end = jiraEntryEnd(lines, cl.end + 1);
     }
 
-    const render = (cl) => {
+    const render = (from, to) => {
         const out = [];
-        for (let i = cl.start; i <= cl.end && i < lines.length; i++) {
+        for (let i = from; i <= to && i < lines.length; i++) {
             let ln = lines[i] == null ? '' : String(lines[i]);
-            if (ln.length > 400) ln = ln.slice(0, 400) + ' …';
+            // A stack frame is never near this long; a JSON payload can be. Cutting at 400
+            // was mangling ordinary log lines, so the cap is now a size only a data dump
+            // reaches — and it still says when it fired.
+            if (ln.length > 2000) ln = ln.slice(0, 2000) + ' …';
             out.push(ln);
         }
         while (out.length && !out[out.length - 1].trim()) out.pop();
@@ -19512,27 +21516,52 @@ function buildJiraLogEvidence(log, sel) {
         return out.join('\n');
     };
 
-    const MAX_CHARS = 3800, MAX_LINES = 90, MAX_WINDOWS = 3;
+    // The budget. 3,800 characters could not hold ONE .NET exception dump — the entry this
+    // ticket exists to quote is 122 lines and 10,769 characters — so the primary window was
+    // being cut off inside its own stack trace even when it was chosen correctly. A JIRA
+    // description holds 32,767 characters and this is one field of it, so the root-cause
+    // window gets room to arrive whole and the secondary windows share what is left.
+    const MAX_CHARS = 14000, MAX_LINES = 320, MAX_WINDOWS = 3;
+    const PRIMARY_MAX_CHARS = 12000;
     // Root-cause windows first — the window carrying the forensic verdict is picked
     // before anything else and is the one allowed to consume the budget.
-    const byScore = [...clusters].sort((a, b) => (b.rootScore - a.rootScore) || (b.score - a.score));
+    const byScore = [...clusters].sort((a, b) => (b.root - a.root) || (b.score - a.score) || (b.entries - a.entries) || (a.start - b.start));
+    // A SECOND WINDOW HAS TO EARN ITS PLACE. This field documents a root cause, and padding
+    // it with the next-strongest thing in the file is how a ticket ends up quoting
+    // "PulseChecker enter" and "Extended session, sessionId=…" underneath a verified
+    // exception — which reads to a reviewer as though those were findings too. A secondary
+    // window is admitted only when it is comparable evidence, and never when it carries no
+    // root-cause weight at all while the primary does.
+    const SECONDARY_RATIO = 0.6;
+    const strengthOf = (cl) => (cl.root * 1000) + cl.score;
     const chosen = [];
     let usedChars = 0, usedLines = 0, first = true;
+    let bar = 0;
     for (const cl of byScore) {
         if (chosen.length >= MAX_WINDOWS) break;
         if (chosen.some(x => cl.start <= x.end && cl.end >= x.start)) continue;
-        let text = render(cl);
+        if (!first) {
+            if (strengthOf(cl) < bar) break;                 // sorted, so nothing after it qualifies
+            if (byScore[0].root > 0 && cl.root === 0) break; // keyword-only, next to verified evidence
+        }
+        let text = render(cl.start, cl.end);
         if (!text) continue;
-        if (text.length > MAX_CHARS - usedChars) {
-            if (!first) continue; // secondary windows must fit whole; the top window may be trimmed
-            const cut = text.lastIndexOf('\n', MAX_CHARS);
-            text = cut > 0 ? text.slice(0, cut) : text.slice(0, MAX_CHARS);
+        const room = first ? Math.min(PRIMARY_MAX_CHARS, MAX_CHARS) : MAX_CHARS - usedChars;
+        if (text.length > room) {
+            // Secondary windows must fit WHOLE — a half-quoted second incident is noise.
+            // Only the primary may be trimmed, only when one entry is bigger than the whole
+            // field, and the cut says so rather than trailing off mid-frame.
+            if (!first) continue;
+            const notice = '\n… [this log entry continues beyond what the ticket field holds — see the attached log for the remainder]';
+            const cut = text.lastIndexOf('\n', room - notice.length);
+            text = (cut > 0 ? text.slice(0, cut) : text.slice(0, room - notice.length)) + notice;
         }
         const lineCount = text.split('\n').length;
         if (!first && usedLines + lineCount > MAX_LINES) continue;
         chosen.push({ start: cl.start, end: cl.end, text });
         usedChars += text.length;
         usedLines += lineCount;
+        if (first) bar = strengthOf(cl) * SECONDARY_RATIO;
         first = false;
     }
     chosen.sort((a, b) => a.start - b.start);
@@ -19892,9 +21921,8 @@ function jiraFieldIgnoresDraft(sectionText, draft) {
 // caller can keep what it already has — this pass must never break report generation.
 async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts, signal) {
     try {
-        if (!LOCAL_AI_MODEL) return '';
-        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
-        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        if (!AI.ready()) return '';
+        const isThinkingModel = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(AI.model() || '');
         const factLines = [
             facts && facts.product && facts.product !== 'N/A' ? `Product: ${facts.product}` : '',
             facts && facts.sotiVer && facts.sotiVer !== 'N/A' ? `MC Version: ${facts.sotiVer}` : '',
@@ -19907,23 +21935,18 @@ async function rewriteManualJiraField(fieldLabel, styleHint, draft, facts, signa
         // tokens, so a 4096 window silently discarded most of the draft it was asked to
         // rewrite. Reusing the session size also stops Ollama re-allocating the KV cache
         // (a full model reload, minutes on a CPU) between the report and its refinements.
-        const refineCtx = await getSessionCtx(LOCAL_AI_MODEL);
-        const res = await fetch(`${baseUrl}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: signal || null, // aborts if the user cancels JIRA generation mid-refinement
-            body: JSON.stringify({
-                model: LOCAL_AI_MODEL,
-                messages: [
-                    { role: 'system', content: `You rewrite a support engineer's rough draft note into polished JIRA ticket text. Rules: keep every fact and constraint from the draft; fix grammar and spelling; expand shorthand into full professional sentences; you may weave in specifics from the case facts when clearly relevant; never invent facts; do NOT reuse the draft's sentences verbatim — rephrase them. ${styleHint} Output ONLY the rewritten text — no heading, no preamble, no quotes, no markup.` },
-                    { role: 'user', content: `Field: ${fieldLabel}\n\nCase facts:\n${factLines || 'N/A'}\n\nEngineer's draft:\n${draft}` }
-                ],
-                stream: false,
-                keep_alive: -1,
-                ...(isThinkingModel ? { think: false } : {}),
-                options: { num_ctx: refineCtx, temperature: 0.3, top_p: 0.9, repeat_penalty: 1.1, num_predict: 512 }
-            })
-        });
+        const refineCtx = await getSessionCtx(AI.model());
+        const res = await AI.chat({
+            model: AI.model(),
+            messages: [
+                { role: 'system', content: `You rewrite a support engineer's rough draft note into polished JIRA ticket text. Rules: keep every fact and constraint from the draft; fix grammar and spelling; expand shorthand into full professional sentences; you may weave in specifics from the case facts when clearly relevant; never invent facts; do NOT reuse the draft's sentences verbatim — rephrase them. ${styleHint} Output ONLY the rewritten text — no heading, no preamble, no quotes, no markup.` },
+                { role: 'user', content: `Field: ${fieldLabel}\n\nCase facts:\n${factLines || 'N/A'}\n\nEngineer's draft:\n${draft}` }
+            ],
+            stream: false,
+            keep_alive: -1,
+            ...(isThinkingModel ? { think: false } : {}),
+            options: { num_ctx: refineCtx, temperature: 0.3, top_p: 0.9, repeat_penalty: 1.1, num_predict: 512 }
+        }, { signal: signal || null }); // aborts if the user cancels JIRA generation mid-refinement
         if (!res.ok) return '';
         const data = await res.json();
         const msg = data.message || {};
@@ -20547,11 +22570,12 @@ ${chatCtx}
 ${JIRA_TEMPLATE}`;
 
     try {
-        if (!LOCAL_AI_MODEL) {
+        if (!AI.ready()) {
             JiraProgress.close();
-            return toast('No model selected. Open Settings (⚙) and pick an Ollama model.', 'e', 5000);
+            return toast(AI.isLocal()
+                ? 'No model selected. Open Settings (⚙) and pick an Ollama model.'
+                : `${AI.describe()}. Open Settings (⚙) → AI Provider to finish setting it up.`, 'e', 5000);
         }
-        const baseUrl = LOCAL_AI_URL.replace(/\/$/, '');
 
         const numPredict = 3072;
         // Size the window against BOTH messages at the same 2.5 chars/token the chat path uses.
@@ -20563,13 +22587,13 @@ ${JIRA_TEMPLATE}`;
         const promptChars = systemPrompt.length + userPrompt.length;
         const estimatedTokens = Math.ceil(promptChars / CHARS_PER_TOKEN);
         const neededTokens = estimatedTokens + numPredict + 500;
-        const { hardMax: jiraHardMax } = await getHardCtxMax(LOCAL_AI_MODEL);
+        const { hardMax: jiraHardMax } = await getHardCtxMax(AI.model());
         // Never below the session size: staying on one num_ctx for the whole session is what
         // keeps the model loaded, and dropping to a bespoke smaller window here reloaded it.
-        const jiraSessionCtx = await getSessionCtx(LOCAL_AI_MODEL);
+        const jiraSessionCtx = await getSessionCtx(AI.model());
         const numCtx = Math.min(jiraHardMax, Math.max(jiraSessionCtx, Math.ceil(neededTokens / 1024) * 1024));
 
-        console.log(`[Ollama JIRA Request] Model: ${LOCAL_AI_MODEL}, Chars: ${promptChars} (system ${systemPrompt.length} + user ${userPrompt.length}), Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, sessionCtx: ${jiraSessionCtx}, hardMax: ${jiraHardMax}`);
+        console.log(`[AI JIRA Request] Provider: ${AI.id()}, Model: ${AI.model()}, Chars: ${promptChars} (system ${systemPrompt.length} + user ${userPrompt.length}), Est Tokens: ${estimatedTokens}, set num_ctx: ${numCtx}, sessionCtx: ${jiraSessionCtx}, hardMax: ${jiraHardMax}`);
 
         // If even the model's largest window cannot hold the source data plus the report, cut the
         // SOURCE DATA here — on a line boundary, with the cut declared — rather than letting
@@ -20584,7 +22608,7 @@ ${JIRA_TEMPLATE}`;
         }
 
         // Detect thinking models — disable internal reasoning for Gemma 4, etc. (substring match to support GGUF/custom names)
-        const isThinkingModelJira = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(LOCAL_AI_MODEL || '');
+        const isThinkingModelJira = /gemma4|gemma-4|gemma3|gemma-3|e2b|e4b|qwq|r1|think|reason/i.test(AI.model() || '');
 
         // Prompt evaluation (before the first token) is the longest single wait, so allow a wider
         // idle-trickle headroom here: the bar keeps easing gently upward through the low-20s during
@@ -20627,29 +22651,24 @@ ${JIRA_TEMPLATE}`;
             if (t) thinkingOut += t;
         };
 
-        const res = await fetch(`${baseUrl}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: genSignal, // Cancel button aborts the streamed generation
-            body: JSON.stringify({
-                model: LOCAL_AI_MODEL,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: jiraUserPrompt }
-                ],
-                stream: true,
-                keep_alive: -1,
-                ...(isThinkingModelJira ? { think: false } : {}), // Disable thinking phase for Gemma 4 etc.
-                options: {
-                    num_ctx: numCtx,
-                    temperature: 0.0,
-                    repeat_penalty: 1.1,
-                    top_p: 0.9,
-                    num_predict: numPredict // Use standard calculated budget, -1 can cause instant aborts
-                }
-            })
-        });
-        if (!res.ok) throw new Error(`Ollama error ${res.status}`);
+        const res = await AI.chat({
+            model: AI.model(),
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: jiraUserPrompt }
+            ],
+            stream: true,
+            keep_alive: -1,
+            ...(isThinkingModelJira ? { think: false } : {}), // Disable thinking phase for Gemma 4 etc.
+            options: {
+                num_ctx: numCtx,
+                temperature: 0.0,
+                repeat_penalty: 1.1,
+                top_p: 0.9,
+                num_predict: numPredict // Use standard calculated budget, -1 can cause instant aborts
+            }
+        }, { signal: genSignal }); // Cancel button aborts the streamed generation
+        if (!res.ok) throw new Error(`${AI.isLocal() ? 'Ollama' : AI.describe()} error ${res.status}: ${await res.text()}`);
 
         if (res.body && typeof res.body.getReader === 'function') {
             const reader = res.body.getReader();
@@ -20779,8 +22798,15 @@ const PowerMonitor = {
         // No governor (power.js missing or blocked) → no pill. Better an absent
         // control than one that reports nothing.
         if (!Power.available) return;
-        pill.style.display = 'flex';
 
+        // THE PILL IS NOT SHOWN. It stays in the markup and everything below stays
+        // wired, so the monitor still works — it is just no longer a permanent readout
+        // in the header. The governor itself is untouched by this: it goes on sampling
+        // and throttling whether or not anything is displaying its numbers.
+        //
+        // Reachable from the console via SOTI_POWER() when the memory question comes up,
+        // which is the only time anyone wanted this. Delete this comment and restore
+        // `pill.style.display = 'flex'` to bring the header pill back.
         pill.onclick = () => this.open();
         const close = () => this.close();
         if ($('mPowerClose')) $('mPowerClose').onclick = close;
@@ -20807,11 +22833,14 @@ const PowerMonitor = {
                 .catch(() => toast('Copy failed', 'e'));
         };
 
+        // updatePill() still runs on level changes, so the hidden pill holds current
+        // text and is correct the moment anyone unhides it. What is gone is the 3s
+        // setInterval that used to sit alongside it: a timer refreshing a control
+        // nobody can see, forever, in the one app that exists to not waste the
+        // machine's headroom. Restoring the header pill means putting that interval
+        // back too, or the figure will only move at threshold crossings.
         this.updatePill();
         Power.onChange(() => { this.updatePill(); if (this._open) this.render(); });
-        // The pill refreshes on its own timer as well as on level changes, so the
-        // megabyte figure moves continuously rather than only at threshold crossings.
-        setInterval(() => this.updatePill(), 3000);
     },
 
     updatePill() {
@@ -21041,7 +23070,8 @@ const PowerMonitor = {
             `Now:       ${Math.round(s.usedMB)}MB used, peak ${Math.round(s.peakMB)}MB, lag ${Math.round(s.lagMs)}ms, level ${s.level}`,
             `Reclaimed: ${Math.round(s.reclaimedMB || 0)}MB over ${s.reclaimCount || 0} sweep(s)`,
             `Limits:    prompt ${Math.round(k.promptScale * 100)}%, answer ${Math.round(k.answerScale * 100)}%, chunk ${k.chunkLines}, yield ${k.yieldEveryMs}ms, OCR ${k.maxOcrWorkers}`,
-            `Model:     ${LOCAL_AI_MODEL || '(none selected)'}  ctx=${LOCAL_AI_CTX_MAX}`,
+            `Provider:  ${AI.id()}${AI.isLocal() ? '' : ' (OFF-DEVICE)'}`,
+            `Model:     ${AI.model() || '(none selected)'}  ctx=${LOCAL_AI_CTX_MAX}`,
             '',
             'Recent activity:'
         ];
@@ -21145,6 +23175,12 @@ Power.onChange(snap => {
 
 PowerMonitor.init();
 
+// The way in, now that the header pill is hidden. The monitor is the only place that
+// shows what this app has decided it may use on THIS machine and what it is actually
+// using — which is the question behind every "why did it get slow" report — so it
+// needs a door even without a button. Type SOTI_POWER() in the side panel's console.
+window.SOTI_POWER = () => { PowerMonitor.open(); return 'Power Monitor opened.'; };
+
 loadState();
 fetchLatestSOTIVersions();
 loadLocalAISettings().then(() => {
@@ -21167,12 +23203,152 @@ setTimeout(() => {
     PulseKB.ensureIndex().catch(() => {});
 }, 3000);
 
-// --- SETTINGS MODAL (AI - OLLAMA & PULSE SYNC) ---
+// --- SETTINGS MODAL (AI PROVIDER, OLLAMA & PULSE SYNC) ---
+
+// Show only the picked provider's fields. Called on open and on every change of the
+// picker, so the modal never shows an Azure endpoint box next to an Ollama model list.
+function applyProviderPanes() {
+    const id = ($('aiProviderSel') && $('aiProviderSel').value) || 'bridge';
+    const show = (elId, on) => { const el = $(elId); if (el) el.style.display = on ? '' : 'none'; };
+
+    // FAILURE ONLY. This used to print "Active now: …" on every open — a status line under
+    // a picker, telling you which of four providers was live. There is no picker any more
+    // and there is only ever one answer, so in the healthy case it said nothing worth the
+    // space and is now blank.
+    //
+    // The broken case still speaks. If ai-provider.js does not load, AI.on is false and
+    // every request goes to local Ollama no matter what is stored — and the failure has no
+    // other symptom in this modal, only "couldn't reach 127.0.0.1:11434" later, in the chat,
+    // about an engine nobody chose. Silence there would be a silent failure.
+    const activeEl = $('aiProviderActive');
+    if (activeEl) {
+        if (!window.SotiAI) {
+            activeEl.style.display = '';
+            activeEl.style.color = 'var(--err, #f87171)';
+            activeEl.innerHTML = '<strong>⚠ ai-provider.js is not loaded — the Copilot relay is not running.</strong><br>'
+                + 'Every request is going to local Ollama instead. Put <code>ai-provider.js</code> in the same folder as '
+                + '<code>sidepanel.js</code>, then reload the extension at <code>chrome://extensions</code>.';
+            const sel = $('aiProviderSel');
+            if (sel) { sel.value = 'ollama'; sel.disabled = true; }
+        } else {
+            const sel = $('aiProviderSel');
+            if (sel) sel.disabled = false;   // clear a disabled state left by an earlier failed load
+            activeEl.style.display = 'none';
+            activeEl.textContent = '';
+        }
+    }
+    show('paneOllama', id === 'ollama');
+    show('paneOllamaHelp', id === 'ollama');
+    show('paneBridge', id === 'bridge');
+    if (id === 'bridge' && window.SotiAI) refreshBridgeGrantStatus();
+    show('paneOpenai', id === 'openai');
+    show('paneAnthropic', id === 'anthropic');
+    // No off-device warning banner any more — the element is gone from the markup, not
+    // merely hidden. It made switching away from local Ollama a deliberate act, and there
+    // is no longer a switch to make. What it warned about stands: case content leaves the
+    // machine, SECURITY.md covers the local path only, and that sign-off belongs with
+    // whoever ships this build.
+
+    // Azure needs deployment + api-version; OpenAI and gateways need a model name instead.
+    const flavor = ($('openaiFlavorSel') && $('openaiFlavorSel').value) || 'azure';
+    show('fldOpenaiDeployment', id === 'openai' && flavor === 'azure');
+    show('fldOpenaiApiVersion', id === 'openai' && flavor === 'azure');
+    show('fldOpenaiModel', id === 'openai' && flavor !== 'azure');
+    show('fldOpenaiEndpoint', id === 'openai' && flavor !== 'openai');
+}
+
+function loadProviderFieldsFromConfig() {
+    if (!window.SotiAI) return;
+    const c = window.SotiAI.config;
+    const set = (id, v) => { const el = $(id); if (el) el.value = v == null ? '' : v; };
+
+    set('aiProviderSel', c.provider || 'bridge');
+
+    set('openaiFlavorSel', c.openai.flavor || 'azure');
+    set('openaiEndpoint', c.openai.endpoint);
+    set('openaiDeployment', c.openai.deployment);
+    set('openaiApiVersion', c.openai.apiVersion);
+    set('openaiModel', c.openai.model);
+    set('openaiApiKey', c.openai.apiKey);
+
+    set('anthropicModel', c.anthropic.model);
+    set('anthropicApiKey', c.anthropic.apiKey);
+
+    set('bridgeTargetSel', c.bridge.target || 'm365');
+    set('bridgeRelayMode', c.bridge.relayMode || 'minimized');
+    if ($('bridgeCleanupChats')) $('bridgeCleanupChats').checked = !!c.bridge.cleanupChats;
+    set('bridgeUrl', c.bridge.url);
+    set('bridgeMaxChars', c.bridge.maxPromptChars || 90000);
+    set('bridgeMaxParts', c.bridge.maxParts || 8);
+    if ($('bridgeCondenseOverflow')) $('bridgeCondenseOverflow').checked = c.bridge.condenseOverflow !== false;
+    refreshBridgeBudgetNote();
+    const sel = c.bridge.selectors || {};
+    set('bridgeSelComposer', (sel.composer || []).join(', '));
+    set('bridgeSelSend', (sel.send || []).join(', '));
+    set('bridgeSelStop', (sel.stop || []).join(', '));
+    set('bridgeSelAssistant', (sel.assistant || []).join(', '));
+
+    applyProviderPanes();
+}
+
+// Read the modal back into a provider config patch. Blank selector boxes mean "use the
+// built-in list", which is stored as absent rather than as an empty array — an empty
+// array would match nothing and leave the bridge unable to find anything on the page.
+function readProviderFieldsToConfig() {
+    const val = (id) => { const el = $(id); return el ? el.value.trim() : ''; };
+    const list = (id) => {
+        const v = val(id);
+        return v ? v.split(',').map(s => s.trim()).filter(Boolean) : null;
+    };
+    const selectors = {
+        composer: list('bridgeSelComposer'),
+        send: list('bridgeSelSend'),
+        stop: list('bridgeSelStop'),
+        assistant: list('bridgeSelAssistant')
+    };
+    const anySelector = Object.values(selectors).some(Boolean);
+
+    return {
+        provider: val('aiProviderSel') || 'bridge',
+        openai: {
+            flavor: val('openaiFlavorSel') || 'azure',
+            endpoint: val('openaiEndpoint'),
+            deployment: val('openaiDeployment'),
+            apiVersion: val('openaiApiVersion') || '2024-10-21',
+            model: val('openaiModel'),
+            apiKey: val('openaiApiKey')
+        },
+        anthropic: {
+            model: val('anthropicModel') || 'claude-sonnet-5',
+            apiKey: val('anthropicApiKey')
+        },
+        bridge: {
+            target: val('bridgeTargetSel') || 'm365',
+            relayMode: val('bridgeRelayMode') || 'minimized',
+            cleanupChats: $('bridgeCleanupChats') ? !!$('bridgeCleanupChats').checked : false,
+            url: val('bridgeUrl'),
+            // Clamped at both ends. A composer has a hard limit in the tens of thousands,
+            // so a value beyond that is not a bigger budget — it is the truncation guard
+            // being switched off, and a prompt cut mid-evidence looks like a real answer.
+            maxPromptChars: Math.min(200000, Math.max(2000, parseInt(val('bridgeMaxChars'), 10) || 90000)),
+            // How many of those messages one conversation may carry. Bounded at 12 in the
+            // provider layer for a reason that cannot be seen from here: past that the
+            // conversation's own window becomes the binding constraint, and overflowing THAT
+            // is silent — the site drops its earliest turns and the page looks identical.
+            maxParts: Math.min(12, Math.max(1, parseInt(val('bridgeMaxParts'), 10) || 8)),
+            condenseOverflow: $('bridgeCondenseOverflow') ? !!$('bridgeCondenseOverflow').checked : true,
+            selectors: anySelector ? selectors : null
+        }
+    };
+}
+
 async function refreshSettingsModal() {
     const urlInp = $('localAiUrl');
     const modelSel = $('localAiModelSel');
     const statusEl = $('localAiStatus');
-    
+
+    loadProviderFieldsFromConfig();
+
     // Setup Pulse Sync UI
     if ($('pulseSyncUrl')) $('pulseSyncUrl').value = window.PULSE_SYNC_URL || '';
     if ($('pulseSyncStatus')) {
@@ -21186,6 +23362,12 @@ async function refreshSettingsModal() {
     if (urlInp && !urlInp.placeholder) urlInp.placeholder = 'http://127.0.0.1:11434';
     if ($('localAiCtxSel')) $('localAiCtxSel').value = LOCAL_AI_CTX_MAX || 'auto';
     if ($('answerLangSel')) $('answerLangSel').value = ANSWER_LANG || 'auto';
+
+    // Probing Ollama is only worth the wait — and the "not reachable" warning — when Ollama
+    // is the provider being configured. Opening Settings on a machine with no Ollama to
+    // change an Azure key should not stall on a doomed localhost probe.
+    const pickedProvider = ($('aiProviderSel') && $('aiProviderSel').value) || 'bridge';
+    if (pickedProvider !== 'ollama') return;
 
     if (statusEl) { statusEl.textContent = 'Connecting to Ollama...'; statusEl.style.color = 'var(--txt2)'; }
     const models = await fetchOllamaModels(urlInp ? urlInp.value : LOCAL_AI_URL);
@@ -21881,6 +24063,219 @@ $('localAiModelSel').onchange = () => {
     LOCAL_AI_MODEL = $('localAiModelSel').value;
 };
 
+// Switching the picker re-lays the modal immediately, and re-runs the refresh so choosing
+// Ollama detects models on the spot instead of after a save-and-reopen.
+if ($('aiProviderSel')) {
+    $('aiProviderSel').onchange = async () => {
+        applyProviderPanes();
+        // PERSIST ON CHANGE, not only on Save. Requiring Save meant the picker showed
+        // "Copilot browser bridge" while the panel was still calling Ollama, so the very
+        // next message failed with "Couldn't reach the local AI at 127.0.0.1:11434" —
+        // an error about an engine the user had just chosen to stop using. A visible
+        // selection that isn't the live one is worse than no selection at all.
+        if (window.SotiAI) {
+            await window.SotiAI.save(readProviderFieldsToConfig());
+            // Asking here as well as on Save: this change event IS a user gesture, and a
+            // grant obtained now means the first real request doesn't stall on a prompt.
+            if (!AI.isLocal()) await window.SotiAI.ensurePermissions();
+            updateLocalAIBadge();
+        }
+        if ($('aiProviderSel').value === 'ollama') await refreshSettingsModal();
+    };
+}
+
+// The per-provider fields feed the same config, so they persist on edit too — otherwise
+// typing a key and pressing "test" without pressing "Save" first would test the old one.
+for (const id of ['bridgeMaxChars', 'bridgeMaxParts', 'bridgeCondenseOverflow', 'bridgeRelayMode', 'bridgeCleanupChats', 'openaiEndpoint', 'openaiDeployment', 'openaiApiVersion',
+                  'openaiModel', 'openaiApiKey', 'anthropicModel', 'anthropicApiKey',
+                  'bridgeSelComposer', 'bridgeSelSend', 'bridgeSelStop', 'bridgeSelAssistant']) {
+    const el = $(id);
+    if (el) el.onchange = () => { if (window.SotiAI) window.SotiAI.save(readProviderFieldsToConfig()); };
+}
+
+// Changing WHICH chat to relay through changes the host that needs granting. Persisting
+// alone is not enough: the grant is per-origin, so a switch from copilot.microsoft.com to
+// m365.cloud.microsoft leaves the new host ungranted and every request fails on
+// "Extension manifest must request permission to access this host". This change event is
+// a user gesture, which is the only context Chrome accepts the request from.
+for (const id of ['bridgeTargetSel', 'bridgeUrl']) {
+    const el = $(id);
+    if (!el) continue;
+    el.onchange = async () => {
+        if (!window.SotiAI) return;
+        await window.SotiAI.save(readProviderFieldsToConfig());
+        if (AI.id() === 'bridge') await window.SotiAI.ensurePermissions();
+        await refreshBridgeGrantStatus();
+    };
+}
+
+// Says whether Chrome has granted the bridge's host, and names the host either way.
+async function refreshBridgeGrantStatus() {
+    const statusEl = $('bridgeGrantStatus');
+    const btn = $('btnBridgeGrant');
+    if (!statusEl || !window.SotiAI) return;
+    const origin = window.SotiAI.bridgeOrigin();
+    const granted = await window.SotiAI.bridgeAccessGranted();
+    if (btn) btn.textContent = granted ? `Access granted to ${origin}` : `Grant access to ${origin}`;
+    statusEl.style.color = granted ? 'var(--green)' : 'var(--warn)';
+    statusEl.textContent = granted
+        ? '✓ Chrome allows this extension to read that tab.'
+        : '⚠ Not granted yet — the bridge cannot read that tab until you allow it.';
+}
+
+// The bridge is about to spend several round trips shortening the case before it can even
+// start. That is a minute or more of apparent silence, so say what is happening.
+window.addEventListener('soti-ai-prompt-condensing', (ev) => {
+    const over = Number(((ev && ev.detail) || {}).over || 0);
+    toast(`Case is ${over.toLocaleString()} characters larger than this chat can hold — condensing it first. `
+        + `This adds a round trip per chunk before the answer starts.`, 'i', 9000);
+});
+
+// The bridge could not fit the whole case. The model is told inside the prompt; the engineer
+// is told here, because an answer built on a shortened case reads exactly like one built on
+// the whole of it. Condensing and cutting are reported differently on purpose — one lost
+// wording, the other lost material outright, and those are not the same warning.
+window.addEventListener('soti-ai-prompt-trimmed', (ev) => {
+    const d = (ev && ev.detail) || {};
+    const parts = Number(d.parts || 1);
+    const where = parts > 1
+        ? `${parts} chat messages of ${Number(d.cap || 0).toLocaleString()} characters`
+        : `the ${Number(d.cap || 0).toLocaleString()}-character chat box`;
+    if (Number(d.condensed || 0) > 0) {
+        toast(`⚠ Case condensed to fit ${where}. Wording was rewritten by the relay chat — log line `
+            + `references that could not be matched to the source are flagged in the prompt. Use Ollama or an `
+            + `API provider when the exact evidence matters.`, 'w', 12000);
+    } else {
+        toast(`⚠ Case context trimmed by ${Number(d.trimmed || 0).toLocaleString()} characters to fit ${where}. `
+            + `The answer is based on less than the full case — raise "Context parts" in Settings, or use Ollama `
+            + `or an API provider for the whole thing.`, 'w', 11000);
+    }
+});
+
+// What the bridge can actually carry, shown next to the two settings that decide it. The
+// budget is the product of them, and a product is exactly the arithmetic someone changing
+// one number at a time will not do in their head.
+function refreshBridgeBudgetNote() {
+    const el = $('bridgeBudgetNote');
+    if (!el || !window.SotiAI || !window.SotiAI.bridgeBudget) return;
+    const capEl = $('bridgeMaxChars'), partsEl = $('bridgeMaxParts');
+    const cap = Math.min(200000, Math.max(2000, parseInt(capEl && capEl.value, 10) || 90000));
+    const parts = Math.min(12, Math.max(1, parseInt(partsEl && partsEl.value, 10) || 8));
+    const total = (cap - window.SotiAI.bridgeBudget().overhead) * parts;
+    el.textContent = parts > 1
+        ? `${parts} parts ≈ ${total.toLocaleString()} characters of case.`
+        : `1 part ≈ ${total.toLocaleString()} characters — a single message, as older builds sent.`;
+}
+for (const id of ['bridgeMaxChars', 'bridgeMaxParts']) {
+    const el = $(id);
+    if (el) el.addEventListener('input', refreshBridgeBudgetNote);
+}
+
+// The provider layer raises this when a request dies for want of a host permission.
+// Opening Settings on the bridge pane puts the Grant button under the cursor instead of
+// leaving the fix described in an un-clickable chat message.
+window.addEventListener('soti-ai-needs-permission', async (ev) => {
+    const origins = (ev.detail && ev.detail.origins) || [];
+    try {
+        if ($('mSettings')) $('mSettings').style.display = 'flex';
+        await refreshSettingsModal();
+        const btn = $('btnBridgeGrant');
+        if (btn) {
+            btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            btn.style.outline = '2px solid var(--warn)';
+            setTimeout(() => { btn.style.outline = ''; }, 6000);
+        }
+        toast(`Chrome access is needed for ${origins.join(' and ')} — press "Grant access" in Settings.`, 'w', 12000);
+    } catch (e) { console.warn('[SOTI] could not surface the permission prompt', e); }
+});
+
+// Sweep the relay's leftovers on demand, and REPORT what happened. The automatic pass
+// only logs to the console, which is no use to anyone not already looking at it — this
+// is how you find out that the delete is failing, and why.
+if ($('btnBridgeCleanNow')) {
+    $('btnBridgeCleanNow').onclick = async () => {
+        const btn = $('btnBridgeCleanNow');
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Cleaning…';
+        try {
+            if (!window.SotiAI) throw new Error('ai-provider.js is not loaded.');
+            await window.SotiAI.save(readProviderFieldsToConfig());
+            const r = await window.SotiAI.cleanupBridgeChats(25);
+            if (r.removed) toast(`✓ Removed ${r.removed} relay chat${r.removed === 1 ? '' : 's'} from Copilot.`, 's', 7000);
+            else toast(`Nothing removed — ${r.why || 'no reason given'}`, 'w', 16000);
+            console.log('[SOTI bridge cleanup]', r);
+        } catch (e) {
+            toast(`Cleanup failed: ${e && e.message ? e.message : e}`, 'e', 16000);
+            console.error('[SOTI bridge cleanup]', e);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    };
+}
+
+if ($('btnBridgeGrant')) {
+    $('btnBridgeGrant').onclick = async () => {
+        if (!window.SotiAI) return toast('ai-provider.js is not loaded.', 'e', 8000);
+        await window.SotiAI.save(readProviderFieldsToConfig());
+        const ok = await window.SotiAI.ensurePermissions();
+        await refreshBridgeGrantStatus();
+        toast(ok
+            ? `✓ Access granted to ${window.SotiAI.bridgeOrigin()}`
+            : `Chrome did not grant access to ${window.SotiAI.bridgeOrigin()}. If no prompt appeared, reload the extension at chrome://extensions so it picks up the updated manifest.`,
+            ok ? 's' : 'e', ok ? 5000 : 14000);
+    };
+}
+if ($('openaiFlavorSel')) $('openaiFlavorSel').onchange = () => applyProviderPanes();
+
+// Send one throwaway prompt through the bridge and report what came back. The bridge has
+// more ways to fail than an API call does — not signed in, tab blocked, selectors moved —
+// and finding that out mid-analysis, after a full scrape, is the expensive way to learn it.
+if ($('btnBridgeTest')) {
+    $('btnBridgeTest').onclick = async () => {
+        const btn = $('btnBridgeTest');
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Testing…';
+        try {
+            if (!window.SotiAI) throw new Error('ai-provider.js did not load — check it is in the extension folder and reload the extension.');
+            await window.SotiAI.save(readProviderFieldsToConfig());
+            const granted = await window.SotiAI.ensurePermissions();
+            if (!granted) throw new Error('Site access was not granted — Chrome needs it to read that tab.');
+
+            // Two stages on purpose. The bridge has three failure modes that all look
+            // identical from the outside (no permission / no injection / injected but
+            // blind), and a single end-to-end test cannot tell them apart. The ping
+            // proves the relay is alive and names the composer it found; only then is a
+            // real prompt worth sending.
+            btn.textContent = 'Opening tab…';
+            const ping = await window.SotiAI.pingBridge();
+            toast(`Relay alive on ${ping.host} — message box: ${ping.composer}. Sending a test prompt…`, 'i', 5000);
+
+            btn.textContent = 'Waiting for a reply…';
+            const res = await window.SotiAI.chat({
+                messages: [{ role: 'user', content: 'Reply with exactly: SOTI BRIDGE OK' }],
+                stream: false,
+                options: { num_predict: 32, temperature: 0 }
+            }, {});
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            const said = (data.message && data.message.content || '').trim();
+            if (!said) throw new Error('The tab answered with nothing — set an "Answer container" selector under Bridge selectors.');
+            toast(`✓ Bridge works. ${ping.host} replied: "${said.slice(0, 60)}"`, 's', 8000);
+        } catch (e) {
+            const trail = (window.SotiAI && window.SotiAI.lastBridgeDiag && window.SotiAI.lastBridgeDiag()) || [];
+            const extra = trail.length ? `  [${trail.join(' · ')}]` : '';
+            toast(`Bridge test failed: ${e && e.message ? e.message : e}${extra}`, 'e', 15000);
+            console.error('[SOTI bridge test]', e, trail);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    };
+}
+
 $('btnSaveLocalAI').onclick = async () => {
     LOCAL_AI_URL = $('localAiUrl').value.trim() || 'http://127.0.0.1:11434';
     LOCAL_AI_MODEL = $('localAiModelSel').value || LOCAL_AI_MODEL;
@@ -21889,13 +24284,34 @@ $('btnSaveLocalAI').onclick = async () => {
         const picked = $('answerLangSel').value || 'auto';
         ANSWER_LANG = ANSWER_LANG_CHOICES.includes(picked) ? picked : 'auto';
     }
+
+    if (window.SotiAI) {
+        await window.SotiAI.save(readProviderFieldsToConfig());
+        // Chrome only grants optional host permissions from inside a user gesture, and this
+        // click is one. Asking later — at the first analysis — would surface a permission
+        // prompt in the middle of a run, or fail silently because the gesture had expired.
+        if (!AI.isLocal()) {
+            const granted = await window.SotiAI.ensurePermissions();
+            if (!granted) {
+                toast('Chrome did not grant access to that host — the provider will fail until you allow it.', 'w', 9000);
+            }
+        }
+    }
+
     await saveLocalAISettings();
     updateLocalAIBadge();
     $('mSettings').style.display = 'none';
     // The language is worth confirming back: it silently changes every summary and every draft
     // from here on, and "Auto" vs "always German" is exactly the setting someone forgets they set.
     const langNote = ANSWER_LANG === 'auto' ? '' : ` · Answers in ${ANSWER_LANG}`;
-    toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}${langNote}`, 's');
+    if (AI.isLocal()) {
+        toast(`✓ Model set: ${LOCAL_AI_MODEL ? LOCAL_AI_MODEL.replace(/:latest$/i, '') : 'Ollama'}${langNote}`, 's');
+    } else {
+        // Was a warning that case data now leaves the device. It read as a decision being
+        // confirmed, and there is no longer a decision here to confirm — the relay is the
+        // only provider the panel offers. A plain acknowledgement, so Save still answers.
+        toast(`✓ Copilot connection saved${langNote}`, 's');
+    }
     setTimeout(() => { warmUpModel(); }, 200); // preload the newly-selected model / context size
 };
 
@@ -21963,13 +24379,87 @@ if ($('btnDownloadLocalAISetup')) {
     };
 }
 
-// Boot: detect Ollama and warn if no model selected
+/* ---------------------------------------------------------------------------
+ * SOTI_DIAG() — paste into the side panel's DevTools console.
+ * ---------------------------------------------------------------------------
+ * "It still goes to Ollama" has four possible causes that all look the same from
+ * the UI: the provider layer never loaded, the choice was never persisted, the
+ * host permission was refused, or the relay tab cannot be reached. Guessing
+ * between them by screenshot is slow. This prints which one it is.
+ * ------------------------------------------------------------------------- */
+window.SOTI_DIAG = async function () {
+    const out = {
+        'ai-provider.js loaded': !!window.SotiAI,
+        'provider (live)': AI.id(),
+        'is local': AI.isLocal(),
+        'configured/ready': AI.ready(),
+        'active model': AI.model() || '(none)',
+        'ollama url': LOCAL_AI_URL,
+        'ollama model': LOCAL_AI_MODEL || '(none)'
+    };
+    try {
+        const d = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local)
+            ? await chrome.storage.local.get('aiProvider')
+            : { aiProvider: JSON.parse(localStorage.getItem('soti_ai_provider') || 'null') };
+        out['stored provider'] = (d.aiProvider && d.aiProvider.provider) || '(nothing saved)';
+        out['stored bridge target'] = (d.aiProvider && d.aiProvider.bridge && d.aiProvider.bridge.target) || '(default)';
+    } catch (e) { out['stored provider'] = 'storage unreadable: ' + e.message; }
+
+    if (window.SotiAI && AI.id() === 'bridge') {
+        try {
+            const origin = new URL(window.SotiAI.config.bridge.url
+                || window.SotiAI.BRIDGE_TARGETS[window.SotiAI.config.bridge.target].url).origin;
+            out['bridge origin'] = origin;
+            out['host permission granted'] = (typeof chrome !== 'undefined' && chrome.permissions)
+                ? await chrome.permissions.contains({ origins: [origin + '/*'] })
+                : 'n/a';
+        } catch (e) { out['bridge origin'] = 'bad URL: ' + e.message; }
+    }
+
+    console.table(out);
+    if (!window.SotiAI) {
+        console.error('DIAGNOSIS: ai-provider.js is not loaded. The picker cannot work. Put the file next to sidepanel.js and reload the extension.');
+    } else if (AI.id() === 'ollama') {
+        console.warn('DIAGNOSIS: the live provider is still Ollama. Open Settings, pick your provider, and press Save — then run SOTI_DIAG() again.');
+    } else if (!AI.ready()) {
+        console.warn('DIAGNOSIS: provider "' + AI.id() + '" is selected but not configured: ' + AI.describe());
+    } else if (out['host permission granted'] === false) {
+        console.warn('DIAGNOSIS: Chrome has not granted access to ' + out['bridge origin'] + '. Press Save in Settings and allow it.');
+    } else {
+        console.log('DIAGNOSIS: provider is live and configured — ' + AI.describe());
+    }
+    return out;
+};
+
+// Boot: load the provider choice, then the local engine, then warn if nothing is usable.
+// Order matters — loadLocalAISettings() auto-detects an Ollama model, which is wasted work
+// (and a failed probe on a machine with no Ollama) when a cloud provider is already chosen.
 (async () => {
+    if (window.SotiAI) {
+        window.SotiAI.bindLocal(() => ({ url: LOCAL_AI_URL, model: LOCAL_AI_MODEL }));
+        await window.SotiAI.load();
+    } else {
+        // ai-provider.js is missing, blocked, or failed to parse. Without it AI.on is
+        // false and EVERY request silently goes to Ollama — so someone who deliberately
+        // chose the Copilot bridge gets "Couldn't reach the local AI at 127.0.0.1:11434",
+        // an error about the engine they just switched away from.
+        //
+        // This warns UNCONDITIONALLY. An earlier version only spoke up when the STORED
+        // provider was non-local, which is precisely the case that cannot happen here:
+        // without the layer nothing can ever be stored, so the check that was meant to
+        // catch the failure was silenced by the failure itself.
+        console.error('[SOTI AI Analyser] ai-provider.js did NOT load. Every request will go to local Ollama, whatever the Settings picker shows. Check that ai-provider.js sits next to sidepanel.js in the extension folder, then reload the extension at chrome://extensions.');
+        setTimeout(() => toast(
+            '⚠ ai-provider.js did not load — the AI Provider picker has no effect and everything is going to local Ollama. ' +
+            'Put ai-provider.js next to sidepanel.js, then reload the extension.', 'e', 20000), 1200);
+    }
     await loadLocalAISettings();
     updateLocalAIBadge();
-    if (!LOCAL_AI_MODEL) {
+    if (!AI.ready()) {
         setTimeout(() => {
-            toast('⚙ Open Settings to select your Ollama model.', 'w', 7000);
+            toast(AI.isLocal()
+                ? '⚙ Open Settings to select your Ollama model.'
+                : `⚙ ${AI.describe()} — open Settings to finish setting it up.`, 'w', 7000);
         }, 1500);
     }
 })();

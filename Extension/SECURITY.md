@@ -41,6 +41,22 @@ With the compensating controls documented below, the application is assessed as 
 | Derived "learned insights" | Local | `chrome.storage.local` |
 
 - Data is **not redacted** before the local model — defensible because processing never leaves the device. (The former misleadingly-named no-op `scrubPII()` wrapper has been **removed** so the code no longer implies redaction it did not perform.)
+- **Network captures (`.har`) are the exception, and always are.** A capture records whole
+  requests, so it carries the `Authorization` headers, cookies and — on an SSO capture — the
+  `id_token`s and authorization codes of the session it recorded. Every path that can put a
+  capture in front of a model runs it through `redactHarSecrets()` first, and the eight
+  line-by-line log scanners refuse to read one at all (`withoutNetworkCaptures()`): a scanner
+  quoting "the highest-scoring line" out of a one-line JSON capture is quoting a bearer token.
+  This matters most when a non-local provider is selected, where the prompt leaves the device —
+  see the note below.
+
+> **Scope note (build 2.9.0 onward).** The statements above about "all AI processing is local"
+> describe the DEFAULT provider (Ollama) and remain true for it. Selecting any other provider —
+> an API endpoint or the browser bridge — sends the case material off the device to a
+> third-party service, which the panel signals at run time (amber status dot, "OFF-DEVICE" in
+> the diagnostics, a warning rather than a success tick when the setting is saved). This
+> document has not yet been rewritten for that, and should be before it is relied on for a
+> deployment that uses one.
 
 ---
 

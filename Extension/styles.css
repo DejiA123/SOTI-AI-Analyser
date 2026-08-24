@@ -187,9 +187,14 @@ body {
     flex-direction: column; /* Mobile/Sidepanel view */
 }
 
-/* Mobile ordering: Chat top, panels bottom */
-.chat-wrap { order: 1; }
-.panel-left { order: 2; }
+/* Stacked (side panel) ordering: Case Info sits directly under the pinned Quick Options
+   bar, then the chat. Case Info used to render AFTER the chat, which put it at the very
+   bottom of a long conversation — the one panel an engineer opens constantly was the one
+   they had to scroll past everything to reach, and its position moved as the chat grew.
+   #qaBar lives outside .layout and above it, so this ordering reads
+   Quick Options → Case Info → chat, top to bottom, always. */
+.panel-left { order: 1; }
+.chat-wrap { order: 2; }
 .panel-right { order: 3; }
 
 /* In small view, differentiate expansion behavior */
@@ -633,6 +638,37 @@ body {
     color: var(--blue2);
     margin-bottom: 10px;
 }
+/* Pager for the two "How to get started" pages. */
+.w-howto-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 12px;
+}
+.w-howto-nav {
+    width: 22px;
+    height: 22px;
+    line-height: 1;
+    font-size: 15px;
+    color: var(--txt2, #9aa4b2);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease;
+}
+.w-howto-nav:hover { color: #fff; border-color: var(--blue2); }
+.w-howto-dots { display: flex; align-items: center; gap: 6px; }
+.w-howto-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: background .15s ease;
+}
+.w-howto-dot.is-on { background: var(--blue2); }
+
 .w-step {
     display: flex;
     align-items: center;
@@ -796,6 +832,42 @@ body {
     border-top: 1px solid var(--border);
 }
 
+/* The jump back up to Meeting Notes. Right-aligned so it lands directly over the send
+   button, and quiet by default — it is a shortcut, not a call to action, and it sits in
+   the one strip of the UI that must never compete with the message box. */
+.notes-jump-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 6px;
+}
+
+/* A 24px circle holding the arrow and nothing else. Fixed width AND height rather than
+   padding around the glyph — padding on an inline-flex button rounds differently in each
+   direction and the circle comes out an egg. */
+.notes-jump {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--txt2);
+    cursor: pointer;
+    transition: color .2s, border-color .2s, background .2s;
+}
+.notes-jump:hover {
+    background: var(--bg2);
+    border-color: var(--blue);
+    color: var(--txt1);
+}
+.notes-jump:focus-visible {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+}
+
 .input-row {
     display: flex;
     align-items: flex-end;
@@ -944,6 +1016,12 @@ body {
 .toast.show { transform: translateX(-50%) translateY(0); opacity: 1 }
 .toast.s { border-color: var(--green); color: var(--green) }
 .toast.e { border-color: var(--red); color: var(--red) }
+/* 'w' has been passed by the code for several builds with nothing to match it, so every
+   warning rendered identically to an ordinary notice — including the one saying the case
+   was shortened before the model saw it, which is precisely the message that must not blend
+   in. 'i' is its quieter counterpart: work is happening, nothing is wrong. */
+.toast.w { border-color: var(--warn); color: var(--warn) }
+.toast.i { border-color: var(--blue2); color: var(--blue2) }
 
 .m-jira {
     max-width: 900px;
@@ -971,6 +1049,27 @@ body {
     flex-direction: column;
     gap: 8px;
     animation: slideUp 0.3s ease-out;
+}
+
+/* Deliberately quiet: cancelling is an escape hatch, not the expected action, so it must be
+   findable without competing with the progress it sits under. Turns red only on hover, when
+   the engineer has already decided. */
+.prog-cancel {
+    align-self: flex-end;
+    padding: 4px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--txt2, #9aa4b2);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.prog-cancel:hover {
+    color: #fff;
+    background: rgba(220, 60, 60, .18);
+    border-color: rgba(220, 60, 60, .55);
 }
 
 .prog-lbl {
@@ -1641,3 +1740,70 @@ body {
     color: transparent;
     caret-color: var(--blue);
 }
+
+/* ---------------------------------------------------------------------------
+ * OPEN CASES — the Salesforce queue, shown instead of the chat layout.
+ * Rows are cards rather than a table: the side panel is ~350px wide and a real
+ * table forces a horizontal scroll, which makes scanning the queue harder than
+ * reading it in Salesforce would have been.
+ * ------------------------------------------------------------------------- */
+.oc-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg0, #0e1116);
+}
+.oc-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px 8px;
+    flex-wrap: wrap;
+}
+.oc-title { font-size: 13px; font-weight: 700; color: #fff; display: flex; align-items: baseline; gap: 8px; }
+.oc-meta { font-size: 10.5px; font-weight: 500; color: var(--txt2, #9aa4b2); }
+.oc-hint {
+    margin: 0 14px 10px;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--txt2, #9aa4b2);
+    background: rgba(255, 255, 255, .03);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.oc-list { flex: 1; overflow-y: auto; padding: 0 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+.oc-row {
+    padding: 10px 12px;
+    background: var(--bg1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: border-color .15s ease, background .15s ease;
+}
+.oc-row:hover { border-color: var(--blue2); background: rgba(255, 255, 255, .04); }
+.oc-row-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.oc-num { font-size: 12px; font-weight: 700; color: var(--blue2); }
+.oc-subject { font-size: 12px; color: #fff; line-height: 1.4; margin-bottom: 6px; word-break: break-word; }
+.oc-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.oc-tag {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 20px;
+    color: var(--txt2, #9aa4b2);
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+/* Severity is the one field worth colouring — it is how the queue gets triaged. */
+.oc-tag.sev-high { color: #ff9a8b; border-color: rgba(220, 90, 70, .5); background: rgba(220, 90, 70, .12); }
+.oc-tag.sev-med  { color: #ffd08a; border-color: rgba(220, 170, 60, .45); background: rgba(220, 170, 60, .10); }
+.oc-tag.sev-jira { color: #a7c7ff; border-color: rgba(80, 130, 230, .45); background: rgba(80, 130, 230, .12); }
+.oc-open { font-size: 11.5px; color: var(--txt2, #9aa4b2); text-align: center; padding: 18px 10px; }
+
+/* The pinned Open Cases tab: no close button, visually set apart from case tabs. */
+.tab-item.tab-pinned { background: rgba(80, 130, 230, .10); border-color: rgba(80, 130, 230, .35); }
+.tab-item.tab-pinned.active { background: rgba(80, 130, 230, .22); }

@@ -58,8 +58,10 @@ File	Size	What it does
 `manifest.json`	~60 lines	The extension's "ID card": its name, permissions, which URLs it may talk to, and which files load when.
 `knowledge/*.md`	—	Product knowledge in two layers. (1) Small "log signature" cheat-sheets injected during analysis: `MobiControl.md`, `Connect.md`, `XSight.md`. (2) The RAG corpus searched by `PulseKB`: `PulseKnowledge.md` (a 24 MB MobiControl scrape, ~10,000 articles) plus the curated, source-referenced `Connect_Knowledge.md` and `XSight_Knowledge.md`. Extend a product by appending `# Title` / `Source:` / body articles to its corpus file, or add a file to `PulseKB.KB_FILES`.
 `setup_local_ai.ps1` / `.bat`	—	One-click installer: installs Ollama, pulls the model, and sets Ollama's environment variables (CORS + speed). The `.bat` just launches the `.ps1`.
+`ai-provider.js`	~1,600 lines	The provider seam. `SotiAI.chat(payload)` takes the exact Ollama request body the panel already builds and returns something that quacks like the `fetch` Response it already consumes, whatever the backend is — Ollama, Azure OpenAI/OpenAI-compatible, the Anthropic API, or the keyless browser bridge. Adding a backend means writing one adapter here and changing nothing above it. Section 5.12.
+`copilot-bridge.js`	~1,150 lines	The browser bridge's relay. Injected on demand into a chat tab the engineer is already signed in to; types the prompt in, watches the answer render, and streams it back. Never declared in the manifest, so it does not run in anyone's Copilot tab unless the bridge is selected and the host granted. Section 5.12.
 `power.js`	~830 lines	The Power & Resource Governor. Profiles the machine, derives a memory budget for it, measures heap and main-thread lag, hands out throttle settings, reclaims memory under pressure, and keeps the internal AI performance log. Loaded **before** `sidepanel.js`. Section 9.
-`tests/`	—	Removed from the repository. Section 5.11 explains how a change is verified now, and how to restore the suite from git history if it is wanted back.
+`tests/`	—	The four suites that survive: `ai-provider.test.js`, `copilot-bridge.test.js`, `sidepanel-render.test.js` and `content-feedtab.test.js`, run with `node tests/<file>`. They pin down the provider translation, the bridge's answer extraction and prompt splitting, the rules that turn an answer into what the engineer sees, and which Salesforce tab the sync is allowed to click — the parts that fail SILENTLY, where a wrong answer looks exactly like a right one. Section 5.11.
 `lib/`	—	Tesseract.js OCR engine and its WASM/model data.
 ---
 5. The core subsystems (deep dives)
@@ -147,6 +149,40 @@ had to be trimmed.
 went wrong and when.
 `getSmartLogSnippet` — picks the most relevant raw lines (head + tail + windows around
 incidents) up to a character budget, instead of a blind "first N characters."
+
+**When the case is UPLOADED, none of the above is what the model reads.** Everything in this
+section is a reducer, and the sizes it reduces to (240 characters per digest row, 15,000 per
+file, 24,000 for the whole failure index) are what a chat composer holds — not what a file
+upload holds. So `buildConcentratedSnippets` branches: if `logsUploadAsFile()` is true (the
+browser bridge with `attachData` on), the digest becomes a short INDEX and
+`buildVerbatimLogSection` puts the log files themselves in behind the same
+`=== FILE: <path> ===` markers, complete and unedited.
+
+A file too big for the upload ceiling is not head-cut. `buildVerbatimLogBody` keeps contiguous
+windows around every error/warning/exception line — each grown forward over the exception block
+that follows it, so a stack trace is never severed from the exception that threw it — plus the
+file's head (the preamble: build, OS, install path) and its tail (where a failed run actually
+died). Every gap between windows is declared inline with its real line numbers and whether
+anything in it carried a signal, and the per-file header says COMPLETE or PARTIAL.
+
+Network captures are the exception: a `.har` never goes up raw, because it holds the
+Authorization headers, cookies and id_tokens of the session it recorded. It goes as the same
+redacted transaction evidence the inline path builds.
+
+**The JIRA ticket's "Log Analysis" block is built from the same raw log, by a different rule.**
+`buildJiraLogEvidence` fills it deterministically — the model is never trusted with it — and the
+unit it works in is the log ENTRY, not the line. Anchors (the forensic report's own root-cause
+text located in the raw log, then the line numbers it cites, then issue terms, then error
+density) fold onto the entry that contains them; a window is seeded by the strongest entry left
+and grows only into neighbours at least half as strong; and a second window is admitted only at
+60% of the primary's strength.
+
+Every one of those rules is there because its absence produced a specific wrong ticket. Scoring
+a window by SUMMING its anchors let two hundred one-line DEBUG heartbeats outscore the entry
+holding the exception. Chaining entries within eight lines of each other let a run of weak ones
+absorb a strong one. And a 15-line-back / 40-line-forward expansion guard opened the block
+inside a 122-line stack trace. `jiraHasEntryStructure` decides whether a file has entries at all
+(an XML dump or a CSV has none) so both ends of a window are found the same way.
 5.3 The AI engine (`OllamaAI.completions.create`)
 This is the function that actually talks to Ollama. It receives the assembled messages and
 returns a stream of tokens. The hard part is fitting the prompt into the model's memory
@@ -339,6 +375,28 @@ Alongside case number, account, subject, versions and the feed, the scraper read
 Hosted (Cloud vs On-Prem). That one field decides who can collect the server logs, so it
 drives the whole evidence half of every answer — see 5.9. License Type remains only as a
 fallback for layouts that don't expose MC Hosted.
+
+**The sync opens the Feed sub-tab itself** (`activateFeedTab`). A Lightning case record is
+split into Feed / Details / Related and Salesforce renders only the active one, so syncing a
+case that was sitting on Details found no feed in the DOM at all and imported an empty email
+chain — recoverable, because the panel said so, but it cost the engineer a manual click on
+every case. Three rules keep an automatic click from becoming its own problem:
+
+- **It only clicks when no feed is on screen.** A case already showing its Feed is not touched.
+- **It runs after the fields have been read.** Leaving a sub-tab unmounts it, so opening the
+  Feed any earlier would trade an empty chain for empty case fields.
+- **It matches the tab by its LABEL, never by `data-tab-value`.** Those values
+  (`flexipage_tab3`) are assigned per layout — the number differs between orgs and changes
+  when somebody edits the page. The label is matched on the WORD, so a "Feedback" tab is never
+  mistaken for the feed, and only VISIBLE tabs are eligible, because a background console tab
+  keeps its whole tab bar in the DOM and clicking that one would switch a case nobody is
+  looking at.
+
+What it did is reported back on `feedTab` and decides the wording when a chain still comes
+back empty: "the Feed tab was opened but no posts rendered" and "the case Feed has no posts to
+read" are different problems, and neither is "open the Feed tab and sync again" — an
+instruction to do a thing that has just been done for you is how someone learns to stop
+reading the messages.
 ---
 5.9 Case-answer guards — the deterministic checks around the model
 The quick actions (Case Summary + Next Steps, Draft an email, Work out a
@@ -462,13 +520,30 @@ weaker wording than a chain one, because "I hit this again" in an opening report
 the customer has met the fault before — not that a fix on *this* case regressed.
 ---
 5.11 Verifying a change
-The `tests/` folder has been removed from the repository. There is no automated suite in the
-tree, so a change to `sidepanel.js` is verified by hand:
+`sidepanel.js` has no full suite in the tree, so most changes to it are verified by hand —
+its RENDERING rules are the exception, and now have one. The provider layer and the bridge
+DO have one — see below.
 
 1. `node --check sidepanel.js` — this is not optional. A regex assembled at runtime
    (`new RegExp(...)`) parses fine and throws on LOAD, so an unbalanced bracket in one
    multilingual cue takes the whole side panel down with no warning until you open it.
-2. Reload the extension and exercise the path you touched with a real case.
+2. `node tests/ai-provider.test.js` and `node tests/copilot-bridge.test.js` after any
+   change to `ai-provider.js` or `copilot-bridge.js`. Both fail silently in production if
+   they are wrong — a dropped system message does not throw, it just answers without the
+   SOTI rules — which is exactly why these two are the files that kept a suite.
+3. `node tests/sidepanel-render.test.js` after any change to `md()` or to the answer
+   sanitiser. Those are a stack of about twenty regexes rewriting the same string in
+   sequence, so each one can break the next, and the damage is invisible in a diff and
+   obvious on screen: a rule that swallowed the line break after "Troubleshoots done:"
+   left the first bullet of every section rendering as a literal "-" mid-sentence. The
+   harness lifts `md()` and the relay-artefact repairs out of the shipping file by name,
+   so it tests the real source rather than a copy — if it reports that sidepanel.js "no
+   longer contains" something, a function was renamed and the harness needs the new name.
+4. `node tests/content-feedtab.test.js` after any change to the Salesforce scraper's tab
+   handling. Reading a page is safe; CLICKING one is not, and the failure mode is silent in
+   the worst way — the wrong tab is opened on somebody's live case and the sync imports
+   whatever was behind it.
+5. Reload the extension and exercise the path you touched with a real case.
 
 The two structural traps the removed suite used to guard still apply and now have nothing
 watching them: no `_ML_RE` may contain `\w` (ASCII-only — it silently fails on Cyrillic, and
@@ -477,13 +552,116 @@ that exact mistake has already been made once), and every one must carry the `u`
 The suite is recoverable from git history if it is ever wanted back:
 `git checkout 68e9f63 -- Extension/tests` restores it with all 254 checks.
 ---
+5.12 The browser bridge — and why a chat box's limit is not the model's limit
+`ai-provider.js` makes the model a setting. The `bridge` provider is the one with no API key
+at all: Microsoft 365 Copilot has no completions endpoint, so instead of POSTing a prompt,
+the extension injects `copilot-bridge.js` into a Copilot tab the engineer is **already signed
+in to**, types the prompt into the composer, watches the answer render, and streams the text
+back. The existing SSO session does the authenticating, so there is no key to configure and
+none to leak.
+
+**The constraint that shaped everything.** A web composer has a length limit, and it TRUNCATES
+silently rather than erroring. Reporting that limit to the panel's prompt budgeter as if it
+were a context window is what starved the bridge: at the 12,000 characters this shipped with,
+the budgeter derived 4,800 tokens, and after reserving room for the answer a log analysis was
+left with roughly **5,400 characters for the entire case** — less than the rules block, never
+mind the evidence. Case summaries and JIRA fills, which
+build ~40,000-character prompts, arrived with most of the case removed. The answers looked
+fine, which is the worst property a failure can have.
+
+**The fix is that the limit is per MESSAGE, and a conversation has no such limit.** Remembering
+what came before is the entire point of a chat UI. So a case too big to type at once is split
+into PARTS that each fit the box and sent as consecutive messages; every part but the last
+says "this is reference material, do not answer yet", and only the final one carries the rules
+and the question. At the defaults — 90,000 characters a message, 8 parts — that is a budget
+far past anything a case needs, with no site's limit raised.
+
+**"Max size of one message" defaults to 90,000, not to a measured limit,** and that is a
+deliberate change from the original 12,000. The old figure was where a chat turn was KNOWN to
+fit. M365 Copilot's composer is a contenteditable with no `maxlength`, and it has not in
+practice refused what the relay types, so the conservative figure was costing eight round
+trips for a case that fits in one. Nothing is lost if a site does cap its box: the relay reads
+the box back after typing, reports what it actually held, re-splits to that size, retries once
+and stores the measurement — and a stored measurement outranks this setting from then on
+(`composerCap`). The number to bring down if a long case ever comes back answered as though
+its opening had gone missing is **Context parts**, not this one: the product is what has to
+fit the conversation's own window, and that window is the limit nothing can see.
+
+Three things make that safe rather than merely bigger, and each exists because of a failure
+that is invisible from the outside:
+
+- **Every part must be echoed back before the next is typed.** A part the page silently
+  dropped would leave a hole in the middle of the case that nothing downstream could detect.
+  Each part carries a per-run stamp (`⟦SOTI a3f9 3/8⟧`) because the first 40 characters are
+  identical across parts — matching on those, part 3 would find part 1's bubble and a lost
+  message would read as a delivered one.
+- **The page must go idle between parts.** Typing into a composer that is still streaming
+  loses the text, without an error.
+- **The split never cuts mid-line.** Half a log line is not weaker evidence, it is FALSE
+  evidence: a timestamp severed from its message, or a citation whose line number lost its
+  last digit, reads to the model as a fact.
+
+**When even that is not enough** the material is condensed — sent back through the same relay
+in a scratch conversation, asked to come back shorter, and the result analysed instead. This
+costs a round trip per chunk and it is the one place the tool lets a model rewrite evidence,
+so every line reference that comes back is checked against the material it was made from and
+the ones that cannot be found are NAMED in place (`flagUnsupportedCitations`). A model asked
+to shorten a log block will produce a plausible `setup.log:Line 103679` for a line that is not
+there, and downstream nothing can tell the difference. Beyond the condenser's reach the tail
+is trimmed and the cut declared, as everywhere else in this application.
+
+**The box also measures itself.** When a site accepts fewer characters than were typed, the
+relay reports what it actually held; the adapter re-splits to that size, retries once, and
+remembers the measurement (`learnedCap`) so the next request starts from evidence rather than
+from the setting. And because a site caps its OUTPUT as well as its input, an answer that ends
+mid-sentence is reported as `done_reason: "length"`, which routes it into the continuation
+path the panel already had for Ollama.
+
+**Reading the answer is not the same as receiving one.** Every other provider hands over a
+stream of tokens. The bridge has to READ its answer out of a page that is still writing it,
+and a half-rendered reply is not marked up the way the finished one is. Two artefacts come
+from that, and both were visible in the same case summary:
+
+- **A paragraph one word per line.** Copilot streams a paragraph by appending each arriving
+  word to it as its own node, so mid-answer the paragraph really is a run of one-word nodes.
+  Serialised as blocks, each became its own line — and the panel renders every newline
+  faithfully, so the summary came out as a column of single words. `domToMarkdown` now builds
+  a line from a run of INLINE nodes and only ends it at a block, which is what the browser
+  itself does with them; `tighten` will no longer descend into inline markup either, because
+  early in an answer the "biggest child" of a short paragraph is one word, and that word was
+  being returned as the whole reply.
+- **The answer twice.** Nothing already streamed can be un-said, so when the finished page
+  turns out to be laid out differently from the half-rendered one, the relay can only APPEND.
+  Comparing the two raw texts, a re-laid-out answer shares only a few leading characters with
+  what was streamed — so the whole summary was appended a second time, the interrupted copy
+  first. `reconcileTail` compares them with the SHAPE taken out (no whitespace, no emphasis,
+  no list markers, which are drawn by CSS until the answer completes) and sends only the words
+  that are genuinely new. A real divergence still falls back to appending from the common
+  prefix: repeating a little text is cheaper than losing the end of an answer.
+
+Both are also repaired in the panel (`repairRelayArtifacts` in `sidepanel.js`), because a
+summary an earlier build already saved into a case still carries them, and because the next
+chat UI this relay is pointed at will have a shape nobody has met yet. Both passes are hard
+to trigger on purpose: a column of words is only rejoined when it is long AND contains words
+that only occur inside sentences, and a repeated opening is only dropped when the first copy
+is strictly the shorter one.
+
+**What it still cannot promise.** The conversation's own window is finite and invisible: parts
+are bounded (12 maximum) so the total stays well inside it, but if a site compacts an early
+turn there is no way to see that from the DOM. Driving a chat UI programmatically is also a
+different thing, contractually, from calling a documented API, and these prompts carry
+customer data — check your organisation's acceptable-use terms. `SECURITY.md` documents this
+tool as local-only, and every provider except `ollama` makes that untrue, which is why the
+status dot goes amber rather than green and Ollama stays the default.
+---
 6. Key design decisions & trade-offs (the "why X not Y" summary)
 Decision	Chosen	Rejected alternative	Why
 AI location	Local (Ollama)	Cloud API	Privacy of customer logs; cost; offline use
 Default model	gemma4:2b (small)	A big 70B model	Must run on a 2-core laptop CPU; big models are unusably slow
 `num_ctx`	Fixed per session	Grow-to-fit per request	Avoids costly model reloads between turns
 Context size (small)	Auto: num_ctx ≤32,768, prompt budget 16,384 tokens	The full 131,072, or a fixed 8,192	Prefill cost is the PROMPT, not the window; 8K is ~2× faster but drops the case history
-Logs → AI	Pre-analysed brief + key lines	Raw log dump	Fits the window; small models can't search raw logs
+Logs → AI (local model)	Pre-analysed brief + key lines	Raw log dump	Fits the window; small models can't search raw logs
+Logs → AI (uploaded)	The log files themselves, verbatim	The same pre-analysed brief	The brief's sizes describe a composer, not an upload — a 2.7 MB log was arriving as 15,000 characters and the exception that explained the case never arrived at all
 Prompt ordering	Rules → logs → case/research	Case/research first	So trimming sacrifices secondary data, never the logs
 Chat history	Clean text only	Store the log dump too	Old dumps in history pushed new logs out of context
 RAG	Keyword search	Vector embeddings	Simpler, instant, no extra model on a busy CPU

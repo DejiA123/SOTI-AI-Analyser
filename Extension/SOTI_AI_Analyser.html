@@ -2,11 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <!-- GDPR/security: lock the app to first-party + localhost only. img-src/connect-src block
-         any exfiltration of case data to an external host (e.g. an injected <img src="http://…">),
-         even though script execution is already blocked by script-src 'self'. This mirrors the
-         manifest's extension_pages CSP so the standalone page is protected the same way. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:* https://*.soti.net https://*.salesforce.com https://*.force.com; object-src 'self'; worker-src 'self'; frame-src 'none'; base-uri 'self'; form-action 'none'">
+    <!-- GDPR/security: lock the app to first-party + localhost + the explicitly-supported AI
+         hosts. img-src/connect-src block any exfiltration of case data to an external host
+         (e.g. an injected <img src="http://…">), even though script execution is already
+         blocked by script-src 'self'. This MUST mirror the manifest's extension_pages CSP:
+         both apply to the side panel and the browser enforces the INTERSECTION, so a host
+         missing here is blocked even when the manifest allows it — which is exactly how an
+         Azure/Claude endpoint ends up failing with an opaque network error.
+         The AI hosts are reachable but never contacted unless that provider is selected;
+         a self-hosted gateway under *.soti.net is already covered and needs no edit. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:* https://*.soti.net https://*.salesforce.com https://*.force.com https://api.anthropic.com https://api.openai.com https://*.openai.azure.com https://openrouter.ai; object-src 'self'; worker-src 'self'; frame-src 'none'; base-uri 'self'; form-action 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOTI AI Analyser</title>
     <link rel="stylesheet" href="styles.css">
@@ -69,7 +74,29 @@
          reach mid-chat. Empty and hidden until then. -->
     <div class="qa-bar" id="qaBar" style="display:none"></div>
 
-    <div class="layout">
+    <!-- OPEN CASES — a permanent tab, not a case. It holds the engineer's Salesforce queue so
+         they can see everything they own in one place and drop into any of it. Shown INSTEAD
+         of .layout (see showOpenCases) rather than inside the chat, because it is a different
+         mode of working: picking what to work on, not working on it. -->
+    <div class="oc-view" id="ocView" style="display:none">
+        <div class="oc-head">
+            <div class="oc-title">
+                <span id="ocTitle">Open Cases</span>
+                <span class="oc-meta" id="ocMeta"></span>
+            </div>
+            <button class="btn btn-sf" id="btnSyncCaseList" title="Read every case from the Salesforce list view open in the active tab (e.g. My Open Cases).">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                Sync from Salesforce
+            </button>
+        </div>
+        <div class="oc-hint" id="ocHint">
+            Open your case list in Salesforce (e.g. <b>Cases → My Open Cases</b>), then press
+            <b>Sync from Salesforce</b>. Click any case here to open it as a working tab.
+        </div>
+        <div class="oc-list" id="ocList"></div>
+    </div>
+
+    <div class="layout" id="mainLayout">
         <!-- Case Information (Collapsible) -->
         <aside class="panel-left collapsed" id="panelL">
             <div class="ph" id="toggleL">
@@ -290,12 +317,35 @@
                     <div class="w-title">SOTI AI Analyser</div>
                     <div class="w-sub">100% Local AI — powered by Ollama on your machine. No cloud, no API key, no data sent externally.</div>
 
+                    <!-- TWO PAGES, not a longer list. Getting the case in and analysing logs are
+                         separate jobs done at different times, and stacking eight steps made the
+                         first four look like prerequisites for the last four. The pager keeps each
+                         page to one job. -->
                     <div class="w-howto">
                         <div class="w-howto-title">How to get started</div>
-                        <div class="w-step"><span class="w-step-num">1</span> Open a Salesforce case</div>
-                        <div class="w-step"><span class="w-step-num">2</span> Go to the Feed tab</div>
-                        <div class="w-step"><span class="w-step-num">3</span> On this app, open the Case Info Panel</div>
-                        <div class="w-step"><span class="w-step-num">4</span> Click Sync from Salesforce</div>
+
+                        <div class="w-howto-page" data-howto-page="1">
+                            <div class="w-step"><span class="w-step-num">1</span> Open a Salesforce case</div>
+                            <div class="w-step"><span class="w-step-num">2</span> Go to the Feed tab</div>
+                            <div class="w-step"><span class="w-step-num">3</span> On this app, open the Case Info Panel</div>
+                            <div class="w-step"><span class="w-step-num">4</span> Click Sync from Salesforce</div>
+                        </div>
+
+                        <div class="w-howto-page" data-howto-page="2" style="display:none">
+                            <div class="w-step"><span class="w-step-num">1</span> Attach logs with the 📄 button next to the chat box — LOG, TXT, XML, JSON, HAR or a ZIP bundle</div>
+                            <div class="w-step"><span class="w-step-num">2</span> The Logs section appears under Case Info once files are attached</div>
+                            <div class="w-step"><span class="w-step-num">3</span> Click Analyse Now — use Cancel if you need to stop it</div>
+                            <div class="w-step"><span class="w-step-num">4</span> A ZIP is unpacked for you, and findings are cited to the inner file</div>
+                        </div>
+
+                        <div class="w-howto-pager">
+                            <button class="w-howto-nav" id="howtoPrev" title="Previous">‹</button>
+                            <span class="w-howto-dots">
+                                <span class="w-howto-dot is-on" data-howto-dot="1"></span>
+                                <span class="w-howto-dot" data-howto-dot="2"></span>
+                            </span>
+                            <button class="w-howto-nav" id="howtoNext" title="Next">›</button>
+                        </div>
                     </div>
 
                 </div>
@@ -318,7 +368,9 @@
                             <button class="qa-drop-item" id="qaDraftEmail" title="AI drafts the next email to the customer from the latest case context">📧 Draft an email to the customer</button>
                             <button class="qa-drop-item" id="qaJira" title="Generate a JIRA report for this case">📄 Create JIRA</button>
                             <button class="qa-drop-item" id="qaProbRes" title="AI writes an internal Problem &amp; Resolution summary for this case">🧩 Problem &amp; Resolution Summary (Internal)</button>
-                            <button class="qa-drop-item" id="qa306090" title="AI builds a 30/60/90 aging-case analysis with JIRA justification">📅 30/60/90 Case Analysis</button>
+<!-- 30/60/90 is no longer a button. It is a REQUEST, and asking the AI for it in the
+                                 chat produces it from the same knowledge the button used — one less
+                                 control to maintain, and the phrasing stays the engineer's. -->
                         </div>
                     </div>
 
@@ -347,9 +399,31 @@
             <div id="progWrap" class="prog-wrap" style="display:none">
                 <div class="prog-lbl" id="progLbl">AI thinking...</div>
                 <div class="prog-bar"><div class="prog-fill" id="progFill"></div></div>
+                <!-- Stops the run that is ACTUALLY in flight, not the panel that started it.
+                     A log analysis can take minutes, and until now the only way out was to
+                     sit through it. Hidden unless something is cancellable. -->
+                <button id="btnCancelRun" class="prog-cancel" style="display:none"
+                        title="Stop this analysis. Anything already written stays in the chat.">Cancel</button>
             </div>
 
             <div class="chat-foot">
+                <!-- Meeting Notes lives at the TOP of the scrolling chat area, above every
+                     message. That is the right place for it — it is case material, not a
+                     turn in the conversation — but it means the notes get further away with
+                     every exchange, and mid-conversation is exactly when someone reaches for
+                     them. This is the way back, sat directly above the send button because
+                     that is where the hands already are.
+
+                     A row in normal flow rather than a floating chip: floating it over the
+                     message list would cover the last line of whatever was just said. -->
+                <div class="notes-jump-row">
+                    <!-- Icon only. The arrow has no label beside it, so the title and the
+                         aria-label are the only things that say where it goes — they are
+                         the control's name to a screen reader, not decoration. -->
+                    <button class="notes-jump" id="btnJumpNotes" aria-label="Go to Meeting Notes" title="Meeting Notes — scroll up and put the cursor in the box">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                    </button>
+                </div>
                 <div id="imgPreview" class="img-preview-strip" style="display:none"></div>
                 <div class="input-row">
                     <button class="attach-btn" id="btnAttach" title="Attach logs">
@@ -444,34 +518,300 @@
             <div class="mhdr" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
                 <div class="mtitle" style="display:flex;align-items:center;gap:8px">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-                    AI Settings — Ollama
+                    AI Settings
                 </div>
                 <button class="mcls" id="mSettingsClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
             </div>
 
-            <!-- Ollama Status -->
-            <div id="localAiStatus" style="font-size:11px;color:var(--txt2);padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid var(--border);margin-bottom:14px">Connecting to Ollama...</div>
-
+            <!-- WHICH BRAIN ANSWERS. Everything else in this app — the scrape, the log
+                 intelligence, the RAG, the prompt budgeter — is identical whichever one
+                 is picked. See AI_PROVIDERS.md. -->
             <div class="fld">
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-                    <span class="flbl" style="margin-bottom:0">Ollama URL</span>
+                <!-- HIDDEN, NOT REMOVED. The build ships one provider — the Copilot bridge —
+                     so there is nothing here to choose. The select stays in the DOM because
+                     the whole settings round trip (loadProviderFieldsFromConfig /
+                     readProviderFieldsToConfig) reads its value, and because the other
+                     adapters still work: unhide this block to get the choice back. -->
+                <div id="aiProviderPick" style="display:none">
+                    <span class="flbl">AI Provider</span>
+                    <select class="fsel" id="aiProviderSel" title="Which model answers. The Salesforce/JIRA sync, log intelligence, PulseKB research and prompt building are the same either way — only the final call changes.">
+                        <option value="ollama">Ollama — local, private</option>
+                        <option value="bridge" selected>Copilot browser bridge — no API key</option>
+                        <option value="openai">Azure OpenAI / OpenAI-compatible</option>
+                        <option value="anthropic">Claude (Anthropic API)</option>
+                    </select>
                 </div>
-                <div style="display:flex;gap:8px;align-items:center">
-                    <input class="finput" id="localAiUrl" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434" style="flex:1;font-family:monospace;font-size:11px">
-                    <button class="btn" id="btnRefreshModels" title="Detect models" style="padding:6px 8px;flex-shrink:0">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-                    </button>
+                <!-- What is ACTUALLY serving requests right now. The dropdown shows an
+                     intention; this shows reality, and they are not always the same
+                     (unsaved edit, or ai-provider.js not loaded at all). Ambiguity here
+                     is what turns "I picked the bridge" into an Ollama error message. -->
+                <div id="aiProviderActive" style="font-size:10px;margin-top:6px;line-height:1.5;color:var(--txt2)"></div>
+            </div>
+
+            <!-- REMOVED: the "⚠ Case data will leave this device" banner that used to sit
+                 here. It existed to make switching AWAY from local Ollama a deliberate act,
+                 and there is no longer a switch — the relay is the only provider the panel
+                 offers, so the banner was a permanent notice over a decision nobody makes.
+                 What it said is still true and still someone's to sign off: the prompt
+                 carries scraped Salesforce content and customer log text, and SECURITY.md
+                 describes the local path only. That belongs in SECURITY.md and the rollout
+                 approval, not in a box on a settings screen. -->
+
+            <!-- ============ OLLAMA ============ -->
+            <div id="paneOllama">
+                <div id="localAiStatus" style="font-size:11px;color:var(--txt2);padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid var(--border);margin:14px 0">Connecting to Ollama...</div>
+
+                <div class="fld">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                        <span class="flbl" style="margin-bottom:0">Ollama URL</span>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input class="finput" id="localAiUrl" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434" style="flex:1;font-family:monospace;font-size:11px">
+                        <button class="btn" id="btnRefreshModels" title="Detect models" style="padding:6px 8px;flex-shrink:0">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="fld" style="margin-top:12px">
+                    <span class="flbl">Model</span>
+                    <select class="fsel" id="localAiModelSel">
+                        <option value="">Detecting models...</option>
+                    </select>
                 </div>
             </div>
 
-            <div class="fld" style="margin-top:12px">
-                <span class="flbl">Model</span>
-                <select class="fsel" id="localAiModelSel">
-                    <option value="">Detecting models...</option>
-                </select>
+            <!-- ============ BROWSER BRIDGE (no API key) ============ -->
+            <div id="paneBridge" style="display:none">
+                <!-- REMOVED: the "Relays each prompt through a chat tab…" explainer and the
+                     amber caveat under it. Both described a provider you were choosing —
+                     how it works, and what you were taking on by picking it. There is no
+                     choice here now, so it was a standing disclaimer rather than anything
+                     anyone could act on. The caveats themselves have not changed: the relay
+                     drives someone else's web UI and breaks when that UI changes, which is
+                     what the "Bridge selectors" block below exists to repair without a
+                     reinstall, and whether automated use is permitted is a question for
+                     whoever approves the rollout. -->
+
+                <!-- EVERY FIELD FROM HERE TO THE SELECTORS BLOCK IS HIDDEN ON PURPOSE.
+                     They are the relay's tuning, and the shipped values are the tuned ones:
+                     M365 Copilot, a minimized window, 90,000 characters a message, 8 parts.
+                     The inputs stay in the DOM because readProviderFieldsToConfig() reads
+                     every one of them on Save — deleting them would write blanks back over
+                     the config. Drop the display:none to expose any of them again. -->
+                <div class="fld" style="display:none">
+                    <span class="flbl">Chat to relay through</span>
+                    <select class="fsel" id="bridgeTargetSel">
+                        <option value="copilot">Microsoft Copilot — copilot.microsoft.com</option>
+                        <option value="m365" selected>Microsoft 365 Copilot — m365.cloud.microsoft</option>
+                        <option value="claude">Claude — claude.ai</option>
+                        <option value="chatgpt">ChatGPT — chatgpt.com</option>
+                    </select>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Where the relay runs</span>
+                    <select class="fsel" id="bridgeRelayMode" title="The relay needs a real browser tab. This decides how visible that tab is.">
+                        <option value="minimized">Minimized window — out of sight (recommended)</option>
+                        <option value="window">Separate window — visible, unfocused</option>
+                        <option value="tab">Background tab in this window</option>
+                    </select>
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        It keeps one window and reuses it, and never touches a Copilot tab you
+                        opened yourself. If a minimized window stops rendering and the composer
+                        cannot be found, it is restored automatically and retried.
+                    </div>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Override URL (optional)</span>
+                    <input class="finput" id="bridgeUrl" placeholder="leave blank to use the default above" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Max size of one message (characters)</span>
+                    <input class="finput" id="bridgeMaxChars" type="number" min="2000" max="200000" step="1000" value="90000" style="font-family:monospace;font-size:11px">
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        How much the chat box accepts <em>at once</em> — not how much of the case
+                        the model gets, which is this × the parts below. If the box turns out to
+                        hold less, the relay measures it and re-splits automatically rather than
+                        failing.
+                    </div>
+                </div>
+
+                <!-- The one setting that decides whether the model sees the case or a fragment
+                     of it. A message box caps a MESSAGE; a conversation caps nothing, so a case
+                     too big to type at once is sent as consecutive messages and only the last
+                     asks a question. -->
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Context parts per conversation</span>
+                    <input class="finput" id="bridgeMaxParts" type="number" min="1" max="12" step="1" value="8" style="font-family:monospace;font-size:11px">
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        A big case is sent as several messages, and only the last one asks the
+                        question — the earlier ones are reference material the model is holding.
+                        <strong id="bridgeBudgetNote">8 parts ≈ 92,000 characters of case.</strong>
+                        Each part is a round trip, so more parts means a slower first token.
+                        Set to 1 to send a single message, as older builds did.
+                    </div>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="bridgeCondenseOverflow" style="margin-top:2px;flex-shrink:0">
+                        <span>
+                            <span class="flbl" style="margin-bottom:0">Condense a case that is bigger than that</span>
+                            <span style="display:block;font-size:10px;color:var(--txt2);margin-top:4px;line-height:1.5">
+                                Sends the case material through the same chat first, asking it to
+                                come back shorter, and analyses the result. Costs one extra round
+                                trip per chunk. Any log line reference that comes back and cannot
+                                be found in the original is flagged in place — a condensed log can
+                                gain a citation that never existed, and it reads exactly like a
+                                real one. Off, the tail is trimmed and the cut is declared.
+                            </span>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="bridgeCleanupChats" style="margin-top:2px;flex-shrink:0">
+                        <span>
+                            <span class="flbl" style="margin-bottom:0">Delete the relay's own chats afterwards</span>
+                            <span style="display:block;font-size:10px;color:var(--txt2);margin-top:4px;line-height:1.5">
+                                Off by default. Each relayed chat is titled with the case number
+                                it came from, so the Copilot history reads as a record you can
+                                navigate — deleting it throws that away. Turn this on if you would
+                                rather the bridge left no trace. Either way it only ever removes
+                                conversations this tool created, identified by that title, and it
+                                leaves everything else alone.
+                            </span>
+                        </span>
+                    </label>
+                </div>
+
+                <!-- HIDDEN, NOT REMOVED — and the distinction matters more here than
+                     anywhere else in this modal. readProviderFieldsToConfig() reads these
+                     four inputs on every Save: delete them and val() returns '' for each,
+                     which writes selectors:null back over whatever custom selectors were
+                     stored, silently, the next time anyone presses Save. Hiding leaves the
+                     stored values intact and still loaded into the boxes.
+
+                     This is also the repair kit for the one failure this relay is
+                     guaranteed to hit eventually — Microsoft changes the composer markup,
+                     the bridge cannot find where to type, and these selectors are what
+                     fixes it without a reinstall. Unhide this block when that day comes. -->
+                <details style="margin-top:12px;display:none">
+                    <summary style="font-size:11px;color:var(--txt2);cursor:pointer">Bridge selectors (fix here when the site's layout changes)</summary>
+                    <div class="fld" style="margin-top:10px">
+                        <span class="flbl">Message box</span>
+                        <input class="finput" id="bridgeSelComposer" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div class="fld" style="margin-top:8px">
+                        <span class="flbl">Send button</span>
+                        <input class="finput" id="bridgeSelSend" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div class="fld" style="margin-top:8px">
+                        <span class="flbl">Stop button (marks "still generating")</span>
+                        <input class="finput" id="bridgeSelStop" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div class="fld" style="margin-top:8px">
+                        <span class="flbl">Answer container</span>
+                        <input class="finput" id="bridgeSelAssistant" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div style="font-size:10px;color:var(--txt2);margin-top:6px;line-height:1.5">
+                        Comma-separated CSS selectors, tried left to right. Blank = the built-in list.
+                    </div>
+                </details>
+
+                <!-- Chrome will not let an extension read a tab it has no host permission
+                     for, and the optional grant can only be asked for from a click. Without
+                     a button of its own, the only way to ask was to change the provider or
+                     press Save — so switching the TARGET here left the new host ungranted
+                     and every request died on "Extension manifest must request permission
+                     to access this host". This states the grant and repairs it in one click. -->
+                <div id="bridgeGrantRow" style="display:flex;gap:8px;align-items:center;margin-top:12px">
+                    <button type="button" class="btn" id="btnBridgeGrant" style="flex:1;background:var(--bg3)">Grant access</button>
+                </div>
+                <div id="bridgeGrantStatus" style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5"></div>
+
+                <button type="button" class="btn" id="btnBridgeTest" style="width:100%;margin-top:10px;background:var(--bg3)">Test Copilot Bridge Connection</button>
+                <button type="button" class="btn" id="btnBridgeCleanNow" style="display:none;width:100%;margin-top:8px;background:var(--bg3)">Clean up relay chats now</button>
             </div>
 
-            <div class="fld" style="margin-top:12px">
+            <!-- ============ AZURE OPENAI / OPENAI-COMPATIBLE ============ -->
+            <div id="paneOpenai" style="display:none">
+                <div class="fld" style="margin-top:14px">
+                    <span class="flbl">Flavour</span>
+                    <select class="fsel" id="openaiFlavorSel">
+                        <option value="azure">Azure OpenAI</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="custom">Custom / gateway (OpenAI-compatible)</option>
+                    </select>
+                </div>
+
+                <div class="fld" style="margin-top:12px" id="fldOpenaiEndpoint">
+                    <span class="flbl">Endpoint</span>
+                    <input class="finput" id="openaiEndpoint" placeholder="https://YOUR-RESOURCE.openai.azure.com" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div class="fld" style="margin-top:12px" id="fldOpenaiDeployment">
+                    <span class="flbl">Deployment name</span>
+                    <input class="finput" id="openaiDeployment" placeholder="gpt-5" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div class="fld" style="margin-top:12px" id="fldOpenaiApiVersion">
+                    <span class="flbl">API version</span>
+                    <input class="finput" id="openaiApiVersion" placeholder="2024-10-21" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div class="fld" style="margin-top:12px" id="fldOpenaiModel">
+                    <span class="flbl">Model</span>
+                    <input class="finput" id="openaiModel" placeholder="gpt-5" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div class="fld" style="margin-top:12px">
+                    <span class="flbl">API key</span>
+                    <input class="finput" id="openaiApiKey" type="password" placeholder="paste key" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div style="padding:10px 12px;border-radius:8px;margin-top:12px;font-size:11px;color:var(--txt2);background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.3);line-height:1.6">
+                    <strong style="color:var(--txt1);display:block;margin-bottom:5px">🔑 A key in the extension is a key anyone can read</strong>
+                    It is stored in <code style="font-size:10px">chrome.storage.local</code>, which
+                    is plain text on disk and readable by anyone who can unpack the extension.
+                    That is fine for a proof of concept and <strong>not</strong> fine for a rollout.
+                    For real use, point <em>Endpoint</em> at a gateway that holds the key
+                    server-side — a host under <code style="font-size:10px">*.soti.net</code> is
+                    already allowed by this extension's CSP and needs no manifest change.
+                </div>
+            </div>
+
+            <!-- ============ CLAUDE ============ -->
+            <div id="paneAnthropic" style="display:none">
+                <div class="fld" style="margin-top:14px">
+                    <span class="flbl">Model</span>
+                    <input class="finput" id="anthropicModel" list="anthropicModelList" placeholder="claude-sonnet-5" style="font-family:monospace;font-size:11px">
+                    <datalist id="anthropicModelList">
+                        <option value="claude-opus-5"></option>
+                        <option value="claude-sonnet-5"></option>
+                        <option value="claude-haiku-4-5-20251001"></option>
+                    </datalist>
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        Free text on purpose — a new model should not need a new build.
+                    </div>
+                </div>
+
+                <div class="fld" style="margin-top:12px">
+                    <span class="flbl">API key</span>
+                    <input class="finput" id="anthropicApiKey" type="password" placeholder="sk-ant-..." style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div style="padding:10px 12px;border-radius:8px;margin-top:12px;font-size:11px;color:var(--txt2);background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.3);line-height:1.6">
+                    Same caveat as above: a key stored in the extension is readable by anyone with
+                    the extension folder. Use a server-side gateway for anything beyond a trial.
+                </div>
+            </div>
+
+            <div class="fld" style="margin-top:12px;display:none">
                 <span class="flbl">Context Size (num_ctx)</span>
                 <select class="fsel" id="localAiCtxSel" title="Maximum context window for log analysis. Auto uses up to 64K when the model supports it. Lower this if you run out of GPU memory.">
                     <option value="auto">Auto (recommended)</option>
@@ -499,6 +839,7 @@
                 </div>
             </div>
 
+            <div id="paneOllamaHelp">
             <div id="localAiStandaloneHelp" style="display:none;padding:10px 12px;border-radius:8px;margin-top:14px;font-size:11px;color:var(--txt2);background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.35);line-height:1.65">
                 <strong style="color:var(--txt1);display:block;margin-bottom:5px">Standalone browser mode</strong>
                 <div>Local AI works here if you <strong>do not</strong> open this file directly (file://).</div>
@@ -514,6 +855,7 @@
                 <div>1. Run <strong>setup_local_ai.bat</strong> (double-click).</div>
                 <div>2. Wait for “Setup complete” (~7.2 GB model download once).</div>
                 <div>3. Reload → refresh models above → Save.</div>
+            </div>
             </div>
 
             <div style="border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 15px"></div>
@@ -616,8 +958,9 @@
          window.SotiPower at definition time, and the hot paths consult it from the
          very first log scan. It degrades to static defaults if this file is absent. -->
     <script src="power.js?v=2.7.1"></script>
+    <script src="ai-provider.js?v=2.9.0"></script>
     <script src="lib/tesseract.v5.min.js"></script>
-    <script src="sidepanel.js?v=2.7.1"></script>
+    <script src="sidepanel.js?v=2.9.0"></script>
     <!-- Generation Loading Modal — real progress (driven by JiraProgress in sidepanel.js) -->
     <div class="backdrop" id="mGen" style="display:none">
         <div class="modal" style="text-align:center; max-width:340px">
