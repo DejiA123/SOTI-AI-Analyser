@@ -48,7 +48,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 3.0.0 — one provider, and a Salesforce sync that reads the replies. The panel shipped with four AI providers behind a picker and a banner warning that case data would leave the device; it ships with ONE now — the Copilot browser bridge, relaying through Microsoft 365 Copilot in a minimized window at 90,000 characters a message — and the picker, the relay tuning and the banner are gone from Settings along with the status dot and the power pill. A stored value always beats a default, so an install carrying the old ollama / copilot.microsoft.com / 55,000 settings would have kept them forever with nothing left in the UI able to correct them; a one-time migration rewrites those four and records that it ran, so it never overrules a later deliberate change. What the banner said is still true and has not been softened — case content leaves this device and SECURITY.md still assesses the local path only — it is just no longer a permanent notice over a decision nobody makes: that sign-off belongs to whoever ships the build. The sync, meanwhile, had been missing every REPLY to an internal note. A Chatter comment is its own article, rendered either inside the post or as a SIBLING of it depending on the Lightning release, and reading only the post body meant a case synced with the question and without the answer — on an internal note that is usually where the answer lives. Replies are now gathered from the whole scrape root and matched to their post by containment first, then by the nearest post above them; one that matches neither is counted as orphaned rather than guessed onto a post, because a reply filed under the wrong author is worse than a missing one. The post body is scoped past them too, so a note with no body of its own stops absorbing the first reply beneath it and publishing it under the wrong name. And the sync stops OPENING things. The i icon beside an email\'s recipients was being clicked from two directions, neither of them new: the feed loader, because "Show more recipients" reads exactly like the "Show more posts" it is looking for and an icon keeps its label in assistive text inside itself, where textContent finds it; and the expand-post sweep, because aria-expanded="false" marks any collapsed disclosure control and not just a post. One rule now governs every click this extension makes on a live case — never click a control that opens a popover, a menu or a dialog — and the naming half of it matches on word starts, because every one of those controls arrives plural and a trailing word boundary rejects "recipients", "details" and "addresses" alike. 64 new deterministic checks, run against the markup from the reports themselves. Previously — build 2.11.0, the JIRA ticket now quotes the evidence its own forensic report named. The \'Log Analysis\' block is filled deterministically, never by the model, precisely so it cannot drift from the analysis — and it had drifted anyway, in the way that is hardest to catch: the block was well-formed log text, correctly delimited, and about something else. On the Managed Google Play case it opened mid-stack at \'--- End of stack trace from previous location where exception was thrown ---\' and ran on into device-presence heartbeats, while the report\'s own verdict — ArgumentException: Version thrown by AppVersionService.AddAppVersion — appeared nowhere in it. The anchoring was never the problem: the throwing frame scored 40, the highest of any line in the file. Three things downstream of it were. Windows were scored by SUMMING their anchors, so two hundred consecutive DEBUG lines that merely contained \'AndroidEnterprise\' and \'AndroidWork\' scored 6 apiece and beat the one entry that named the fault — the same repetition-beats-strength mistake scoreJiraLogRelevance had already been taught one level up and windows had not. Windows were then built by chaining anything within eight lines of the previous one, so a run of weak entries adjacent to a strong one absorbed it and carried the window four hundred lines away. And the expansion guards allowed 15 lines back and 40 forward against an exception entry that is 122 lines, so even a correctly-chosen window opened inside its own stack trace. A window is now built out of whole log ENTRIES — anchors fold onto the entry that contains them, a window is seeded by the strongest entry left and grows only into neighbours that are at least half as strong, and the budget went from 3,800 characters (which could not hold ONE .NET dump) to a primary window of 12,000 that arrives whole. A second window has to earn its place at 60% of the primary\'s strength, so a ticket stops quoting \'PulseChecker enter\' and \'Extended session\' underneath a verified exception as though those were findings too. Measured on the case: the field is now the complete 121-line entry, header to closing banner, with no heartbeat traffic in it, and the derived keyword block is the single word ArgumentException. A file with no entry structure at all — an XML preference tree, a CSV — is detected by sampling rather than assumed, and gets a fixed radius instead of four hundred lines; an entry longer than any real one is clamped and its cut declared, never abandoned to a radius that would put the excerpt back where it started. 19 new deterministic checks, 204 in total. Previously — build 2.10.0, an uploaded log is not a trimmed one. Every path in this file that touches a log is a REDUCER, and the sizes they reduce to are what a chat composer holds: 240 characters per digest row, 15,000 per file, 24,000 for the whole failure index. Against the browser bridge those numbers stopped describing anything real the day the case started going up as a FILE — the ceiling there is two megabytes, measured with sentinel lines planted at the start, middle and end of the payload and all three quoted back — and the reducers went on reducing anyway. Measured on the case that turned it up: a 3.56 MB bundle reached the model as 32,907 characters, 0.92% of itself, and a 2,715,310-character ManagementService.log was allowed 15,000. The ArgumentException: Version that WAS the case — Managed Google Play refusing a product because AddAppVersion threw on its version string — got in by luck, and its thirty-frame stack, the half that says AddApprovedProduct called UpdateAllProducts called Insert, did not. Nothing announced any of it: the digest row that read \'Device (69c9c52512fd\' looks like a device id rather than half of one, and \'[secondary failure-index truncated]\' reads as tidiness. The same bundle now arrives at 1,358,354 characters with two of its three files COMPLETE and the third missing exactly one line — a 2,210,546-character Managed Home Screen configuration schema, named with its size where it sat. A file too big for the ceiling is no longer head-cut: it is kept as contiguous windows around every error, warning and exception, each grown forward over the exception block beneath it so a stack is never severed from what threw it, plus the file\'s head and its tail, with every gap declared inline by its real line numbers and by whether anything in it carried a signal. The budget is spent rather than estimated — a coarse radius ladder left 1.9 MB of a 2 MB upload unused on a log whose average line is 2.3 KB, so windows now grow outward a line at a time until the next one will not fit, and the ceiling is enforced against the RENDERED file because the gap markers are text too. Three things that were quietly costing evidence went with it: the prompt governor, whose whole justification is local prefill, was scaling a 2 MB upload down to 650 KB on a laptop under pressure to protect a CPU that never reads it; the failure index was cut at a character instead of a line boundary, which is how a device id became a fact with half its digits; and \'\\bexcept\\b\' could not see \'ArgumentException\' — there is no word boundary inside it — so a bare bracketed exception line was invisible to the prefilter, to classifyLogLine behind it and to every evidence path in the app, and the ones that did surface got through on an unrelated word. And a .har turned out to be leaving raw. send()\'s inline path had always split network captures out before scanning; buildLogAnalysisContext — the FORENSIC path, the one \'analyse the logs\' takes — never did, so the cross-log incident index, the pattern profile and the query-focused digest each read a one-line JSON capture line by line and quoted the most \'relevant\' line out of it. On an SSO capture that line is the Authorization header. Verified by planting a bearer token, a session cookie and an OAuth code in a capture and running the shipping panel over the bundle: all three came back in all three sections, bound for a third-party chat service. Raising the per-line cap for uploads would have widened it from 240 characters of a token to the whole one. The split now lives at the eight scanners themselves rather than at their call sites, because a call site can be added and a guard forgotten, and captures reach the model the way they were always meant to — as the redacted transaction analysis and evidence, under the .har.txt name the upload control accepts. The local Ollama path is untouched and proven so — 16 focus/budget combinations produce byte-identical output against the shipped build — and 49 new deterministic checks, 185 in total, run the shipping code — plus the whole thing driven end to end in a real Chromium against the real 2.7 MB log and a four-file bundle. Previously — build 2.9.0, the model is a SETTING now, not a rewrite. The panel could only ever talk to Ollama: five call sites each built their own /api/chat fetch, so "use something faster" meant editing five places and re-proving the streaming pump, the thinking-field fallback, the done_reason auto-continue and the perf instrumentation that reads eval_count out of the terminal frame. One translator (ai-provider.js) now sits under all five and speaks Ollama NDJSON in both directions, so Azure OpenAI, OpenAI, a company gateway, Claude, or a browser bridge relaying through a Copilot/Claude/ChatGPT tab the engineer is ALREADY SIGNED IN TO — no API key, the existing SSO session authenticates — all arrive as the same stream the panel already consumes, and nothing above the seam changed. Microsoft 365 Copilot has no completions endpoint and a Copilot agent runs the other way (it lets Copilot call this tool, never this tool call Copilot), so the bridge is the only keyless path that exists; it is built and it is honest about what it is. Swapping the engine also meant repairing four calibrations that exist ONLY because the local model is a CPU-bound 2-4B: getModelContextLength probed /api/show, which a cloud endpoint does not have, so it fell to the 16,384-token FAILURE default and a 200K model was handed the same amputated prompt the local path spent a release learning to avoid; isSmallLocalModel drives eighteen separate budget decisions and every one of them is compensation a hosted model does not need; getSessionCtx capped auto at 32K to protect a CPU from prefill it cannot afford, which on a rented window only starves it; and warmUpModel pinned a model in RAM, which against a hosted endpoint is one billed request for the word "ok" and against the bridge would open a tab and type into it. The bridge reads answers out of somebody else\'s rendered HTML, so its selectors are SETTINGS rather than constants — when the site moves the fix is a settings edit, not a release — its prompt cap is reported to the budgeter so the log trimmer targets what a composer will actually swallow rather than what a model could, and it streams forward-only, preferring a little duplication over a truncated answer when markdown re-renders mid-stream. And because every provider except Ollama makes SECURITY.md\'s "no cloud AI, no third-party data processor" untrue, the panel refuses to let that happen quietly: the status dot goes AMBER not green, saving confirms with a warning rather than a success tick, the diagnostics mark the provider (OFF-DEVICE), Ollama stays the default and nothing switches on its own. 33 deterministic checks pin the translation down, because a translator fails SILENTLY — a dropped system message does not throw, it just answers confidently without the SOTI rules, and a finish_reason that never becomes done_reason just stops a forensic report mid-section with nothing to resume it. Previously — build 2.8.0, "Next steps" now starts where the case actually is: the newest message. Nothing read it. A chain whose last word was SOTI\'s own — "I will be in contact with the developers on MCMR-30202 first thing tomorrow to get a target build" — reached the model only through the promise block, whose instruction is "never contradict this": a request not to argue with the commitment rather than to CARRY IT OUT. The generated plan duly opened "1. Arrange a 30-minute remote session with the customer" — a session held five days earlier, ahead of the follow-up the customer had been promised in writing that morning. The newest message\'s stated action is now a signal in its own right, on both sides: SOTI\'s own undertaking opens the plan and the drafted email reports back on it, while a customer\'s "I will send it Monday" becomes a follow-up step instead of the same request under a new name. A conditional aside is not a commitment ("if it is not released yet, tell me and I will plan around it" was being reported as the outstanding next action), and neither is a three-word gesture. The commitment itself arrives whole: a tempered capture stops where the NEXT "I will" begins, so it ended "…first thing tomorrow to get", naming no deliverable — and every promise on a hard-wrapped email stopped at whatever column the mail client broke on. A session ALREADY HELD is now the fourth session state, so the On-Prem log-access rule stops mandating a meeting that has happened. An internal note survives the wrap that split it: "Prepare the / 90-day review pack" was two items and the leading-marker strip ate the number, leaving "day review pack"; "Chase Development for a target build" was in no forward-verb list, so the one agreed action on a 90-day case was filed under things ALREADY DONE and banned from the plan. Urgency and business impact quote the sentence the heading claims: "the customer explicitly demanded priority" sat over "…for your escalation" — SOTI\'s own escalation — while "we could not push the planogram to the store estate" and "still being done by hand, one device at a time" were no impact at all. A fix that has already SHIPPED is stated as fact, not left to the model: when a ticket the case already carries turns up in the Resolved Issues of a newer build, the answer says which build and that the deployment is behind it — including on a log analysis, which until now was FORBIDDEN from mentioning an upgrade at all, because research never ran on that path so no MCMR was ever verified. A case that names its own MCMR no longer switches the citation guard off: "did the agent ask to see the release notes?" is a question about the agent\'s words, and it was being inferred from case text. The 30/60/90 and the internal Problem & Resolution record get the decisive signals they never had, mapped to their own section names. And the case summary got faster by doing less: the chain-condensation pass was gated on message COUNT, so a twelve-message case spent six minutes of model time rewriting messages that had room for 260 characters into 90 — a history that came out shorter than the free one. A big case now fits the budget instead of being cut blind: the Case Summary sized its own message against “budget minus 1,700” — the amount the request trimmer promises to KEEP of the system message, not what it costs — so a case carrying a 15,348-character Salesforce Description and a 5,639-character JIRA thread built a pair of messages 7,132 characters over, the trimmer deleted [RELEASE NOTES] and half the MCMR rule off the end, and the model returned nothing at all. The system side is estimated from the case record now, and the Description — the one section with no cap while the notes, the chain and the ticket all had one — has one. And the tool stops talking to the customer: a “*Check: …*” line is the panel speaking to the ENGINEER, and Copy was stripping the italics and keeping the sentence. An internal note is read in full, too: only the text after "Next steps" was ever parsed, so the SAME template\'s "Troubleshoots done" section — where the engineer records what was actually carried out — reached nothing, and the internal Problem & Resolution record came back without the hand-set 240-second keep-alive that was the only thing keeping 2,060 devices online. That section is now read across every note, and when the finished "Solution:" still omits a workaround the case data says is in place, the omission is FLAGGED rather than filled in — which of a case\'s recorded actions IS the mitigation is a judgement, and a wrong one written into a permanent record is worse than a missing one. 92 new deterministic checks, 437 in total, run the shipping code. Previously — build 2.7.0, a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 3.1.0 — the open-case queue became a queue you can work. Every case is one line — number, subject, severity, age — grouped by entitlement tier with the "Plus" variants folded into their base, because the tier is which cases you owe first. It can be searched by number, subject or account, filtered to one tier, and sorted by age, by severity, or by whose move it is; anything the panel cannot rank sorts LAST in every direction, because reversing a comparator reverses where its unknowns land and "low severity first" opening with a screenful of unreadable priorities looks like the sort is broken rather than the data being thin. A case Waiting on SOTI response is marked in red: the status is not otherwise visible without opening the case, and that one is a job rather than a state of waiting. Each row expands to the case DESCRIPTION — the field the customer wrote the problem into, not the subject, which is already on the row. The list view has no Description column, so it is fetched per case from the record in a minimized window of its own rather than a tab in the browser you are using: the queue is read by opening one expander after another, and a tab that appears, shifts every other tab along and vanishes is a tab strip flickering while you work. Minimized windows are throttled, so a record that does not finish rendering gets the window restored unfocused and a second, shorter attempt before the panel gives up. Reading a field is also not a sync: GET_SALESFORCE_CASE_BRIEF reads two fields and touches nothing, where the full scrape would drive the feed\'s infinite scroll to the end first — minutes of scrolling somebody\'s case to read a field that is on screen the moment the record renders. Clicking a case opens it in Salesforce AND syncs it, waiting for the record AND the Feed sub-tab: Lightning paints the fields before the tab strip, and a sync started in that gap reported "no Feed tab could be found on this layout" about a page that was only half-drawn. Two scrapes were wrong underneath all of it. Every subject in the queue read as "Preview" — the subject\'s own <a> is the one link in the table Salesforce renders without a title, so the fallback ran and found the Preview icon button first; a cell read now skips anything that is part of a control, which fixed the actions column reading as "Show Actions" the same way. And the case Description arrived as one run-on paragraph, because textContent does not know what a <br> is and that field is one element with a break between every line — its structure IS the content when the lines are "Device make and model", "OS type and version", "Detailed description of issue". Previously — build 3.0.0, one provider, and a Salesforce sync that reads the replies. The panel shipped with four AI providers behind a picker and a banner warning that case data would leave the device; it ships with ONE now — the Copilot browser bridge, relaying through Microsoft 365 Copilot in a minimized window at 90,000 characters a message — and the picker, the relay tuning and the banner are gone from Settings along with the status dot and the power pill. A stored value always beats a default, so an install carrying the old ollama / copilot.microsoft.com / 55,000 settings would have kept them forever with nothing left in the UI able to correct them; a one-time migration rewrites those four and records that it ran, so it never overrules a later deliberate change. What the banner said is still true and has not been softened — case content leaves this device and SECURITY.md still assesses the local path only — it is just no longer a permanent notice over a decision nobody makes: that sign-off belongs to whoever ships the build. The sync, meanwhile, had been missing every REPLY to an internal note. A Chatter comment is its own article, rendered either inside the post or as a SIBLING of it depending on the Lightning release, and reading only the post body meant a case synced with the question and without the answer — on an internal note that is usually where the answer lives. Replies are now gathered from the whole scrape root and matched to their post by containment first, then by the nearest post above them; one that matches neither is counted as orphaned rather than guessed onto a post, because a reply filed under the wrong author is worse than a missing one. The post body is scoped past them too, so a note with no body of its own stops absorbing the first reply beneath it and publishing it under the wrong name. And the sync stops OPENING things. The i icon beside an email\'s recipients was being clicked from two directions, neither of them new: the feed loader, because "Show more recipients" reads exactly like the "Show more posts" it is looking for and an icon keeps its label in assistive text inside itself, where textContent finds it; and the expand-post sweep, because aria-expanded="false" marks any collapsed disclosure control and not just a post. One rule now governs every click this extension makes on a live case — never click a control that opens a popover, a menu or a dialog — and the naming half of it matches on word starts, because every one of those controls arrives plural and a trailing word boundary rejects "recipients", "details" and "addresses" alike. 64 new deterministic checks, run against the markup from the reports themselves. Previously — build 2.11.0, the JIRA ticket now quotes the evidence its own forensic report named. The \'Log Analysis\' block is filled deterministically, never by the model, precisely so it cannot drift from the analysis — and it had drifted anyway, in the way that is hardest to catch: the block was well-formed log text, correctly delimited, and about something else. On the Managed Google Play case it opened mid-stack at \'--- End of stack trace from previous location where exception was thrown ---\' and ran on into device-presence heartbeats, while the report\'s own verdict — ArgumentException: Version thrown by AppVersionService.AddAppVersion — appeared nowhere in it. The anchoring was never the problem: the throwing frame scored 40, the highest of any line in the file. Three things downstream of it were. Windows were scored by SUMMING their anchors, so two hundred consecutive DEBUG lines that merely contained \'AndroidEnterprise\' and \'AndroidWork\' scored 6 apiece and beat the one entry that named the fault — the same repetition-beats-strength mistake scoreJiraLogRelevance had already been taught one level up and windows had not. Windows were then built by chaining anything within eight lines of the previous one, so a run of weak entries adjacent to a strong one absorbed it and carried the window four hundred lines away. And the expansion guards allowed 15 lines back and 40 forward against an exception entry that is 122 lines, so even a correctly-chosen window opened inside its own stack trace. A window is now built out of whole log ENTRIES — anchors fold onto the entry that contains them, a window is seeded by the strongest entry left and grows only into neighbours that are at least half as strong, and the budget went from 3,800 characters (which could not hold ONE .NET dump) to a primary window of 12,000 that arrives whole. A second window has to earn its place at 60% of the primary\'s strength, so a ticket stops quoting \'PulseChecker enter\' and \'Extended session\' underneath a verified exception as though those were findings too. Measured on the case: the field is now the complete 121-line entry, header to closing banner, with no heartbeat traffic in it, and the derived keyword block is the single word ArgumentException. A file with no entry structure at all — an XML preference tree, a CSV — is detected by sampling rather than assumed, and gets a fixed radius instead of four hundred lines; an entry longer than any real one is clamped and its cut declared, never abandoned to a radius that would put the excerpt back where it started. 19 new deterministic checks, 204 in total. Previously — build 2.10.0, an uploaded log is not a trimmed one. Every path in this file that touches a log is a REDUCER, and the sizes they reduce to are what a chat composer holds: 240 characters per digest row, 15,000 per file, 24,000 for the whole failure index. Against the browser bridge those numbers stopped describing anything real the day the case started going up as a FILE — the ceiling there is two megabytes, measured with sentinel lines planted at the start, middle and end of the payload and all three quoted back — and the reducers went on reducing anyway. Measured on the case that turned it up: a 3.56 MB bundle reached the model as 32,907 characters, 0.92% of itself, and a 2,715,310-character ManagementService.log was allowed 15,000. The ArgumentException: Version that WAS the case — Managed Google Play refusing a product because AddAppVersion threw on its version string — got in by luck, and its thirty-frame stack, the half that says AddApprovedProduct called UpdateAllProducts called Insert, did not. Nothing announced any of it: the digest row that read \'Device (69c9c52512fd\' looks like a device id rather than half of one, and \'[secondary failure-index truncated]\' reads as tidiness. The same bundle now arrives at 1,358,354 characters with two of its three files COMPLETE and the third missing exactly one line — a 2,210,546-character Managed Home Screen configuration schema, named with its size where it sat. A file too big for the ceiling is no longer head-cut: it is kept as contiguous windows around every error, warning and exception, each grown forward over the exception block beneath it so a stack is never severed from what threw it, plus the file\'s head and its tail, with every gap declared inline by its real line numbers and by whether anything in it carried a signal. The budget is spent rather than estimated — a coarse radius ladder left 1.9 MB of a 2 MB upload unused on a log whose average line is 2.3 KB, so windows now grow outward a line at a time until the next one will not fit, and the ceiling is enforced against the RENDERED file because the gap markers are text too. Three things that were quietly costing evidence went with it: the prompt governor, whose whole justification is local prefill, was scaling a 2 MB upload down to 650 KB on a laptop under pressure to protect a CPU that never reads it; the failure index was cut at a character instead of a line boundary, which is how a device id became a fact with half its digits; and \'\\bexcept\\b\' could not see \'ArgumentException\' — there is no word boundary inside it — so a bare bracketed exception line was invisible to the prefilter, to classifyLogLine behind it and to every evidence path in the app, and the ones that did surface got through on an unrelated word. And a .har turned out to be leaving raw. send()\'s inline path had always split network captures out before scanning; buildLogAnalysisContext — the FORENSIC path, the one \'analyse the logs\' takes — never did, so the cross-log incident index, the pattern profile and the query-focused digest each read a one-line JSON capture line by line and quoted the most \'relevant\' line out of it. On an SSO capture that line is the Authorization header. Verified by planting a bearer token, a session cookie and an OAuth code in a capture and running the shipping panel over the bundle: all three came back in all three sections, bound for a third-party chat service. Raising the per-line cap for uploads would have widened it from 240 characters of a token to the whole one. The split now lives at the eight scanners themselves rather than at their call sites, because a call site can be added and a guard forgotten, and captures reach the model the way they were always meant to — as the redacted transaction analysis and evidence, under the .har.txt name the upload control accepts. The local Ollama path is untouched and proven so — 16 focus/budget combinations produce byte-identical output against the shipped build — and 49 new deterministic checks, 185 in total, run the shipping code — plus the whole thing driven end to end in a real Chromium against the real 2.7 MB log and a four-file bundle. Previously — build 2.9.0, the model is a SETTING now, not a rewrite. The panel could only ever talk to Ollama: five call sites each built their own /api/chat fetch, so "use something faster" meant editing five places and re-proving the streaming pump, the thinking-field fallback, the done_reason auto-continue and the perf instrumentation that reads eval_count out of the terminal frame. One translator (ai-provider.js) now sits under all five and speaks Ollama NDJSON in both directions, so Azure OpenAI, OpenAI, a company gateway, Claude, or a browser bridge relaying through a Copilot/Claude/ChatGPT tab the engineer is ALREADY SIGNED IN TO — no API key, the existing SSO session authenticates — all arrive as the same stream the panel already consumes, and nothing above the seam changed. Microsoft 365 Copilot has no completions endpoint and a Copilot agent runs the other way (it lets Copilot call this tool, never this tool call Copilot), so the bridge is the only keyless path that exists; it is built and it is honest about what it is. Swapping the engine also meant repairing four calibrations that exist ONLY because the local model is a CPU-bound 2-4B: getModelContextLength probed /api/show, which a cloud endpoint does not have, so it fell to the 16,384-token FAILURE default and a 200K model was handed the same amputated prompt the local path spent a release learning to avoid; isSmallLocalModel drives eighteen separate budget decisions and every one of them is compensation a hosted model does not need; getSessionCtx capped auto at 32K to protect a CPU from prefill it cannot afford, which on a rented window only starves it; and warmUpModel pinned a model in RAM, which against a hosted endpoint is one billed request for the word "ok" and against the bridge would open a tab and type into it. The bridge reads answers out of somebody else\'s rendered HTML, so its selectors are SETTINGS rather than constants — when the site moves the fix is a settings edit, not a release — its prompt cap is reported to the budgeter so the log trimmer targets what a composer will actually swallow rather than what a model could, and it streams forward-only, preferring a little duplication over a truncated answer when markdown re-renders mid-stream. And because every provider except Ollama makes SECURITY.md\'s "no cloud AI, no third-party data processor" untrue, the panel refuses to let that happen quietly: the status dot goes AMBER not green, saving confirms with a warning rather than a success tick, the diagnostics mark the provider (OFF-DEVICE), Ollama stays the default and nothing switches on its own. 33 deterministic checks pin the translation down, because a translator fails SILENTLY — a dropped system message does not throw, it just answers confidently without the SOTI rules, and a finish_reason that never becomes done_reason just stops a forensic report mid-section with nothing to resume it. Previously — build 2.8.0, "Next steps" now starts where the case actually is: the newest message. Nothing read it. A chain whose last word was SOTI\'s own — "I will be in contact with the developers on MCMR-30202 first thing tomorrow to get a target build" — reached the model only through the promise block, whose instruction is "never contradict this": a request not to argue with the commitment rather than to CARRY IT OUT. The generated plan duly opened "1. Arrange a 30-minute remote session with the customer" — a session held five days earlier, ahead of the follow-up the customer had been promised in writing that morning. The newest message\'s stated action is now a signal in its own right, on both sides: SOTI\'s own undertaking opens the plan and the drafted email reports back on it, while a customer\'s "I will send it Monday" becomes a follow-up step instead of the same request under a new name. A conditional aside is not a commitment ("if it is not released yet, tell me and I will plan around it" was being reported as the outstanding next action), and neither is a three-word gesture. The commitment itself arrives whole: a tempered capture stops where the NEXT "I will" begins, so it ended "…first thing tomorrow to get", naming no deliverable — and every promise on a hard-wrapped email stopped at whatever column the mail client broke on. A session ALREADY HELD is now the fourth session state, so the On-Prem log-access rule stops mandating a meeting that has happened. An internal note survives the wrap that split it: "Prepare the / 90-day review pack" was two items and the leading-marker strip ate the number, leaving "day review pack"; "Chase Development for a target build" was in no forward-verb list, so the one agreed action on a 90-day case was filed under things ALREADY DONE and banned from the plan. Urgency and business impact quote the sentence the heading claims: "the customer explicitly demanded priority" sat over "…for your escalation" — SOTI\'s own escalation — while "we could not push the planogram to the store estate" and "still being done by hand, one device at a time" were no impact at all. A fix that has already SHIPPED is stated as fact, not left to the model: when a ticket the case already carries turns up in the Resolved Issues of a newer build, the answer says which build and that the deployment is behind it — including on a log analysis, which until now was FORBIDDEN from mentioning an upgrade at all, because research never ran on that path so no MCMR was ever verified. A case that names its own MCMR no longer switches the citation guard off: "did the agent ask to see the release notes?" is a question about the agent\'s words, and it was being inferred from case text. The 30/60/90 and the internal Problem & Resolution record get the decisive signals they never had, mapped to their own section names. And the case summary got faster by doing less: the chain-condensation pass was gated on message COUNT, so a twelve-message case spent six minutes of model time rewriting messages that had room for 260 characters into 90 — a history that came out shorter than the free one. A big case now fits the budget instead of being cut blind: the Case Summary sized its own message against “budget minus 1,700” — the amount the request trimmer promises to KEEP of the system message, not what it costs — so a case carrying a 15,348-character Salesforce Description and a 5,639-character JIRA thread built a pair of messages 7,132 characters over, the trimmer deleted [RELEASE NOTES] and half the MCMR rule off the end, and the model returned nothing at all. The system side is estimated from the case record now, and the Description — the one section with no cap while the notes, the chain and the ticket all had one — has one. And the tool stops talking to the customer: a “*Check: …*” line is the panel speaking to the ENGINEER, and Copy was stripping the italics and keeping the sentence. An internal note is read in full, too: only the text after "Next steps" was ever parsed, so the SAME template\'s "Troubleshoots done" section — where the engineer records what was actually carried out — reached nothing, and the internal Problem & Resolution record came back without the hand-set 240-second keep-alive that was the only thing keeping 2,060 devices online. That section is now read across every note, and when the finished "Solution:" still omits a workaround the case data says is in place, the omission is FLAGGED rather than filled in — which of a case\'s recorded actions IS the mitigation is a judgement, and a wrong one written into a permanent record is worse than a missing one. 92 new deterministic checks, 437 in total, run the shipping code. Previously — build 2.7.0, a ==== -separated Outlook chain now keeps its authors and its dates. parseEmailChainEntries only read "From:/Sent:" in its single-blob branch, so the shape the Salesforce Feed actually produces once a case has more than one email lost the sender and the timestamp of EVERY message. Nine populated emails reached the model as nine "undated — unknown" rows under a header promising the authors were exact: the customer could not be told from SOTI, so a drafted reply asked the CUSTOMER to confirm whether SOTI\'s own setting was supported and signed off "[Your Name]", and the urgency signal quoted the mail confidentiality footer back as the customer demanding priority. One multilingual header reader, used by both branches, fixes all of it; the footer and the scrape\'s "Subject:/Account:/Case Owner:" header block are no longer counted as messages. Context sizing no longer amputates a prompt in silence: Auto pinned every "small" model to num_ctx 8192 even when /api/show reported 131072, and the trimmer then cut the system prompt mid-rule and threw away the whole email chain and the meeting notes; Auto now sizes from the model\'s real window, the prompt budget holds a real case, the rules block is found generically instead of by a marker only some paths carry, and a cut lands on a line boundary. The JIRA path counted only its user message (and at an optimistic 3.0 chars/token), sending 40,271 chars into a 16K window, and its refinement pass hardcoded num_ctx 4096 for a 16,705-char prompt — both now measure both messages and reuse the session context, so the model also stops reloading between passes. Two false signals are gone: a contrast between two DEVICES is no longer reported as a contrast with an earlier CASE that does not exist, and a bare "recurrence" is described as a symptom that comes back rather than as the customer reopening the case. A [CASE HISTORY] block copied into an answer is now deleted rather than renamed — the two guards ran in the order that defeated them. Answers are de-duplicated (one mitigation listed three times, one step repeated with only the date changed), the 30/60/90 milestone is written in from Case Age instead of left blank, near-identical log lines stop crowding the decisive ones out of the evidence digest, Send is enabled per case instead of globally, and two tabs on one case number are told apart. 254 deterministic checks run the shipping code and pin all of it down. Previously — build 2.7.0, a case written in the customer\'s own language is now read exactly like an English one. Every decisive signal — recurrence, urgency, business impact, an unconfirmed outcome, a blocking fault, a request SOTI sent, a delivery the customer made, a session offered/booked/held, and the lifecycle state that decides whether the case is open or closing — has a multilingual twin covering Russian, German, French, Spanish, Portuguese, Italian, Dutch, Polish, Turkish, Japanese, Chinese and Korean, so "проблема снова появилась" reopens a case and "не открывается" is a blocker. On case C01720260 that turned four silent misses into facts: the compared case number C01698144 (missed because the scrape glued "macOS" onto it and \\b then never matched), the customer\'s "I have hit this AGAIN", their reason THIS profile must stay installed unlike the earlier case, and the calendar link they could not sign in to. Three more errors are gone at the source: a session already in the diary is a THIRD state, so a plan can no longer open by booking a meeting due in two hours; a promise is captured to a clause boundary instead of being cut mid-artefact, so "collect Profile Execution Status logs" no longer reaches the answer as "collect Profile."; and an "again" in the opening report is no longer reported as a fix on this case having failed. 112 deterministic checks pinned that build down. Previously — build 2.6.0, the case summary now reads what people actually wrote: a reply quoted in Russian, German, French or by "On … wrote:" is cut away, so a customer who quotes a SOTI email is no longer classified as SOTI support; mail-gateway spam/phishing banners and EN+RU confidentiality footers are stripped, so a scanner banner can no longer be summarised as the state of the case or turned into a next step; one human written two ways ("Konstantin Uzorin" / "Uzorin Konstantin Evgenevich") is one person with one role. Three new decisive signals: the customer\'s UNANSWERED question is now the current state and step 1, an already-sent request is chased with the exact artefacts it named instead of invented ones, and an already-offered remote session is CONFIRMED rather than proposed again. A non-English chain is named as fact and must be translated, never dismissed; a case number that appears only in the Issue Summary is surfaced; a step naming a real product artefact ("Profile Execution Status logs") is no longer deleted as vague. The finished answer is repaired against all of it, and 101 deterministic checks pin the behaviour down. Previously — build 2.5.7, the prompt\'s own scaffolding can no longer reach the answer: a next step that says to "review the [SOTI CHECKS…] block" or "check the [MCMR RULE] block" is deleted rather than handed to the engineer, every other bracketed block name is reworded into plain English so its sentence survives, a "per the [X] directive," clause is stripped off the real instruction it was wrapped around, and quoted log lines and fenced code are left untouched; a bracketed case number or a mixed-case phrase is no longer mistaken for a label; an all-scaffold plan ends with an honest notice instead of an empty "Next steps:"; two quadratic regexes on the streaming path fixed, so a model stuck repeating a token can no longer freeze the panel.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -2035,9 +2035,15 @@ function renderOpenCasesList() {
     const frag = document.createDocumentFragment();
     let lastTier = null;
     const grouping = ocFilterTier === 'all';
-    const ordered = grouping
-        ? [...shown].sort((a, b) => ocTierRank(a) - ocTierRank(b))
-        : shown;
+    const cmp = ocSortComparator();
+    let ordered = shown;
+    if (grouping) {
+        // Tier first, chosen order second. Array.sort is stable, so "List order" leaves the
+        // rows inside a tier exactly as Salesforce returned them.
+        ordered = [...shown].sort((a, b) => (ocTierRank(a) - ocTierRank(b)) || (cmp ? cmp(a, b) : 0));
+    } else if (cmp) {
+        ordered = [...shown].sort(cmp);
+    }
 
     for (const rec of ordered) {
         if (grouping) {
@@ -2059,9 +2065,13 @@ function renderOpenCasesList() {
          * what gives way first when the panel is narrow, because it is the one part the
          * expander below can show in full. */
         const row = document.createElement('div');
-        // The tier is also a coloured stripe down the row's left edge, so the grouping is
-        // still readable once you have scrolled past its heading.
-        row.className = 'oc-row tier-' + entitlementTier(rec.entitlement).key;
+        // The tier is a coloured stripe down the row's left edge, so the grouping is still
+        // readable once you have scrolled past its heading. `needs-soti` marks the row red:
+        // the status is not otherwise visible without opening the expander, and "this one
+        // is waiting on you" is the thing you most need to see without opening anything.
+        row.className = 'oc-row tier-' + entitlementTier(rec.entitlement).key
+            + (statusIsOnSoti(rec.status) ? ' needs-soti' : '');
+        if (statusIsOnSoti(rec.status)) row.dataset.needsSoti = '1';
 
         // The row's OWN click opens the case; the expander must not. Keeping them as two
         // elements is what lets the toggle stop the event without the open path having to
@@ -2184,6 +2194,99 @@ function ocTierRank(rec) {
 // half-empty after a restart.
 let ocFilterTier = 'all';
 let ocSearch = '';
+let ocSort = 'list';
+
+/* HOW SEVERE, as a number that sorts.
+ *
+ * Salesforce writes the priority as "High (Severity 2)" — the word and the number say the
+ * same thing, and the NUMBER is the one to trust: it is the field's own scale, it is
+ * ordered, and it does not change meaning between orgs the way "High" can. The word is the
+ * fallback for a picklist that carries no number.
+ *
+ * Lower is more severe (Severity 1 is the worst), so this returns something that sorts
+ * ascending into most-severe-first. Anything unrecognised sorts last rather than being
+ * guessed into the middle of the queue.
+ */
+function severityRank(priority) {
+    const t = String(priority || '');
+    const n = t.match(/severity\s*(\d+)/i);
+    if (n) return parseInt(n[1], 10);
+    if (/critical|urgent/i.test(t)) return 1;
+    if (/high/i.test(t)) return 2;
+    if (/medium|normal/i.test(t)) return 3;
+    if (/low/i.test(t)) return 4;
+    return SEVERITY_UNKNOWN;
+}
+
+/* WHOSE MOVE IS IT?
+ *
+ * "Waiting on SOTI response" means the case is sitting on us — it is the one status in the
+ * queue that is a job rather than a state of waiting, which is why it sorts first and why
+ * the row is marked in red. Development is next: still ours as an organisation, but not
+ * something the case owner can clear today. Waiting on the customer is last, because there
+ * is nothing to do but wait.
+ *
+ * Matched loosely on "soti" / "dev" rather than on the full label, because these picklists
+ * are edited per org and a status renamed to "Waiting on SOTI Support" must not silently
+ * drop to the bottom of the queue.
+ */
+function statusIsOnSoti(status) {
+    return /waiting\s+on\s+soti|with\s+soti|soti\s+response/i.test(String(status || ''));
+}
+
+function statusRank(status) {
+    const t = String(status || '').trim();
+    if (!t) return 99;
+    if (statusIsOnSoti(t)) return 1;
+    if (/develop|engineering|r&d|jira/i.test(t)) return 2;
+    if (/customer|client|user/i.test(t)) return 3;
+    return 50;   // a status we do not recognise: after the known ones, before the blanks
+}
+
+/* HOW OLD, in days.
+ *
+ * Case Age is a number Salesforce has already worked out, so it is used in preference to
+ * parsing "24/07/2025, 12:33" — that string is DD/MM/YYYY in this org and MM/DD/YYYY in
+ * others, and a date parsed under the wrong assumption sorts silently wrong rather than
+ * failing. A case with no age sorts last either way.
+ */
+function ageDaysOf(rec) {
+    const n = parseFloat(String((rec && rec.ageDays) || '').replace(/[^0-9.]/g, ''));
+    return Number.isFinite(n) ? n : null;
+}
+
+const SEVERITY_UNKNOWN = 99;
+
+/* The chosen order, within whatever group the case is in. Returns null for "list order",
+ * which means: do not sort at all, and leave the rows in the order Salesforce returned
+ * them — that is the sort the engineer picked in their own list view.
+ *
+ * A case the panel cannot rank — no age, or a priority with no severity in it — sorts LAST
+ * in BOTH directions. Reversing a comparator reverses where its unknowns land, so "low
+ * severity first" would otherwise open with every case whose priority could not be read,
+ * and the reversal would look like the sort is broken rather than that the data is thin.
+ */
+function ocSortComparator() {
+    const unknownLast = (x, y, cmp) => {
+        const xu = x === null || x === SEVERITY_UNKNOWN;
+        const yu = y === null || y === SEVERITY_UNKNOWN;
+        if (xu && yu) return 0;
+        if (xu) return 1;
+        if (yu) return -1;
+        return cmp(x, y);
+    };
+    switch (ocSort) {
+        case 'oldest':   return (a, b) => unknownLast(ageDaysOf(a), ageDaysOf(b), (x, y) => y - x);
+        case 'newest':   return (a, b) => unknownLast(ageDaysOf(a), ageDaysOf(b), (x, y) => x - y);
+        case 'sev-high': return (a, b) => unknownLast(severityRank(a.priority), severityRank(b.priority), (x, y) => x - y);
+        case 'sev-low':  return (a, b) => unknownLast(severityRank(a.priority), severityRank(b.priority), (x, y) => y - x);
+        // Only one direction for status, because only one of them is a question anyone
+        // asks: what is waiting on me. Its reverse would put the cases nobody can act on
+        // at the top of the queue.
+        case 'status':   return (a, b) => unknownLast(statusRank(a.status), statusRank(b.status), (x, y) => x - y);
+        default:         return null;
+    }
+}
 
 function ocMatchesSearch(rec, q) {
     if (!q) return true;
@@ -2241,20 +2344,28 @@ function renderOpenCaseFilters() {
     for (const t of present) add(t.key, t.label, counts.get(t.key));
 }
 
-/* FETCH ONE CASE'S DESCRIPTION, in a tab the engineer never sees.
+/* FETCH ONE CASE'S DESCRIPTION, in a minimized window of its own.
  *
- * A background tab rather than the foreground: this runs because somebody opened an
- * expander to decide whether a case is worth opening, and yanking them onto the case would
- * pre-empt that decision. The tab is closed again either way — on success, on timeout, and
- * on the panel being wrong about the page.
+ * A WINDOW, not a tab in the browser you are using. A background tab still appears in the
+ * tab strip, shifts every other tab along, and is gone again a few seconds later — the
+ * queue is read by opening one expander after another, so that is a tab strip flickering
+ * while you work. Its own minimized window stays off the strip entirely and closes without
+ * disturbing anything. Same choice, and the same reasoning, as the Copilot relay.
  *
- * Cached back into openCasesList and persisted, so the second look at a case costs
- * nothing and a restart does not re-fetch two dozen records.
+ * Chrome rejects a size alongside state:'minimized', so the window is created with one
+ * shape or the other and never both.
+ *
+ * A minimized window is throttled, though, and on a slow record Lightning may not finish
+ * rendering in one — so a timeout is not the end: the window is restored off-focus and
+ * given a second, shorter go before the panel gives up. Either way it is closed.
+ *
+ * Cached back into openCasesList and persisted, so a second look at a case costs nothing
+ * and a restart does not re-fetch two dozen records.
  */
 async function loadCaseDescription(rec, into) {
     const fail = (msg) => { if (into && into.isConnected !== false) into.textContent = msg; };
 
-    if (!isChromeExtension() || !chrome.tabs || !chrome.tabs.create) {
+    if (!isChromeExtension() || !chrome.windows || !chrome.windows.create) {
         return fail('The case description is only available in the Chrome extension.');
     }
     const url = salesforceUrlForListRow(rec);
@@ -2262,39 +2373,55 @@ async function loadCaseDescription(rec, into) {
         return fail('No link to this case was captured — press "Sync from Salesforce" to refresh the queue.');
     }
 
-    let tabId = null;
-    const closeTab = () => {
-        if (tabId == null) return;
-        const id = tabId; tabId = null;
-        try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (e) {}
+    let winId = null, tabId = null;
+    const closeWindow = () => {
+        if (winId == null) return;
+        const id = winId; winId = null; tabId = null;
+        try { chrome.windows.remove(id, () => void chrome.runtime.lastError); } catch (e) {}
+    };
+
+    // Ask the record whether it has rendered yet. Polling rather than waiting on 'complete':
+    // Lightning finishes the document long before it finishes the record.
+    const readBrief = () => new Promise((res) => {
+        if (tabId == null) return res(null);
+        try {
+            chrome.tabs.sendMessage(tabId, { action: 'GET_SALESFORCE_CASE_BRIEF' }, (r) => {
+                void chrome.runtime.lastError;   // not injected yet — keep waiting
+                res(r || null);
+            });
+        } catch (e) { res(null); }
+    });
+    const pollUntil = async (deadline) => {
+        let brief = null;
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 800));
+            brief = await readBrief();
+            if (brief && (brief.description || brief.subject)) return brief;
+        }
+        return brief;
     };
 
     try {
-        const tab = await new Promise((res, rej) => {
-            chrome.tabs.create({ url, active: false }, (t) => {
-                if (chrome.runtime.lastError || !t) return rej(new Error('could not open the case'));
-                res(t);
+        const win = await new Promise((res, rej) => {
+            chrome.windows.create({ url, focused: false, state: 'minimized' }, (w) => {
+                if (chrome.runtime.lastError || !w) return rej(new Error('could not open the case window'));
+                res(w);
             });
         });
-        tabId = tab.id;
+        winId = win.id;
+        tabId = win.tabs && win.tabs[0] && win.tabs[0].id;
+        if (tabId == null) { closeWindow(); return fail('Could not read the case description — the window opened with no tab.'); }
 
-        // Poll rather than wait on 'complete': Lightning renders the record after the
-        // document is done, so 'complete' is the start of the wait, not the end of it.
-        const DEADLINE = Date.now() + 20000;
-        let brief = null;
-        while (Date.now() < DEADLINE) {
-            await new Promise(r => setTimeout(r, 800));
-            brief = await new Promise((res) => {
-                try {
-                    chrome.tabs.sendMessage(tabId, { action: 'GET_SALESFORCE_CASE_BRIEF' }, (r) => {
-                        void chrome.runtime.lastError;   // not injected yet — keep waiting
-                        res(r || null);
-                    });
-                } catch (e) { res(null); }
-            });
-            if (brief && (brief.description || brief.subject)) break;
+        let brief = await pollUntil(Date.now() + 15000);
+
+        // Minimized and still blank: Chrome throttles rendering in a minimized window, so
+        // give it a visible one — unfocused, so it never takes the keyboard — and a short
+        // second attempt rather than reporting a failure the page had no chance to avoid.
+        if (!brief || !brief.description) {
+            try { chrome.windows.update(winId, { state: 'normal', focused: false }, () => void chrome.runtime.lastError); } catch (e) {}
+            brief = await pollUntil(Date.now() + 8000) || brief;
         }
-        closeTab();
+        closeWindow();
 
         if (!brief || !brief.description) {
             return fail(brief && brief.subject
@@ -2315,8 +2442,8 @@ async function loadCaseDescription(rec, into) {
             into.parentElement.replaceChild(body, into);
         }
     } catch (e) {
-        closeTab();
-        fail('Could not read the case description — ' + ((e && e.message) || 'the tab could not be opened') + '.');
+        closeWindow();
+        fail('Could not read the case description — ' + ((e && e.message) || 'the window could not be opened') + '.');
     }
 }
 
@@ -2401,7 +2528,8 @@ function fillOpenCaseDescription(el, rec) {
      * It is not in the list view. Salesforce only renders Description on the record, so
      * unless the engineer has added it as a column this arrives per case, fetched when the
      * expander is opened. Placeholder first so the box is never empty while that happens. */
-    if (rec.description) {
+    const haveDescription = !!rec.description;
+    if (haveDescription) {
         section('Issue Summary', rec.description, 'oc-desc-body');
     } else {
         const h = document.createElement('div');
@@ -2412,28 +2540,51 @@ function fillOpenCaseDescription(el, rec) {
         p.className = 'oc-desc-none';
         p.textContent = 'Reading the case description…';
         el.appendChild(p);
-        loadCaseDescription(rec, p);
+        // The rest of the expander is filled in when this lands — see below.
+        loadCaseDescription(rec, p).then(() => fillOpenCaseDescriptionRest(el, rec));
     }
+
+    // WAIT FOR THE DESCRIPTION BEFORE DRAWING ANY OF THIS.
+    //
+    // Everything below is already in memory, so rendering it immediately meant the expander
+    // opened full of tags and analysis notes with "Reading the case description…" wedged
+    // above them — the part being fetched arrived last and pushed the rest down. The eye
+    // goes to the text that is there, so the notes read as the answer for a second and then
+    // moved. Nothing is drawn until there is a description to draw it under.
+    if (haveDescription) fillOpenCaseDescriptionRest(el, rec);
+}
+
+/* The half of the expander that does not depend on the fetch: the tags, the analysis
+ * notes, and the nothing-here message. Called immediately when the description was already
+ * known, and after it lands when it was not. */
+function fillOpenCaseDescriptionRest(el, rec) {
+    if (!el || el.dataset.restFilled) return;
+    el.dataset.restFilled = '1';
 
     // The tags the row has no width for. Here they are on one line with room to spare,
     // which is the whole reason they were taken off it.
     const meta = document.createElement('div');
     meta.className = 'oc-desc-tags';
     addOpenCaseTag(meta, rec.entitlement, 'ent-' + entitlementTier(rec.entitlement).key);
-    addOpenCaseTag(meta, rec.status);
+    addOpenCaseTag(meta, rec.status, statusIsOnSoti(rec.status) ? 'needs-soti' : '');
     addOpenCaseTag(meta, rec.account);
     if (rec.jira) addOpenCaseJiraTag(meta, rec.jira);
     if (rec.contact) addOpenCaseTag(meta, rec.contact);
     if (meta.childNodes.length) el.appendChild(meta);
 
-    section('Case Analysis Notes', rec.analysis, 'oc-desc-body');
+    // NO CASE ANALYSIS NOTES HERE. They were the longest thing in the expander and they
+    // answer a different question: the analysis is what SOTI has written about the case,
+    // and this expander is for deciding whether to open the case in the first place — for
+    // which the customer's own description is the thing to read. The field is still
+    // scraped (see content.js) so bringing the section back is a few lines, not a re-sync.
 
-    if (!rec.subject && !rec.analysis) {
-        // Say which of the two it is. "Nothing here" reads as a broken expander; "the list
-        // view carries no summary for this case" is a fact about the case.
+    if (!rec.description && !rec.subject) {
+        // Say what is missing rather than showing an empty box: "nothing here" reads as a
+        // broken expander, where "this case has no description on the record" is a fact
+        // about the case.
         const none = document.createElement('div');
         none.className = 'oc-desc-none';
-        none.textContent = 'No issue summary or analysis notes on this case in the list view — open it and sync for the full case.';
+        none.textContent = 'No issue summary on this case — open it and sync for the full case.';
         el.appendChild(none);
     }
 }
@@ -2654,6 +2805,13 @@ if ($('ocSearch')) {
         e.preventDefault();
         $('ocSearch').value = '';
         ocSearch = '';
+        renderOpenCasesList();
+    };
+}
+
+if ($('ocSort')) {
+    $('ocSort').onchange = () => {
+        ocSort = $('ocSort').value || 'list';
         renderOpenCasesList();
     };
 }

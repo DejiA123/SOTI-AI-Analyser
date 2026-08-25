@@ -7,22 +7,49 @@ SOTI AI Analyser — Complete Project Overview
 1. What this project is (in one paragraph)
 The SOTI AI Analyser is a Google Chrome side-panel extension that helps SOTI
 support engineers analyse log files from SOTI products (MobiControl, SOTI Connect,
-SOTI XSight, SOTI Identity). You attach log files, optionally fill in case details, and a
-local AI model (running on your own machine through Ollama) reads the logs and
-tells you the likely root cause and fix. It also answers general SOTI questions using an
-offline copy of SOTI's official help documentation, can pull case details from Salesforce,
-and learns from your feedback over time. Nothing leaves your machine — the AI runs
-locally, which is the whole point for handling customer logs.
+SOTI XSight, SOTI Identity). You attach log files, optionally fill in case details, and an
+AI reads the logs and tells you the likely root cause and fix. It also answers general SOTI
+questions using an offline copy of SOTI's official help documentation, pulls case details
+from Salesforce — fields, email chain, internal notes and the replies to them — and learns
+from your feedback over time.
+
+The AI is **Microsoft 365 Copilot** — specifically the enterprise Copilot the business already
+licenses and has approved. The tool does not introduce an AI service; it **links onto the one
+that is already there**. That link is what "the bridge" means throughout this document: there
+is no API key and no endpoint, because the panel relays each prompt through a Copilot chat the
+engineer is **already signed in to**, typing it into the composer and reading the answer back
+out of the page. Their existing session does the authenticating. See §5.12 — it is the piece
+of this codebase most worth understanding before changing anything.
+
+The consequence, stated plainly because it used to be the opposite: **case content leaves the
+machine.** Earlier builds ran a local model precisely so it would not, and every claim of the
+form "nothing leaves your machine" belongs to that architecture, not this one. It goes to the
+company's own tenant rather than to a new supplier — in effect the tool automates what an
+engineer is already permitted to do by hand — but it goes, and it goes unredacted.
+`SECURITY.md` has the assessment.
 ---
 2. The big picture — how a single analysis flows
 ```
-┌─────────────┐   attach    ┌──────────────────┐   build prompt   ┌─────────────┐
-│  You (UI)   │ ─────────►  │  sidepanel.js    │ ───────────────► │   Ollama    │
-│ side panel  │  + ask      │ (the whole brain)│   (local HTTP)   │ gemma4:2b   │
-└─────────────┘             └──────────────────┘ ◄─────────────── └─────────────┘
-       ▲                            │   streamed answer (tokens)
-       │  rendered answer           │
-       └────────────────────────────┘
+┌─────────────┐  attach   ┌──────────────────┐  build prompt  ┌───────────────────┐
+│  You (UI)   │ ────────► │  sidepanel.js    │ ─────────────► │  ai-provider.js   │
+│ side panel  │  + ask    │ (the whole brain)│ (Ollama-shaped │  (the seam)       │
+└─────────────┘           └──────────────────┘   request)     └─────────┬─────────┘
+       ▲                          │  streamed answer                    │
+       │  rendered answer         │  (NDJSON frames)                    │ types it in
+       └──────────────────────────┘ ◄───────────────────────────┐       ▼
+                                                                │  ┌───────────────────┐
+   Everything above the seam still speaks Ollama's request and   │  │ copilot-bridge.js │
+   response shape. ai-provider.js translates in both directions, │  │  runs INSIDE the  │
+   so the panel does not know which backend answered.            │  │   Copilot page    │
+                                                                │  └─────────┬─────────┘
+                                                                │            │ reads the
+                                                                └────────────┤ answer back
+                                                                             ▼
+                                                       ┌──────────────────────────────┐
+                                                       │ Microsoft 365 Copilot, in a   │
+                                                       │ minimized window, on YOUR     │
+                                                       │ already-signed-in session     │
+                                                       └──────────────────────────────┘
 
 Supporting inputs the brain pulls in while building the prompt:
   • Log Intelligence pipeline  → finds errors/exceptions/timestamps in your logs
@@ -42,8 +69,8 @@ prompt and talks to the AI. Section 7 walks through it line by line.
 Choice	What it is	Why this, and not the alternative
 Chrome Extension (Manifest V3)	The app is a browser extension, not a website or desktop app	Engineers already live in Chrome with Salesforce open. A side panel sits next to their work. MV3 is the only version Chrome accepts for new extensions today.
 Vanilla JavaScript (no React/Vue)	Plain JS + direct DOM calls (`document.createElement`, `$('id')`)	No build step, no `npm install`, no framework to learn or update. One `.js` file you can edit and reload. For a single-developer internal tool, a framework would add complexity without payback. The trade-off: `sidepanel.js` is large (~7,800 lines) and you manage the DOM by hand.
-Local AI via Ollama	Ollama runs an open model (gemma4) on your CPU and exposes an HTTP API at `127.0.0.1:11434`	Customer logs can contain sensitive data. A cloud AI (ChatGPT/Claude API) would send that data off-machine — unacceptable. Local = private, free, offline-capable. The trade-off: it's slower (your CPU, not a datacentre GPU).
-Streaming HTTP (`fetch` + `ReadableStream`)	The answer arrives token-by-token, not all at once	The user sees words appear immediately instead of staring at a blank screen for a minute. Critical UX on a slow CPU.
+AI via the Microsoft 365 Copilot **browser bridge**	The panel drives a Copilot chat in a minimized window: types the prompt into the composer, waits for the answer to stop changing, reads it back	**The alternatives all needed a key.** A hosted API (OpenAI, Claude, Azure) means procuring a key, storing it in `chrome.storage.local` where anyone who can unpack the extension can read it, and engaging a new data processor. M365 Copilot has no completions endpoint to call, and a Copilot *agent* runs the wrong way round — it lets Copilot call your tool, not your tool call Copilot. The bridge is the only keyless path that exists: the engineer is already signed in, so their session authenticates. The trade-offs are real and are the subject of §5.12 — it drives someone else's web UI, so it breaks when that UI changes (the selectors are settings, not constants, so the fix is not a release), a chat box caps how much you can send at once, and **the case leaves the device**. Earlier builds ran a local model to avoid that last one; see `SECURITY.md` for what changed and what it costs.
+Streaming, in Ollama's NDJSON shape	The answer arrives progressively rather than all at once	The user sees words appear instead of staring at a blank screen. The panel consumes NDJSON frames because that is what the original local backend emitted; `ai-provider.js` keeps emitting them whatever actually answered, which is why nothing above the seam had to change when the backend did. The bridge streams forward-only — it prefers a little duplication to a truncated answer when the site re-renders its markdown mid-stream.
 `chrome.storage.local`	Where cases/settings are saved	Survives browser restarts (unlike `sessionStorage`), has a large quota with the `unlimitedStorage` permission, and is the standard for extensions. `localStorage` is used only as a fallback when running outside the extension.
 Tesseract.js (in `lib/`)	OCR — reads text out of screenshot images	Engineers often paste screenshots of error dialogs. Tesseract extracts the text so the AI can read it. Runs locally in the browser (WASM), no upload.
 A self-governing resource budget (`power.js`)	The app profiles the machine it is running on and caps its own memory and CPU use accordingly	A browser tab has no OS-level memory limit — it takes what it can until Chrome kills it. Every engineer's laptop is different, so a single hard-coded cap would be wrong everywhere. Deriving the cap per machine, and adapting live, is the only version that behaves on both a 4 GB netbook and a 32 GB workstation. Section 9. The trade-off: on a weak machine some prompts are smaller and some caches are rebuilt more often — slower, but never frozen.
@@ -57,7 +84,7 @@ File	Size	What it does
 `content.js`	~324 lines	The Salesforce scraper. Injected into Salesforce pages; reads case fields off the page (handling Salesforce's nested "Shadow DOM") and sends them to the panel.
 `manifest.json`	~60 lines	The extension's "ID card": its name, permissions, which URLs it may talk to, and which files load when.
 `knowledge/*.md`	—	Product knowledge in two layers. (1) Small "log signature" cheat-sheets injected during analysis: `MobiControl.md`, `Connect.md`, `XSight.md`. (2) The RAG corpus searched by `PulseKB`: `PulseKnowledge.md` (a 24 MB MobiControl scrape, ~10,000 articles) plus the curated, source-referenced `Connect_Knowledge.md` and `XSight_Knowledge.md`. Extend a product by appending `# Title` / `Source:` / body articles to its corpus file, or add a file to `PulseKB.KB_FILES`.
-`setup_local_ai.ps1` / `.bat`	—	One-click installer: installs Ollama, pulls the model, and sets Ollama's environment variables (CORS + speed). The `.bat` just launches the `.ps1`.
+`setup_local_ai.ps1` / `.bat`	—	**Legacy, not used by this build.** Installed Ollama and pulled a local model back when inference ran on the engineer's machine. Nothing in the shipped extension calls it and no local model is required. Kept only so an existing install can be unwound — see `UNINSTALL.md`.
 `ai-provider.js`	~1,600 lines	The provider seam. `SotiAI.chat(payload)` takes the exact Ollama request body the panel already builds and returns something that quacks like the `fetch` Response it already consumes, whatever the backend is — Ollama, Azure OpenAI/OpenAI-compatible, the Anthropic API, or the keyless browser bridge. Adding a backend means writing one adapter here and changing nothing above it. Section 5.12.
 `copilot-bridge.js`	~1,150 lines	The browser bridge's relay. Injected on demand into a chat tab the engineer is already signed in to; types the prompt in, watches the answer render, and streams it back. Never declared in the manifest, so it does not run in anyone's Copilot tab unless the bridge is selected and the host granted. Section 5.12.
 `power.js`	~830 lines	The Power & Resource Governor. Profiles the machine, derives a memory budget for it, measures heap and main-thread lag, hands out throttle settings, reclaims memory under pressure, and keeps the internal AI performance log. Loaded **before** `sidepanel.js`. Section 9.
@@ -184,13 +211,34 @@ absorb a strong one. And a 15-line-back / 40-line-forward expansion guard opened
 inside a 122-line stack trace. `jiraHasEntryStructure` decides whether a file has entries at all
 (an XML dump or a CSV has none) so both ends of a window are found the same way.
 5.3 The AI engine (`OllamaAI.completions.create`)
-This is the function that actually talks to Ollama. It receives the assembled messages and
-returns a stream of tokens. The hard part is fitting the prompt into the model's memory
-window without overflowing it, because overflow = the model silently drops your logs.
+This is the function every path goes through to reach the AI. It receives the assembled
+messages and returns a stream of tokens.
+
+> **The name is historical and deliberately kept.** It builds an *Ollama-shaped request* and
+> consumes an *Ollama-shaped NDJSON stream*, because that is what this app was written
+> against — but it no longer talks to Ollama. `ai-provider.js` sits underneath it and
+> translates, in both directions, to whatever the active provider is (in this build: the
+> Copilot bridge). Renaming it would touch every call site and the payload shape would be
+> unchanged, so the name stayed and this note exists instead. §5.12 is the backend.
+
+The hard part is fitting the prompt into the window without overflowing it, because
+overflow = the model silently drops your logs. That problem did not go away when the backend
+changed — it changed shape. A local model had a token window; a chat box has a character
+limit per message and a conversation window across messages. §5.12 covers how the budget is
+worked out now.
 Key concepts (see the Glossary, section 10, if these are new):
 `num_ctx` — the size of the model's working memory (the "context window"), measured
 in tokens. Everything (your prompt + the model's answer) must fit inside it.
 `num_predict` — the maximum number of tokens the model may generate as its answer.
+
+> **Read this block as background, not as the live path.** Everything from here to the end of
+> §5.3 describes sizing a **local model's** context window, and this build has no local model.
+> It is kept because the *problem* is unchanged — put in more than the backend will hold and
+> it silently drops the end of your case — and because the code is still there and still runs
+> for a local backend if one is ever configured. **For the bridge, the budget is worked out
+> from a chat composer's character limit and the number of messages a conversation may carry;
+> that is §5.12, and it is the one that applies today.**
+
 ```js
 // We probe each model for its REAL context window once, then cache it.
 async function getModelContextLength(model) { /* POST /api/show, read *.context_length */ }
@@ -651,16 +699,19 @@ are bounded (12 maximum) so the total stays well inside it, but if a site compac
 turn there is no way to see that from the DOM. Driving a chat UI programmatically is also a
 different thing, contractually, from calling a documented API, and these prompts carry
 customer data — check your organisation's acceptable-use terms. `SECURITY.md` documents this
-tool as local-only, and every provider except `ollama` makes that untrue, which is why the
-status dot goes amber rather than green and Ollama stays the default.
+tool's data-protection position, and it was rewritten for this build: the case now goes to
+Microsoft 365 Copilot. The mitigating fact is that Copilot is already licensed and approved
+in this organisation, so the bridge connects to a service that is already sanctioned rather
+than opening a new one — it automates what an engineer may already do by hand. Read
+`SECURITY.md` §4.2 before changing anything on the prompt path.
 ---
 6. Key design decisions & trade-offs (the "why X not Y" summary)
 Decision	Chosen	Rejected alternative	Why
-AI location	Local (Ollama)	Cloud API	Privacy of customer logs; cost; offline use
-Default model	gemma4:2b (small)	A big 70B model	Must run on a 2-core laptop CPU; big models are unusably slow
+AI backend	M365 Copilot via the browser bridge	A hosted API key (OpenAI/Claude/Azure), or a local model	A key would have to live in `chrome.storage.local`, readable by anyone who can unpack the extension, and would engage a new processor. Copilot is already licensed and approved here, and the engineer is already signed in — so the bridge needs no key at all. A local model was the previous answer and kept data on the device, but needed a 7 GB download, 3-4 GB resident, and was slow on a support laptop.
+Prompt size	Up to 8 chat messages of 90,000 chars	One message, or an unbounded upload	A composer caps a MESSAGE; a conversation caps nothing. Splitting is what lets a big case arrive whole. §5.12.
 `num_ctx`	Fixed per session	Grow-to-fit per request	Avoids costly model reloads between turns
 Context size (small)	Auto: num_ctx ≤32,768, prompt budget 16,384 tokens	The full 131,072, or a fixed 8,192	Prefill cost is the PROMPT, not the window; 8K is ~2× faster but drops the case history
-Logs → AI (local model)	Pre-analysed brief + key lines	Raw log dump	Fits the window; small models can't search raw logs
+Logs → AI	Uploaded as a file where the site accepts one; otherwise a pre-analysed brief + key lines	Always pasting the raw dump	An upload has no composer limit, so a megabyte of log arrives intact. Where it is not available the brief is what fits.
 Logs → AI (uploaded)	The log files themselves, verbatim	The same pre-analysed brief	The brief's sizes describe a composer, not an upload — a 2.7 MB log was arriving as 15,000 characters and the exception that explained the case never arrived at all
 Prompt ordering	Rules → logs → case/research	Case/research first	So trimming sacrifices secondary data, never the logs
 Chat history	Clean text only	Store the log dump too	Old dumps in history pushed new logs out of context
@@ -727,14 +778,27 @@ It never lets the bubble go blank — there's a recovery + fallback at the end.
 It checks the answer rather than trusting it — the citation, specificity and
 log-access guards in section 5.9 run on the finished text.
 ---
-8. Performance on a CPU (why it is the speed it is)
-Local AI speed is set by your hardware. On a typical support laptop (2-core CPU, no
-GPU), gemma4:e2b runs at roughly 6 tokens/sec generating and ~22 tokens/sec
-reading the prompt. That maths is the whole story:
+8. Performance (why it is the speed it is)
+> **Rewritten for the bridge.** This section used to be about CPU inference speed on the
+> engineer's own laptop, which is no longer where the answer comes from. The model runs in
+> Microsoft's datacentre now, so generation is fast; what costs time instead is the relay.
+
+Each request is a round trip through a real web page: open or reuse the window, type the
+prompt, wait for the site to answer, watch until the text stops changing. A big case is sent
+as several messages and **each part is its own round trip** — roughly 10-15 seconds apiece —
+so the first token on an eight-part case arrives well after the first token on a one-part
+one. That is the trade the multi-part design makes: the model sees the whole case instead of
+its first page.
+
+Historical note, for anyone reading old benchmarks in this repo: on the previous local
+backend (2-core laptop, no GPU) the model generated ~6 tokens/sec and read the prompt at
+~22 tokens/sec, and that arithmetic was the whole story:
 A big prompt takes minutes just to read before answering → feels frozen.
-The fixes in this app all attack that: small fixed context, compact prompts,
-manifest-only for conversational questions, a warmed/pinned model, and Ollama speed flags
-(`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`, set by the setup script).
+Most of the machinery that exists to fight that is still here and still earns its place —
+compact prompts, manifest-only answers for conversational questions, sending the log as an
+attachment rather than as pasted text — because a chat composer rewards exactly the same
+economy that a slow CPU did. What is gone is the local tuning: no warmed model, no
+`OLLAMA_*` speed flags, no context-size trade-off to make.
 To go faster without losing quality: use a smaller model (gemma4:2b, qwen2.5:3b, or
 llama3.2:3b), keep Context Size on Auto, close other heavy apps, and — the only real
 step-change — run it on a machine with a GPU.
@@ -749,10 +813,12 @@ section exists to make the app a well-behaved guest on whatever machine it lands
 The analyser does genuinely heavy work inside a browser tab. It holds whole log bundles
 in memory as strings, splits each into a per-line array (a full second copy of the text),
 builds per-line classification caches on top of that, indexes a 24 MB knowledge corpus,
-spawns Tesseract WASM workers for OCR, and streams from a local LLM. On a developer
-machine that is fine. On a support engineer's laptop — already running Chrome itself,
-Salesforce, Teams, and **Ollama holding a 3-4 GB model resident** — the same work pushed
-the machine into swap, and "the app froze" was the result.
+spawns Tesseract WASM workers for OCR, and streams an answer back. On a developer machine
+that is fine. On a support engineer's laptop — already running Chrome itself, Salesforce and
+Teams, and at the time **a local model holding 3-4 GB resident** — the same work pushed the
+machine into swap, and "the app froze" was the result. The local model is gone, which removes
+the largest single pressure the governor was written against; everything else it does still
+applies, because the log bundles did not get smaller.
 Three specific things were doing most of the damage:
 Startup read **every** stored case's log text at once and held it for the whole session,
 though only one case is ever on screen. Five cases meant ~100 MB resident before the user
@@ -789,9 +855,11 @@ AMD Ryzen AI 7 PRO 350, 16 GB (8 cores / 16 threads)	deviceMemory 8, cores 16	**
 2 GB netbook, 2 cores	deviceMemory 2, cores 2	256 MB (floor)	`minimal`
 32 GB workstation, Chrome granting only a 2172 MB heap	heap-limited	1629 MB	`high`
 Firefox / Safari (no `deviceMemory`, no `performance.memory`)	nothing	487 MB (assumed 4 GB / 4 cores)	`minimal`
-The `0.17` share is deliberately conservative. We are **one tenant** on this machine, not
-the only one — and the largest other tenant is usually Ollama, which the browser cannot see
-at all (see 9.10).
+The `0.17` share is deliberately conservative. We are **one tenant** on this machine, not the
+only one: the engineer already has Chrome, Salesforce and Teams open, and this tool adds a
+relay window running Copilot's page on top. It used to have to leave room for a local model
+holding 3-4 GB as well, which the browser could not see at all — that is no longer true, but
+the conservative share is kept, because the machine is still shared (see 9.10).
 The **tier** (`minimal` / `low` / `balanced` / `high`) gears long-lived *behaviour*: how many
 OCR workers may run, how many cases stay loaded, whether the knowledge index is pre-built.
 The **level** (below) gears moment-to-moment *intensity*. Both are needed — a capable machine
@@ -881,9 +949,12 @@ The **mode** (`analysis` / `chat` / `quick-action` / `jira`, plus `-continuation
 forensic analysis and a one-line reply differ by an order of magnitude — pooling them makes
 both the median and the worst case meaningless.
 Model, `num_ctx`, `num_predict`, prompt characters, and the prompt scale in force.
-**Time to first token** (wall clock — the part you actually sit through) and, from Ollama's
-own terminal stream frame, its authoritative `prompt_eval_count` / `eval_count` and prefill
-and generation durations. Real counts, not a chars-per-token estimate.
+**Time to first token** (wall clock — the part you actually sit through) and, where the
+provider reports them in its terminal stream frame, the authoritative `prompt_eval_count` /
+`eval_count` and prefill and generation durations. The local backend supplied real counts;
+the bridge is reading a rendered web page and cannot, so those fields are absent and the wall
+clock is what you have. Time to first token is the honest number for the bridge anyway: it
+includes opening the window and typing the prompt, which is most of the wait.
 Tokens/sec computed over **generation only**, excluding prefill — including it flatters a
 slow prefill into looking like fast generation.
 Peak heap during the run, fed by the sampler, plus the pressure level at both ends.
@@ -913,12 +984,14 @@ is hidden, because a control that reports nothing is worse than no control. A mi
 `power.js` costs adaptivity, not correctness. The browser tests boot the app with the file
 blocked and check all of this.
 9.10 What it does *not* measure (read this before trusting the number)
-**Ollama is not counted, and it is usually the bigger consumer.** The budget governs *this
-browser tab*. `gemma4:e2b` runs in a separate process holding its own 3-4 GB — memory the
-browser cannot see and this app cannot reclaim. On a 16 GB laptop with Context Size on Auto,
-Ollama is the larger tenant by a wide margin. The panel says so explicitly rather than
-implying its number is the whole story. If the *machine* is short of memory, the lever that
-matters is Context Size in Settings, not this governor.
+**The budget governs *this browser tab*, and nothing else.** Earlier builds had a far larger
+blind spot here: a local model held 3-4 GB in a separate process the browser could not see and
+this app could not reclaim, and on a 16 GB laptop it was the bigger tenant by a wide margin.
+**That is gone** — there is no local inference in this build, so the governor's number is now
+close to the whole of what this tool costs the machine.
+
+What it still does not count: WASM memory (Tesseract), image bitmaps, and the relay window,
+which is an ordinary browser window running Copilot's page and costs whatever that page costs.
 **Readings are the JavaScript heap only.** Detached DOM nodes, Tesseract's WASM linear
 memory and image bitmaps live outside it, so the real tab footprint is somewhat higher.
 That is part of why the budget only claims 75% of the heap ceiling — the difference is
@@ -964,7 +1037,8 @@ Service worker (`background.js`) — a small background script Chrome runs for t
 extension; it has no UI and may be stopped/restarted by Chrome at any time.
 Manifest V3 — the current required format/rulebook for Chrome extensions.
 JS heap — the memory the browser gives this tab's JavaScript. `performance.memory` reports
-it; it does NOT include WASM memory (Tesseract), image bitmaps, or anything Ollama uses.
+it; it does NOT include WASM memory (Tesseract), image bitmaps, or other browser windows —
+which now includes the relay window running Copilot.
 Event-loop lag — how much later than scheduled a timer actually fires. It measures how long
 the main thread was busy without yielding, which is what a user experiences as freezing.
 Memory budget — the megabytes this app allows itself on your specific machine, derived at
@@ -1015,9 +1089,9 @@ selectors may need updating.
 insights are re-injected as context.
 Online research needs connectivity. The "Failed to fetch" message just means the live
 SOTI Pulse lookup couldn't reach the network; analysis still runs from logs + offline KB.
-The Power Monitor does not measure Ollama, and Ollama is usually the bigger consumer. The
-budget covers this browser tab only; the model runs in a separate process holding its own
-3-4 GB that the browser cannot see or reclaim. If the whole machine is short of memory, the
+The Power Monitor covers this browser tab only. With no local model in this build there is no
+longer a multi-gigabyte process outside it, but the relay window still costs whatever the
+Copilot page costs. If the whole machine is short of memory, the
 lever that matters is Context Size in Settings — not this app's budget. Section 9.10.
 Memory readings are the JavaScript heap only. Tesseract's WASM memory and image bitmaps sit
 outside it, so the real tab footprint is somewhat higher than the pill shows. The budget

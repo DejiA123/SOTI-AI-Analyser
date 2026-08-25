@@ -1776,6 +1776,25 @@ body {
 }
 /* ---- Narrowing the queue: search box + tier chips ---- */
 .oc-filters { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 8px; }
+/* Search and sort share a line. min-width:0 on the input is what lets it give way — a flex
+   item will not shrink below its content width without it, and the select gets pushed out. */
+.oc-filter-row { display: flex; gap: 6px; align-items: center; }
+.oc-filter-row .oc-search { flex: 1; min-width: 0; }
+.oc-sort {
+    flex-shrink: 0;
+    max-width: 42%;
+    padding: 6px 8px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--txt2);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    outline: none;
+}
+.oc-sort:hover { color: var(--txt1); border-color: var(--border2); }
+.oc-sort:focus { border-color: var(--blue); }
 .oc-search {
     width: 100%;
     padding: 6px 10px;
@@ -1844,6 +1863,28 @@ body {
     transition: border-color .15s ease, background .15s ease;
 }
 .oc-row:hover { border-color: var(--blue2); background: rgba(255, 255, 255, .04); }
+
+/* WAITING ON SOTI — this case is on you.
+   The left border is the entitlement tier and stays that colour, so the red is carried by
+   the other three borders and a tint, which reads as "this row" without claiming to be the
+   tier. Deliberately a wash rather than a solid fill: several of these in a row must still
+   be readable, and red text on red is not. */
+.oc-row.needs-soti {
+    background: rgba(239, 68, 68, .10);
+    border-top-color: rgba(239, 68, 68, .55);
+    border-right-color: rgba(239, 68, 68, .55);
+    border-bottom-color: rgba(239, 68, 68, .55);
+}
+.oc-row.needs-soti:hover {
+    background: rgba(239, 68, 68, .17);
+    border-top-color: rgba(239, 68, 68, .9);
+    border-right-color: rgba(239, 68, 68, .9);
+    border-bottom-color: rgba(239, 68, 68, .9);
+}
+.oc-row.needs-soti .oc-num { color: #ff9a8b; }
+/* The same red on the status tag inside the expander, so the row's colour is explained the
+   moment you open it rather than left as a mystery marking. */
+.oc-tag.needs-soti { color: #ff9a8b; border-color: rgba(239, 68, 68, .5); background: rgba(239, 68, 68, .12); }
 
 /* The tier stripe. border-left rather than a pseudo-element so it cannot overlap the
    row's own rounded corners. */

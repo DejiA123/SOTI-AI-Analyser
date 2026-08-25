@@ -1,132 +1,188 @@
 SOTI AI Analyser
 ================
 
-AI-powered log analysis, case management, and Salesforce integration for the
-SOTI support team. Runs 100% locally via Ollama — no cloud, no API keys,
-no data sent externally.
+A Chrome side-panel tool for SOTI support engineers. It reads a Salesforce case —
+fields, email chain, internal notes and their replies — takes your log files, and
+answers questions about them.
+
+The AI comes from Microsoft 365 Copilot — the enterprise Copilot the company
+already runs. There is no API key and no endpoint to configure: the tool relays
+each question through the Copilot session you are already signed in to, and reads
+the answer back. That relay is what "the bridge" means throughout these docs.
 
 
-HOW TO INSTALL (Chrome Extension — recommended)
-------------------------------------------------
+WHAT YOU NEED
+-------------
+
+  * Chrome or Edge.
+  * A Microsoft 365 account with Copilot, signed in in the same browser.
+  * Access to your Salesforce org.
+
+Nothing to install beyond the extension itself. No model download, no server.
+
+
+INSTALL (5 minutes, once)
+-------------------------
 
 1. Download or clone this repository.
-2. Open Chrome or Edge and go to the Extensions page:
-     Chrome: chrome://extensions
-     Edge:   edge://extensions
-3. Enable Developer Mode (toggle in the top-right).
-4. Click "Load unpacked" and select the Extension folder.
-5. Click the SOTI AI Analyser icon in the toolbar to open the side panel.
 
-Works in Chrome, Edge, Brave, Opera, and Vivaldi.
+2. Open your browser's Extensions page:
+       Chrome: chrome://extensions
+       Edge:   edge://extensions
 
+3. Turn on "Developer mode" (top-right).
 
-STANDALONE OPTION (No installation required)
---------------------------------------------
+4. Click "Load unpacked" and choose the Extension folder.
 
-If you prefer not to install the extension, you can use the tool as a plain
-web page. Note: Tesseract OCR and local Ollama AI require the page to be served
-over HTTP — opening the HTML file directly (file://) will block both.
+5. Click the SOTI AI Analyser icon in the toolbar. The side panel opens.
 
-1. Double-click serve_standalone.bat (requires Python or PowerShell — both
-   are pre-installed on Windows).
-2. Keep the terminal window open.
-3. Open http://127.0.0.1:8765/SOTI_AI_Analyser.html in your browser.
+6. Sign in to Microsoft 365 Copilot in a normal browser tab if you are not
+   already: https://m365.cloud.microsoft
 
-Note: Salesforce sync (content.js) only works in the Chrome extension.
+7. In the panel, open Settings (the ⋮ menu) and click "Grant access to
+   https://m365.cloud.microsoft". Chrome will ask you to allow it — this is what
+   lets the tool read Copilot's answer back. Then press "Test Copilot Bridge
+   Connection". You should get a reply within a few seconds.
 
+That is the whole setup.
 
-LOCAL AI SETUP (Ollama)
------------------------
-
-The extension uses a locally-running Ollama model for all AI responses.
-
-First-time setup:
-1. Open the extension, click the ⋮ menu → Settings.
-2. Click "Download setup_local_ai.bat" and run it (double-click).
-3. Wait for the setup to complete (~7.2 GB model download, one time only).
-   Allow around 10 GB of free disk space for the model plus runtime overhead.
-4. Back in Settings, click the refresh icon to detect models, then Save.
+Works in Chrome, Edge, Brave, Opera and Vivaldi.
 
 
-FILE INVENTORY
+DAY-TO-DAY USE
 --------------
 
-Core extension files (required):
-  manifest.json           Extension configuration and permissions
-  SOTI_AI_Analyser.html   Main UI (side panel)
-  sidepanel.js            All application logic (~17,900 lines)
-  power.js                Power & resource governor — caps this app's memory and
-                          CPU use per machine (must load before sidepanel.js)
-  styles.css              UI styling
-  background.js           Service worker (opens side panel on click)
-  content.js              Injected into Salesforce to sync case data
+Working one case:
 
-OCR support (lib/ folder — required):
-  tesseract.v5.min.js             Tesseract.js OCR library
-  worker.min.js                   Tesseract web worker
-  tesseract-core.wasm(.js)        WASM OCR engine (standard)
-  tesseract-core-simd.wasm(.js)   WASM OCR engine (SIMD optimised)
-  tesseract-core-simd-lstm.wasm(.js) WASM OCR engine (SIMD + LSTM)
-  eng.traineddata.gz              English language OCR model (~10 MB)
+  1. Open the case in Salesforce.
+  2. In the panel, open the Case Info Panel.
+  3. Click "Sync from Salesforce".
 
-  Note: The worker.v5.min.js and tesseract-core.v5.* files are aliases of
-  their non-v5 counterparts included for compatibility. The *.wasm files are
-  the binary payloads loaded by their corresponding *.wasm.js loaders.
+The sync opens the case's Feed tab for you, scrolls the whole email chain into
+view, and pulls in the case fields, the emails, the internal notes and the
+replies to those notes. Then ask it anything, or use a Quick Option
+(Case Summary, Draft Email, JIRA, Problem & Resolution).
 
-Knowledge base (knowledge/ folder — required):
-  MobiControl.md          Product-specific AI context for MobiControl
-  Connect.md              Product-specific AI context for SOTI Connect
-  XSight.md               Product-specific AI context for SOTI XSight
+Working your queue:
 
-Standalone server (optional — for non-extension users only):
-  serve_standalone.bat    Starts a local HTTP server (Python or PowerShell)
-  serve_standalone.ps1    PowerShell fallback server (used by the .bat)
+  1. Open your case list in Salesforce (e.g. Cases → My Open Cases).
+  2. In the panel, click the "Open Cases" tab, then "Sync from Salesforce".
 
-Local AI installer (optional — for first-time Ollama setup):
-  setup_local_ai.bat      Automated Ollama + model installer for Windows
-  setup_local_ai.ps1      PowerShell implementation of the above installer
+You get one line per case — number, subject, severity, age — grouped by
+entitlement tier. From there you can:
 
-Tests:
-  Removed from the repository. After editing sidepanel.js run "node --check sidepanel.js"
-  and then load the panel — see PROJECT_OVERVIEW.md section 5.11.
+  * Search by case number, subject or account.
+  * Filter to one tier (Enterprise / Premium / Standard).
+  * Sort by age, by severity, or by whose move it is.
+  * Expand a case (the ▸) to read the customer's description.
+  * Click a case to open it in Salesforce and sync it in one go.
 
-Repo files:
-  README.txt              This file
-  SECURITY.md             Security & data-protection assessment
-  UNINSTALL.md            Rollback/uninstall steps for the local AI setup
-  .gitignore              Git ignore rules
+Cases marked in RED are "Waiting on SOTI response" — those are the ones sitting
+on you.
+
+Log analysis:
+
+  1. Attach files with the 📄 button beside the chat box — LOG, TXT, XML, JSON,
+     HAR, CSV, or a ZIP bundle.
+  2. Click "Analyse Now".
+
+A ZIP is unpacked for you and findings are cited back to the file they came
+from. Screenshots are read with on-device OCR.
 
 
-RESOURCE USE (why the app doesn't slow your machine down)
----------------------------------------------------------
+WHERE YOUR DATA GOES
+--------------------
 
-The app measures itself and works out how much memory it may use on YOUR machine
-— roughly 1.8 GB on a 16 GB laptop, less on a smaller one. When it approaches that
-limit it automatically shrinks its workload and hands back caches it can rebuild,
-rather than letting the browser run out of memory.
+Worth understanding before you use it on a customer case.
 
-The live pill in the top bar shows what it is currently using. Click it for:
-  - what this app has budgeted for your machine, and why
-  - live memory and responsiveness
-  - how fast recent AI runs were (time to first token, tokens/sec)
-  - "Free memory now" and "Copy report" (for bug reports)
+  * Case content and log text are sent to Microsoft 365 Copilot to be analysed.
+    They leave your machine.
+  * They go to the SAME enterprise Copilot the company already licenses and
+    approves — your own signed-in session, inside the company tenant. This tool
+    does not introduce a new AI service or a new supplier; it connects to the one
+    that is already there. In effect it does automatically what you are already
+    allowed to do by hand: put case material into Copilot and read the answer.
+  * There is no API key and no endpoint. The extension holds no credential for
+    Microsoft and never calls Microsoft directly — it types into the Copilot page
+    and reads the reply, and the page's own session carries the traffic.
+  * Each relayed chat is titled with the case number, so the Copilot history
+    reads as a record you can navigate. Nothing is deleted by default.
+  * Network captures (.har) are redacted for tokens, cookies and auth headers
+    before anything is sent.
+  * Cases, logs and chat history are stored on your device in the browser's
+    extension storage, and auto-deleted after 30 days of inactivity.
+    Settings → "Clear all cases & logs now" wipes them immediately.
 
-IMPORTANT: this covers the browser panel only. The AI model itself runs inside
-Ollama as a separate program holding its own 3-4 GB, which the panel cannot see or
-control. If the whole machine is short of memory, lower Context Size in Settings
-(or use a smaller model) — that is the setting that moves Ollama's usage.
+Case material is NOT redacted before it is sent — customer names, email chains
+and log text go as written. See SECURITY.md for the full assessment.
 
 
-FEATURES
---------
+IF SOMETHING DOES NOT WORK
+--------------------------
 
-  Case Management     Multi-tab case workspace with persistent state across sessions
-  AI Chat             Ask the AI anything about a case — powered by local Ollama
-  Log Analysis        Upload MS, DS, Agent, DDR, HAR, and MSI logs for deep forensics
-  Salesforce Sync     Auto-pull case number, account, platform, and email chain from SF
-  OCR                 Extract text from screenshots using on-device Tesseract v5
-  JIRA Reports        Generate formatted JIRA tickets from AI conversation + case data
-  Power Monitor       The app measures itself and stays inside a memory budget it
-                      works out for your machine, so it never freezes the laptop.
-                      Click the live MB pill in the top bar for the full report.
-  Privacy             All processing is local — no data leaves your machine
+"Chrome access is needed for ..." or the relay cannot read the answer
+    Settings → "Grant access to https://m365.cloud.microsoft", then accept
+    Chrome's prompt. This is per-host and only a click can ask for it.
+
+The sync says it could not find the case, or the panel looks empty
+    Make sure the Salesforce case is in the ACTIVE tab, then sync again.
+    Content-script changes need the Salesforce tab reloaded.
+
+The relay opens a window and nothing happens
+    Check you are still signed in to Copilot. Settings → "Test Copilot Bridge
+    Connection" tells you which stage failed.
+
+Answers stop mid-way, or a case comes back trimmed
+    A very large case is sent as several messages. The panel says so when it
+    has to trim, and never trims silently.
+
+For anything else, open the side panel's console and run SOTI_DIAG() — it
+prints what the panel thinks is configured and where it is failing.
+
+
+WHAT IS IN THE FOLDER
+---------------------
+
+Core (required):
+  manifest.json            Extension configuration and permissions
+  SOTI_AI_Analyser.html    The side-panel UI
+  sidepanel.js             Application logic — UI, prompts, analysis, storage
+  ai-provider.js           Provider layer; translates to and from the bridge
+  copilot-bridge.js        Drives the Copilot tab and reads the answer back
+  content.js               Injected into Salesforce to read case data
+  power.js                 Memory/CPU governor (must load before sidepanel.js)
+  background.js            Service worker; opens the side panel
+  styles.css               UI styling
+
+OCR (lib/ — required):
+  tesseract.v5.min.js, worker.min.js, tesseract-core*.wasm(.js),
+  eng.traineddata.gz       On-device screenshot OCR (Tesseract v5)
+
+Knowledge base (knowledge/ — required):
+  MobiControl.md, Connect.md, XSight.md, and their *_Knowledge.md companions
+                           Product context sent alongside a case, so a hosted
+                           model knows what a Deployment Server is
+  PulseKnowledge.md        Offline copy of SOTI Pulse, used by the search index
+
+Docs:
+  README.txt               This file
+  SECURITY.md              Security & data-protection assessment
+  PROJECT_OVERVIEW.md      How it works internally, and why
+  UNINSTALL.md             Removal steps
+
+Tests are not in this repository. After editing sidepanel.js run
+"node --check sidepanel.js" and load the panel — see PROJECT_OVERVIEW.md §5.11.
+
+
+RESOURCE USE
+------------
+
+The tool measures itself and works out how much memory it may use on YOUR
+machine — roughly 1.8 GB on a 16 GB laptop, less on a smaller one. When it gets
+close it shrinks its workload and hands back caches it can rebuild, rather than
+letting the browser run out of memory.
+
+There is no local model, so nothing else is holding several gigabytes on your
+behalf. Run SOTI_POWER() in the side panel's console for the full report:
+the budget it has set for your machine, live memory, and how fast recent runs
+were.

@@ -100,7 +100,24 @@
              renderOpenCaseFilters() from whatever the sync actually returned — a tier with
              no cases in it is not offered. Hidden until there is a list to filter. -->
         <div class="oc-filters" id="ocFilters" style="display:none">
-            <input type="search" class="oc-search" id="ocSearch" placeholder="Filter by case number, subject or account…" autocomplete="off">
+            <div class="oc-filter-row">
+                <input type="search" class="oc-search" id="ocSearch" placeholder="Filter by case number, subject or account…" autocomplete="off">
+                <!-- "List order" is the default and means the sort the engineer already chose
+                     in Salesforce. Sorting here re-orders WITHIN each entitlement group, not
+                     across them: the tier is which cases you owe first, so it stays the outer
+                     axis and this decides the order inside it. Pick a single tier chip and the
+                     grouping goes away, leaving a flat sorted list. -->
+                <select class="oc-sort" id="ocSort" title="Order the cases within each entitlement group">
+                    <option value="list">List order</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="newest">Newest first</option>
+                    <option value="sev-high">Severity: high first</option>
+                    <option value="sev-low">Severity: low first</option>
+                    <!-- One direction only: "what is waiting on me" is a question; its
+                         reverse puts the cases nobody can act on at the top. -->
+                    <option value="status">Status: on SOTI first</option>
+                </select>
+            </div>
             <div class="oc-chips" id="ocChips"></div>
         </div>
 

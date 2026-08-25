@@ -1,20 +1,72 @@
 # SOTI AI Analyser — Security & Data-Protection Assessment
 
+> **This document was rewritten for build 3.0.0 and reviewed for 3.1.0.** Every version before it assessed a
+> local-only tool: AI inference ran on the analyst's own machine and no case content left
+> the device. **That is no longer what ships.** The tool now sends case content to
+> Microsoft 365 Copilot. If you are holding an older copy of this assessment, its
+> conclusions do not apply to the current build.
+
 ## 1. Executive summary
 
-The application has a **privacy-favourable, local-first architecture**:
+The application analyses Salesforce case content and customer diagnostic logs. **Case
+content leaves the analyst's device**: it is relayed to **Microsoft 365 Copilot** and the
+answer is read back.
 
-- **All AI processing is local** (Ollama on `127.0.0.1:11434`). No cloud AI, no API keys, no third-party data processor.
-- **No telemetry, analytics, or tracking** of any kind.
-- **All network egress is restricted** to localhost plus first-party SOTI/Salesforce hosts, enforced by tightly-scoped `host_permissions` and a hardened Content-Security-Policy.
-- **No personal data reaches any third party.** Case content is processed and stored on the analyst's device. One **first-party** exception is documented at §4.1: a small number of case-derived keywords are sent to SOTI's own `pulse.soti.net` in a search query string.
+How it gets there is the unusual part, and it matters to the assessment:
 
-**Two residual technical risks are open:**
+- **There is no API key, no endpoint, and no service account.** The extension holds no
+  credential for Microsoft and makes **no network request to Microsoft at all** — the
+  Content-Security-Policy `connect-src` does not include any Microsoft host, so it
+  physically cannot.
+- Instead, the extension **automates a Copilot tab in the analyst's own browser**, typing
+  the prompt into the composer and reading the reply out of the page. The data travels as
+  chat messages **inside the analyst's existing, signed-in Microsoft 365 session** — the
+  same channel, and the same tenant, as if they had pasted the case into Copilot by hand.
+- Consequently **the recipient is the organisation's own Microsoft 365 tenant**, governed by
+  the M365 agreement and Copilot data-handling commitments already in place, rather than a
+  new third-party processor procured by this tool.
+- **Microsoft 365 Copilot is already an approved, licensed, in-use enterprise service here.**
+  This tool does not introduce it, procure it, or route around it — it connects to the
+  deployment the organisation has already sanctioned, through the engineer's own licensed
+  session. In practical terms the tool automates something an engineer is already permitted
+  to do by hand: put case material into Copilot and read the answer.
+- Access to that origin is an **optional** Chrome permission, granted by an explicit click
+  and revocable in browser settings.
 
-1. **Local data is not encrypted at rest** (§9.1) — open by customer decision, with mandated OS disk encryption as the compensating control.
-2. **Case-derived keywords are sent to `pulse.soti.net`** (§9.2, detail in §4.1) — first-party recipient, but the data lands in access logs outside this application's retention controls. Remediation options are listed; **this one is not yet closed.**
+Unchanged from earlier assessments:
 
-With the compensating controls documented below, the application is assessed as **suitable for a controlled, policy-managed pilot**, subject to the operational recommendations in §10, closure of risk 2, and the security team's own review/pen-test.
+- **No telemetry, analytics or tracking** of any kind.
+- **No third-party CDNs, fonts or scripts.** Tesseract OCR runs on-device and is vendored.
+- Case data at rest stays in `chrome.storage.local` on the device, with 30/90-day purges.
+
+**Open risks material to a rollout decision:**
+
+1. **[MEDIUM] Customer personal data is disclosed to Microsoft 365 Copilot** (§9.1). This is
+   the defining change in this build, and it is *not* accompanied by redaction: case
+   narratives, email chains and log text are sent as written. (`.har` network captures are the
+   one exception — they are redacted for tokens, cookies and auth headers before any send.)
+   Substantially mitigated by the destination being an **already-approved enterprise service
+   in the organisation's own tenant**. What remains is narrower than "is Copilot allowed": it
+   is whether that existing approval was scoped to include **customer** case content and
+   diagnostic logs, and whether customer contracts and sub-processor disclosures reflect it.
+   A question to confirm, not to start from scratch.
+2. **[MEDIUM] Automating a Microsoft web UI.** Acceptable-use question for the business, and
+   the relay breaks whenever Microsoft changes that UI (§9.2).
+3. **[MEDIUM] Local data is not encrypted at rest** (§9.3) — open by prior customer
+   decision, with mandated OS disk encryption as the compensating control.
+4. **[MEDIUM] Case-derived keywords are sent to `pulse.soti.net`** (§9.4, detail in §4.1) —
+   first-party recipient, but outside this application's retention controls. **Not closed.**
+
+**Assessment.** The engineering controls are sound, and the egress path is narrower than a
+hosted-API integration would be: no key to leak, no new processor, no direct connection, and
+a destination the organisation has already licensed and approved. The tool is best understood
+as **automating an action engineers are already permitted to perform manually** — putting case
+material into enterprise Copilot — rather than as opening a new channel out of the business.
+
+On that basis the application is assessed as **suitable for a controlled, policy-managed
+rollout**, subject to §10: confirming the scope of the existing Copilot approval covers
+customer case content, the standing items carried over from earlier assessments, and the
+security team's own review and pen-test of the bridge path.
 
 ---
 
@@ -22,10 +74,48 @@ With the compensating controls documented below, the application is assessed as 
 
 - Chrome **Manifest V3** side-panel extension.
   - `sidepanel.js` — all application logic (UI, prompt building, research, storage).
-  - `background.js` — minimal service worker; only opens the side panel. **Holds no network permissions and makes no requests.**
-  - `content.js` — content script injected on Salesforce pages; **reads the case DOM only** and returns it to the side panel via internal messaging. Makes no network requests.
-- **AI inference** is performed by a **locally-installed Ollama** instance (model `gemma4:e2b`) over `http://127.0.0.1:11434`.
-- **Trust boundary:** the extension trusts the local machine, the local Ollama, and first-party SOTI/Salesforce web properties. It trusts **no external third party**.
+  - `ai-provider.js` — the provider layer. Translates the panel's requests into whatever the
+    active provider speaks and translates the reply back, so nothing above it knows which
+    provider answered. **The shipped build offers one provider: the Copilot bridge.**
+  - `copilot-bridge.js` — the bridge itself. Runs **inside the Copilot page** via
+    `chrome.scripting`: finds the composer, types the prompt, watches for the answer to stop
+    changing, and returns the text. Makes no network requests of its own.
+  - `background.js` — minimal service worker; only opens the side panel. **Holds no network
+    permissions and makes no requests.**
+  - `content.js` — content script injected on Salesforce and JIRA pages; **reads the case DOM
+    only** and returns it to the side panel via internal messaging. Makes no network requests.
+- **AI inference** happens in **Microsoft 365 Copilot** (`m365.cloud.microsoft`), reached by
+  automating a browser tab that is already authenticated as the analyst.
+
+**Trust boundary.** The extension trusts the local machine, first-party SOTI/Salesforce web
+properties, and — as of this build — **the analyst's own Microsoft 365 tenant**, to which it
+discloses case content.
+
+**What this architecture does NOT do, and why it matters:**
+
+| | |
+|---|---|
+| Hold a credential for the AI service | No. There is no API key, token or service account anywhere in the extension or its storage — so there is none to leak, rotate or misuse. |
+| Connect to Microsoft from the extension | No. `connect-src` in the CSP lists no Microsoft host. Egress happens in the Copilot **page**, as ordinary session traffic. |
+| Send data to a processor the org has not already engaged | No. The destination is the tenant the analyst is signed in to. |
+| Work without the analyst's knowledge | No. The relay drives a real window; the host permission is optional and must be granted by a click. |
+
+The corollary is the risk: because the tool rides the analyst's own session, **it inherits
+whatever that session is allowed to do**, and the disclosure is as real as if they had
+pasted the case in themselves. See §9.1.
+
+### 2.1 The relay window
+
+Each request opens (or reuses) **one minimized browser window** holding the Copilot chat,
+off the tab strip and unfocused. It is reused across turns and never touches a Copilot tab
+the analyst opened themselves. Relayed chats are titled with the case number so the Copilot
+history is navigable rather than anonymous; deletion of those chats is **off by default**
+and, when enabled, only ever removes conversations this tool created, identified by that
+title.
+
+The same mechanism fetches a single case Description for the Open Cases queue — a
+deliberately narrow message (`GET_SALESFORCE_CASE_BRIEF`) that reads two fields from a
+Salesforce record and touches nothing else.
 
 ---
 
@@ -36,38 +126,43 @@ With the compensating controls documented below, the application is assessed as 
 | Customer names, emails, phone numbers, company identifiers | Scraped Salesforce case | `chrome.storage.local` (device) |
 | Case narratives / email chains | Scraped Salesforce case | `chrome.storage.local` |
 | Diagnostic log files (may contain device IDs, IPs, usernames) | Analyst upload | `chrome.storage.local` |
-| Chat history with the local AI | Local | `chrome.storage.local` |
+| Chat history with the AI | Local | `chrome.storage.local` **and the analyst's Copilot chat history** |
 | OCR text extracted from screenshots | Local (Tesseract) | `chrome.storage.local` |
 | Derived "learned insights" | Local | `chrome.storage.local` |
 
-- Data is **not redacted** before the local model — defensible because processing never leaves the device. (The former misleadingly-named no-op `scrubPII()` wrapper has been **removed** so the code no longer implies redaction it did not perform.)
+- Data is **not redacted** before it is sent. This used to be defensible on the grounds that
+  processing never left the device; **that defence is gone.** Case narratives, email chains,
+  customer names and log text now reach Microsoft 365 Copilot as written. The former
+  misleadingly-named no-op `scrubPII()` wrapper was removed so the code no longer implies a
+  redaction it never performed — the honest position is that **there is no PII redaction on
+  the prompt path**, and if the organisation requires one before customer data may go to
+  Copilot, it has to be built. See §9.1.
 - **Network captures (`.har`) are the exception, and always are.** A capture records whole
   requests, so it carries the `Authorization` headers, cookies and — on an SSO capture — the
   `id_token`s and authorization codes of the session it recorded. Every path that can put a
   capture in front of a model runs it through `redactHarSecrets()` first, and the eight
   line-by-line log scanners refuse to read one at all (`withoutNetworkCaptures()`): a scanner
   quoting "the highest-scoring line" out of a one-line JSON capture is quoting a bearer token.
-  This matters most when a non-local provider is selected, where the prompt leaves the device —
-  see the note below.
-
-> **Scope note (build 2.9.0 onward).** The statements above about "all AI processing is local"
-> describe the DEFAULT provider (Ollama) and remain true for it. Selecting any other provider —
-> an API endpoint or the browser bridge — sends the case material off the device to a
-> third-party service, which the panel signals at run time (amber status dot, "OFF-DEVICE" in
-> the diagnostics, a warning rather than a success tick when the setting is saved). This
-> document has not yet been rewritten for that, and should be before it is relied on for a
-> deployment that uses one.
+  **This is now the single most important control in the document**: with the prompt leaving
+  the device, an unredacted capture would put live session tokens into a Copilot chat.
+  Verified by planting a bearer token, a session cookie and an OAuth code in a capture and
+  running the shipping panel over the bundle.
 
 ---
 
 ## 4. Network egress (verified by full-codebase audit)
 
-Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destinations are **exclusively**:
+Every `fetch` / `XMLHttpRequest` / `WebSocket` / beacon path was traced. Destinations the
+**extension itself** connects to are **exclusively**:
 
-- `http://127.0.0.1:11434` / `localhost` — local Ollama.
 - `https://pulse.soti.net` — release notes, help pages and community search (first-party SOTI). **Case-derived text reaches this host — see §4.1.**
 - `salesforce.com` / `force.com` — content script **reads the DOM only** (no outbound fetch of case data).
 - Local bundled files (`lib/`, `knowledge/`).
+
+> **The largest disclosure in this application is not on that list, because it is not a
+> `fetch`.** Case content reaches Microsoft 365 Copilot by being **typed into a page**, and
+> the page's own session carries it. Auditing this application's network calls will therefore
+> never show it. See §4.2 — it is the flow that matters most.
 
 **Confirmed absent:** telemetry/analytics (Google Analytics, Sentry, Segment, etc.), third-party CDNs, CORS proxies, external fonts/scripts/CSS, cookies, clipboard/geolocation access, `externally_connectable`.
 
@@ -104,6 +199,46 @@ sotiFetch(`${PULSE_ORIGIN}/community/search?query=${encodeURIComponent(kq)}`, 60
 
 ---
 
+### 4.2 Case content sent to Microsoft 365 Copilot — the primary disclosure
+
+**What is sent.** Whatever the panel has built the prompt from, which for a case analysis is
+the case record (number, account, contact, status, versions, platform), the **email chain**,
+**internal notes and their replies**, the analyst's meeting notes, the relevant excerpts from
+the offline SOTI knowledge base, and — for a log analysis — **the log text itself**. Large
+cases are split across several chat messages, or uploaded as a `.txt` attachment when the
+site accepts one. **None of it is redacted** (except `.har` captures, §3).
+
+**How it is sent.** Not by an HTTP call from the extension. `chrome.scripting` executes the
+bridge inside the Copilot page, which:
+
+1. finds the message composer,
+2. sets its value to the prompt and dispatches the events the site expects,
+3. clicks send,
+4. watches the answer element until it stops changing, and
+5. returns the rendered text through the extension's internal messaging.
+
+The network request that carries the case to Microsoft is **issued by Copilot's own page
+code, on the analyst's own authenticated session**. The extension never sees it.
+
+**Who receives it.** The Microsoft 365 tenant the analyst is signed in to, under the Copilot
+data-handling terms that tenant already operates under. This is materially different from a
+hosted-API integration, where the vendor would be a *new* processor engaged by this tool:
+here the processor relationship, the licensing and the organisational approval **already
+exist**, and the tool is connecting to them rather than creating them.
+
+**The honest limit of that argument.** "Copilot is approved for the organisation" and "customer
+case content may be put into Copilot" are two statements, and only the first is established
+here. The tool does not widen the destination, but it does industrialise the volume: what was
+an engineer occasionally pasting a case becomes every case, every log, every queue expansion.
+Confirming the existing approval was scoped with that in mind is §9.1 — a scope check against
+an approval that exists, not an approval to be sought.
+
+**Evidence trail.** Each relayed chat is titled with the case number it came from, so what
+was sent is auditable from Copilot's own history. Deletion of those chats is off by default
+precisely so that trail survives.
+
+---
+
 ## 5. Permissions (`manifest.json`)
 
 | Permission | Purpose | Assessment |
@@ -113,6 +248,16 @@ sotiFetch(`${PULSE_ORIGIN}/community/search?query=${encodeURIComponent(kq)}`, 60
 | `activeTab`, `tabs`, `scripting` | Salesforce scraping | Broad but justified; note for review |
 | `downloads` | Session export to file | Justified |
 | `host_permissions` | `*.soti.net`, `*.salesforce.com`, `*.force.com`, `localhost`/`127.0.0.1` **only** | **Strong** — no `<all_urls>`, no wildcard; physically prevents reaching any non-approved host |
+| `optional_host_permissions` | `m365.cloud.microsoft`, `copilot.microsoft.com` (plus unused entries for providers this build does not offer) | **Not granted at install.** Chrome only issues them from an explicit user gesture — the "Grant access" button in Settings — and the analyst can revoke them in browser settings. Without the grant the bridge cannot read the answer and the tool simply does not work. |
+
+- The two Microsoft origins are granted **together**, because signing in to
+  `copilot.microsoft.com` with a work account redirects to `m365.cloud.microsoft`; granting
+  only the configured one leaves the request failing on a host the analyst never chose.
+- **Note for review:** `optional_host_permissions` still lists Anthropic, OpenAI, Azure OpenAI,
+  OpenRouter, `claude.ai` and `chatgpt.com`. **This build offers none of them** — the provider
+  picker is gone and the bridge is the only provider. They are unreachable without a user
+  gesture that the UI never triggers, but they are surplus surface and should be pruned from
+  the manifest (and from `connect-src`) before rollout. Tracked at §10.8.
 
 - The previously-unused **`declarativeNetRequest` permission has been removed** (and its dead service-worker code), reducing attack surface.
 - **CSP** (`content_security_policy.extension_pages`, mirrored in a `<meta>` for standalone mode):
@@ -142,32 +287,95 @@ sotiFetch(`${PULSE_ORIGIN}/community/search?query=${encodeURIComponent(kq)}`, 60
 ## 8. Third-party components / supply chain
 
 - **Tesseract.js v5.1.0** (Apache-2.0) — OCR engine; **fully vendored locally** in `lib/`, with **all CDN default URLs removed** (verified: OCR loads engine + WASM + language data from local files only, zero external requests). Auditable but **not hash-pinned**.
-- **Ollama + local model** — a **separate dependency** installed and secured outside the extension. Its hardening (`OLLAMA_ORIGINS`, local-only binding) is the deploying team's responsibility.
+- **Microsoft 365 Copilot** — not a bundled component but a **runtime dependency on a web UI
+  the vendor changes without notice**. The bridge locates the composer, the send control and
+  the answer container by CSS selector. When Microsoft changes that markup the relay stops
+  working; the failure is loud (the test button reports which stage failed) rather than
+  silent, and the selectors are **settings, not constants**, so the fix is a settings edit
+  rather than a release. This is a supportability risk, not a confidentiality one — see §9.2.
 - **No npm runtime dependency tree** in the shipped extension (no bundler / `node_modules`).
+- **No local model or inference server** is installed by this build. Earlier versions
+  required Ollama; that dependency and its installer are no longer part of the product, which
+  removes a locally-listening HTTP service and its CORS configuration from the attack surface
+  entirely (the findings that dealt with it are retained as history at §14.1 and §15.1–15.2).
 
 ---
 
 ## 9. Residual risks (critical view)
 
-1. **[MEDIUM] No encryption at rest.** Case PII sits in `chrome.storage.local` in plaintext, protected only by OS/profile security. **Open by customer decision.** *Compensating controls:* sandboxed per-extension storage, 30/90-day retention, and mandated OS disk encryption (§10.1). A passphrase-based AES-GCM option is designed but not built.
-2. **[MEDIUM] Case-derived text leaves the device to a first-party host.** Up to six keywords taken from the case issue summary and customer email bodies are sent to `pulse.soti.net` in a URL query string, on essentially every quick action against an open case (§4.1). The recipient is SOTI-internal — no third party — but the data lands in web-server/CDN access logs governed by that service's retention policy, outside this application's controls. **Open**; remediation options in §4.1.
-3. **[LOW] No app-level authentication.** Anyone with the unlocked browser profile can open the panel and read cases. Ties to (1).
-4. **[LOW] Prompt injection.** Attacker-influenced case/email content flows into the local LLM and could skew its analysis output. No data-exfiltration risk (local model); analysts should treat AI output as advisory.
-5. **[LOW] Standalone mode** uses `localStorage` (wiped by site-data clears) and relies only on the meta-CSP (no `host_permission` enforcement). Deploy the **extension** only.
-6. **[LOW] Learned insights** may retain incidental PII fragments (now 90-day bounded).
-7. **[INFO] Vendored libraries are not integrity-pinned.**
+1. **[MEDIUM] Customer personal data is disclosed to Microsoft 365 Copilot.** Case narratives,
+   email chains, customer names and contact details, and diagnostic log text are sent
+   **unredacted** (§4.2). *Mitigating factors:* the destination is **Microsoft 365 Copilot
+   Enterprise, already licensed and approved for use in this organisation** — not a new
+   processor engaged by this tool; the data stays within the organisation's own tenant and its
+   existing Copilot data-handling commitments; there is no API key to leak; the host permission
+   is optional and revocable; and the disclosure is auditable from Copilot's own chat history,
+   which the tool titles by case number and does not delete by default. *Residual, and the
+   reason this is not closed:* the approval establishes the **destination**, not necessarily
+   the **content class and volume** — this tool sends customer case material systematically
+   rather than occasionally. *To confirm before rollout:* that the existing Copilot approval
+   was scoped to include customer support content and diagnostic logs, and that customer
+   contracts and sub-processor disclosures are consistent with it. If any of that turns out to
+   be narrower than assumed, the mitigation is a PII redaction pass on the prompt path, which
+   **does not currently exist** and would have to be built. **Open — scope confirmation.**
+2. **[MEDIUM] Automation of a third-party web UI.** The tool drives Microsoft's interface
+   rather than an API. Two consequences: automated use may not be permitted by the
+   organisation's acceptable-use terms **(a question for the business, not for this
+   document)**, and the relay breaks when Microsoft changes the page. The second is
+   self-announcing and fixable from Settings without a release; the first is not a technical
+   control at all. **Open — organisational.**
+3. **[MEDIUM] No encryption at rest.** Case PII sits in `chrome.storage.local` in plaintext, protected only by OS/profile security. **Open by customer decision.** *Compensating controls:* sandboxed per-extension storage, 30/90-day retention, and mandated OS disk encryption (§10.1). A passphrase-based AES-GCM option is designed but not built.
+4. **[MEDIUM] Case-derived text leaves the device to a first-party host.** Up to six keywords taken from the case issue summary and customer email bodies are sent to `pulse.soti.net` in a URL query string, on essentially every quick action against an open case (§4.1). The recipient is SOTI-internal — no third party — but the data lands in web-server/CDN access logs governed by that service's retention policy, outside this application's controls. **Open**; remediation options in §4.1.
+5. **[MEDIUM] Prompt injection now has an exfiltration path.** Attacker-influenced case and
+   email content flows into a model **that is not local any more**. It can still skew the
+   analysis, and it can additionally attempt to induce the model to act on instructions
+   planted in a customer's email. The panel's own guards check citations and next steps
+   deterministically rather than trusting the answer, but analysts must treat AI output as
+   **advisory**, and content arriving from a customer as **untrusted input**. Upgraded from
+   LOW: the "no data-exfiltration risk (local model)" justification no longer holds.
+6. **[LOW] No app-level authentication.** Anyone with the unlocked browser profile can open the panel and read cases. Ties to (3).
+7. **[LOW] The relay inherits the analyst's session.** It can do anything in Copilot that the
+   signed-in analyst can. It is scoped to typing in a composer and reading a reply, and it
+   never touches a Copilot tab the analyst opened themselves, but there is no technical
+   boundary enforcing that beyond the code itself.
+8. **[LOW] Standalone mode** uses `localStorage` (wiped by site-data clears) and relies only on the meta-CSP (no `host_permission` enforcement). It also **cannot reach the bridge** — no `chrome.scripting` — so it has no AI at all. Deploy the **extension** only.
+9. **[LOW] Learned insights** may retain incidental PII fragments (now 90-day bounded).
+10. **[INFO] Vendored libraries are not integrity-pinned.**
+11. **[INFO] Unused provider origins remain in the manifest** (§5) — surplus surface to prune.
 
 ---
 
 ## 10. Recommendations before global rollout
 
-1. **Mandate OS disk encryption (BitLocker/FileVault)** on all analyst machines; document as the compensating control for §9.1. (Or commission the passphrase-based at-rest encryption feature.)
-2. **Deploy via managed/enterprise policy** (force-installed, pinned version), **not** the standalone page.
-3. ~~Remove the unused `declarativeNetRequest` permission~~ — **done**; consider further narrowing `tabs`/`scripting`.
-4. ~~Add HTML-escaping in `md()`~~ — **done** (defence-in-depth alongside CSP).
-5. ~~**Harden the Ollama host:** bind to localhost, set `OLLAMA_ORIGINS`, keep it off the network.~~ — **done**; `OLLAMA_ORIGINS` is pinned to this extension's ID and `OLLAMA_NO_CLOUD=1` enforces local-only inference (see §15.1–15.2).
-6. **Produce the organisational GDPR artefacts** (see §11) — the code supports these but cannot *be* them.
-7. **Commission an independent penetration test** of the packed extension.
+**Confirm before rollout** (these are checks against decisions the organisation has already
+taken, not new approvals to obtain):
+
+1. **Confirm the scope of the existing Copilot approval** (§9.1). Microsoft 365 Copilot is
+   already licensed and approved here, so the destination is settled. What to verify is that
+   the approval contemplated **customer support content and diagnostic logs**, sent
+   systematically rather than ad hoc, and that customer contracts and sub-processor
+   disclosures are consistent with that. Update the record of processing (§11.2) to name
+   Copilot as a recipient either way. If the scope turns out to be narrower, the remedy is a
+   redaction pass on the prompt path — it does not exist today and would need commissioning.
+2. **Get the business to confirm that automating the Copilot UI** is acceptable under the
+   organisation's acceptable-use terms (§9.2). The tool performs an action engineers are
+   already permitted to perform by hand; what is new is that a script does it.
+3. **Tell analysts what the tool does with a case**, plainly, in whatever training or
+   acceptable-use note accompanies it. The panel no longer warns at run time — that was
+   removed deliberately once the relay became the only provider, on the grounds that a
+   permanent banner over a setting nobody can change is noise rather than consent — so the
+   explanation has to live in the rollout material instead of in the UI.
+
+**Operational:**
+
+4. **Mandate OS disk encryption (BitLocker/FileVault)** on all analyst machines; document as the compensating control for §9.3. (Or commission the passphrase-based at-rest encryption feature.)
+5. **Deploy via managed/enterprise policy** (force-installed, pinned version), **not** the standalone page — which in this build has no AI at all.
+6. **Produce the organisational GDPR artefacts** (see §11) — the code supports these but cannot *be* them. §11.2 and §11.3 need rewriting for the Copilot recipient.
+7. **Commission an independent penetration test** of the packed extension, specifically including the bridge's injected code path.
+8. **Prune the manifest**: remove `optional_host_permissions` and `connect-src` entries for the providers this build does not offer (§5).
+9. ~~Remove the unused `declarativeNetRequest` permission~~ — **done**; consider further narrowing `tabs`/`scripting`.
+10. ~~Add HTML-escaping in `md()`~~ — **done** (defence-in-depth alongside CSP).
+11. ~~**Harden the Ollama host**~~ — **no longer applicable.** Ollama is not part of this build; the local inference server and its installer are gone (§8).
 
 ---
 
@@ -215,6 +423,17 @@ sotiFetch(`${PULSE_ORIGIN}/community/search?query=${encodeURIComponent(kq)}`, 60
 - Removed the misleading no-op `scrubPII()` wrapper.
 - Removed the unused `declarativeNetRequest` permission and its dead service-worker code.
 - Extended case retention to 30 days; added 90-day retention purge for learned insights.
+- **Build 3.0.0 — the architecture changed.** Local inference was removed and Microsoft 365
+  Copilot became the only provider, reached through the analyst's own signed-in session. This
+  is a **reduction** in some surface (no locally-listening inference server, no API key, no
+  newly-engaged processor) and an **increase** in disclosure (customer case content now leaves
+  the device). §1–§5 and §9–§10 were rewritten for it; §14–§15 were not, and are marked as
+  historical.
+- Build 3.0.0 also removed the run-time off-device warnings — the amber banner, the warning
+  toast on save, and the "OFF-DEVICE" wording — on the grounds that a permanent warning over
+  a setting nobody can change is noise rather than consent. **The consequence for this
+  document is that the disclosure is no longer signalled in the UI**, so it must be carried by
+  training and policy instead (§10.3).
 - **Scoped `OLLAMA_ORIGINS`** in the installer from `*` to the extension + standalone origins only (see §14.1).
 - **Made winget (verified package) the primary Ollama install path** ahead of the remote-script installer (see §14.2).
 - **Reordered the installer fallback chain to most-verified-first** — the signature-verified `OllamaSetup.exe` path now runs ahead of the `install.ps1` fetch-and-eval, which is now the last resort (see §14.2, §15.3).
@@ -237,6 +456,13 @@ This assessment covers the extension source in this repository at the stated dat
 ## 14. Penetration test — findings & resolutions
 
 A dynamic pentest was performed against the running application (live browser: network capture, CSP-violation instrumentation, 14 HTML-injection payloads, ReDoS timing) **and** against a live local Ollama instance. Findings and their resolutions:
+
+> **Historical record — read as history, not as current state.** These findings are from the
+> local-inference architecture. Ollama is no longer part of the product, so the findings that
+> concern it (§14.1, §15.1–15.3, §15.5) describe an attack surface that **no longer exists**
+> in this build. They are kept because deleting closed findings from a security assessment
+> destroys the audit trail of what was found and what was done about it. **Nothing in §14 or
+> §15 has been re-tested against the Copilot bridge** — that is §10.7, and it is outstanding.
 
 ### 14.1 [HIGH → RESOLVED] Local Ollama API exposed to any website (permissive CORS)
 - **Found:** the installer set `OLLAMA_ORIGINS=*`, disabling Ollama's CORS protection. Proven live — a browser page at an unrelated origin (`http://127.0.0.1:8765`, not the extension) successfully called `POST /api/chat` on the local model and received `Access-Control-Allow-Origin: *`. Any website the analyst visits could reach the local model.
