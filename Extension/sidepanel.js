@@ -2002,59 +2002,440 @@ function renderOpenCasesList() {
     const title = $('ocTitle');
     if (!list) return;
 
-    if (meta) meta.textContent = openCasesList.cases.length
-        ? `${openCasesList.cases.length} case${openCasesList.cases.length === 1 ? '' : 's'} · ${ocAgeLabel(openCasesList.scrapedAt)}`
+    const total = (openCasesList.cases || []).length;
+    renderOpenCaseFilters();
+    const shown = ocVisibleCases();
+
+    // The count says BOTH numbers whenever a filter is on. "8 cases" under a filter reads
+    // as a queue that shrank; "8 of 24" reads as a filter, which is what it is.
+    if (meta) meta.textContent = total
+        ? `${shown.length === total ? total : `${shown.length} of ${total}`} case${total === 1 ? '' : 's'} · ${ocAgeLabel(openCasesList.scrapedAt)}`
         : '';
     if (title) title.textContent = openCasesList.listName || 'Open Cases';
-    if (hint) hint.style.display = openCasesList.cases.length ? 'none' : '';
+    if (hint) hint.style.display = total ? 'none' : '';
 
     list.textContent = '';
-    if (!openCasesList.cases.length) return;
+    if (!total) return;
 
+    if (!shown.length) {
+        // A filter that matches nothing must say so, or it looks like the sync lost the
+        // queue — and say which filter, since there are two of them.
+        const none = document.createElement('div');
+        none.className = 'oc-open';
+        none.textContent = ocSearch
+            ? `No case matches “${ocSearch}”${ocFilterTier === 'all' ? '' : ' in that tier'}.`
+            : 'No cases in that tier.';
+        list.appendChild(none);
+        return;
+    }
+
+    /* GROUPED BY TIER, in the order the tiers are worked — but only when nothing is
+     * filtered. Once a single tier is picked, every row in the list is that tier and a
+     * heading over all of them says nothing. */
     const frag = document.createDocumentFragment();
-    for (const rec of openCasesList.cases) {
+    let lastTier = null;
+    const grouping = ocFilterTier === 'all';
+    const ordered = grouping
+        ? [...shown].sort((a, b) => ocTierRank(a) - ocTierRank(b))
+        : shown;
+
+    for (const rec of ordered) {
+        if (grouping) {
+            const tier = entitlementTier(rec.entitlement);
+            if (tier.key !== lastTier) {
+                lastTier = tier.key;
+                const h = document.createElement('div');
+                h.className = 'oc-group tier-' + tier.key;
+                h.textContent = tier.label;
+                frag.appendChild(h);
+            }
+        }
+        /* ONE ROW PER CASE, plus an expander.
+         *
+         * The queue is a list you scan, not a set of cards you read: 24 open cases at
+         * three lines each is a page and a half of scrolling to find the one you want.
+         * Everything that identifies a case at a glance — number, subject, status,
+         * severity, account, JIRA, age — now sits on a single line, and the subject is
+         * what gives way first when the panel is narrow, because it is the one part the
+         * expander below can show in full. */
         const row = document.createElement('div');
-        row.className = 'oc-row';
-        row.title = salesforceUrlForListRow(rec)
+        // The tier is also a coloured stripe down the row's left edge, so the grouping is
+        // still readable once you have scrolled past its heading.
+        row.className = 'oc-row tier-' + entitlementTier(rec.entitlement).key;
+
+        // The row's OWN click opens the case; the expander must not. Keeping them as two
+        // elements is what lets the toggle stop the event without the open path having to
+        // guess what was clicked.
+        const main = document.createElement('div');
+        main.className = 'oc-row-main';
+        // The subject goes in the tooltip too: the row truncates it, and hovering is the
+        // cheaper way to read one than expanding it.
+        const opens = salesforceUrlForListRow(rec)
             ? `Open ${rec.caseNum} in Salesforce and as a working tab`
             : `Open ${rec.caseNum} as a working tab`;
+        main.title = rec.subject ? `${rec.subject}\n\n${opens}` : opens;
 
-        const top = document.createElement('div');
-        top.className = 'oc-row-top';
         const num = document.createElement('span');
         num.className = 'oc-num';
         num.textContent = rec.caseNum;
-        top.appendChild(num);
-        row.appendChild(top);
+        main.appendChild(num);
 
-        if (rec.subject) {
-            const subj = document.createElement('div');
-            subj.className = 'oc-subject';
-            subj.textContent = rec.subject;
-            row.appendChild(subj);
-        }
+        const subj = document.createElement('span');
+        subj.className = 'oc-subject';
+        subj.textContent = rec.subject || '';
+        main.appendChild(subj);
 
-        const tags = document.createElement('div');
+        /* ONLY THE TWO SHORT TAGS GO ON THE LINE.
+         *
+         * All five used to, and on a side panel they take the whole width: the subject was
+         * flexed down to nothing and every row read as metadata about a case it would not
+         * name. Severity and age are the two that are short, that differ between rows, and
+         * that decide which case you look at first. Status does none of those — in a queue
+         * filtered to open cases it is very nearly a constant — and account and JIRA are
+         * long. All three are in the expander, so nothing is lost, only moved. */
+        const tags = document.createElement('span');
         tags.className = 'oc-tags';
-        const addTag = (text, cls) => {
-            if (!text) return;
-            const t = document.createElement('span');
-            t.className = 'oc-tag' + (cls ? ' ' + cls : '');
-            t.textContent = text;
-            tags.appendChild(t);
-        };
-        addTag(rec.status);
-        addTag(rec.priority, /severity 1|severity 2|high|critical/i.test(rec.priority || '') ? 'sev-high'
-                            : /severity 3|medium/i.test(rec.priority || '') ? 'sev-med' : '');
-        addTag(rec.account);
-        if (rec.jira) addTag(rec.jira, 'sev-jira');
-        if (rec.ageDays) addTag(`${rec.ageDays}d old`);
-        row.appendChild(tags);
+        main.appendChild(tags);
+        addOpenCaseTag(tags, rec.priority, severityTagClass(rec.priority));
+        if (rec.ageDays) addOpenCaseTag(tags, `${rec.ageDays}d`);
 
-        row.onclick = () => openCaseFromList(rec);
+        main.onclick = () => openCaseFromList(rec);
+        row.appendChild(main);
+
+        // WHAT THE CASE IS ABOUT, one click away and closed by default — open it on every
+        // row and the compact list is a wall of prose again.
+        const body = document.createElement('div');
+        body.className = 'oc-desc';
+        body.style.display = 'none';
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'oc-desc-toggle';
+        toggle.textContent = '▸';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.setAttribute('aria-label', `Show what ${rec.caseNum} is about`);
+        toggle.title = 'Issue description';
+        toggle.onclick = (e) => {
+            // Without this the click bubbles to the row and opens the case in Salesforce —
+            // the opposite of "let me read what this is before I open it".
+            e.stopPropagation();
+            const open = body.style.display === 'none';
+            if (open && !body.dataset.filled) {
+                fillOpenCaseDescription(body, rec);
+                body.dataset.filled = '1';
+            }
+            body.style.display = open ? '' : 'none';
+            toggle.textContent = open ? '▾' : '▸';
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        };
+        row.appendChild(toggle);
+        row.appendChild(body);
+
         frag.appendChild(row);
     }
     list.appendChild(frag);
+}
+
+/* Fill a queue row's expander with what the case is about.
+ *
+ * Built with textContent rather than innerHTML on purpose: every string here was scraped
+ * off somebody's Salesforce page, and a case subject is user-supplied text that can
+ * contain anything at all.
+ *
+ * The analysis column is prose written by an engineer, so its line breaks are meaning —
+ * "Case Summary:" and "Next Steps:" are headings in it. They survive as real lines.
+ */
+/* ENTITLEMENT TIERS.
+ *
+ * Salesforce names these per contract — "Enterprise Service" and "Enterprise Plus
+ * Service" are two entitlements and one tier, and the queue is worked by tier. Matching
+ * is on the tier word rather than the whole string, because the "Plus" variants and any
+ * renamed-per-customer entitlement must land in the same group as their base.
+ *
+ * Order is the order they are worked in, not alphabetical. Anything unrecognised goes
+ * last under its own heading rather than being forced into a tier it may not belong to —
+ * a case shown as Enterprise when it is not is worse than one shown as unclassified.
+ */
+const OC_TIERS = [
+    { key: 'enterprise', label: 'Enterprise',   match: /enterprise/i },
+    { key: 'premium',    label: 'Premium',      match: /premium/i },
+    { key: 'standard',   label: 'Standard',     match: /standard/i }
+];
+const OC_TIER_OTHER = { key: 'other', label: 'Other entitlements', match: null };
+
+function entitlementTier(name) {
+    const t = String(name || '').trim();
+    if (!t) return { key: 'none', label: 'No entitlement listed' };
+    return OC_TIERS.find(x => x.match.test(t)) || OC_TIER_OTHER;
+}
+
+// Sort key for grouping: the tier's working order, then unrecognised, then unlisted. The
+// list's own order is preserved inside a tier, because that is whatever sort the engineer
+// chose in Salesforce and this view has no business overriding it.
+function ocTierRank(rec) {
+    const key = entitlementTier(rec.entitlement).key;
+    const i = OC_TIERS.findIndex(t => t.key === key);
+    if (i >= 0) return i;
+    return key === 'other' ? OC_TIERS.length : OC_TIERS.length + 1;
+}
+
+// Which tier is showing, and what has been typed into the filter box. Deliberately not
+// persisted: a filter you cannot see the reason for is how a queue comes back looking
+// half-empty after a restart.
+let ocFilterTier = 'all';
+let ocSearch = '';
+
+function ocMatchesSearch(rec, q) {
+    if (!q) return true;
+    const hay = [rec.caseNum, rec.subject, rec.account, rec.contact, rec.jira, rec.entitlement, rec.status]
+        .filter(Boolean).join(' ').toLowerCase();
+    // Every word must appear somewhere, in any order: "linde enroll" finds the Linde
+    // enrollment case without the engineer having to remember which came first.
+    return q.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w));
+}
+
+function ocVisibleCases() {
+    return (openCasesList.cases || []).filter(rec =>
+        (ocFilterTier === 'all' || entitlementTier(rec.entitlement).key === ocFilterTier)
+        && ocMatchesSearch(rec, ocSearch));
+}
+
+/* The tier chips, built from what the sync returned. */
+function renderOpenCaseFilters() {
+    const wrap = $('ocFilters');
+    const chips = $('ocChips');
+    if (!wrap || !chips) return;
+
+    const all = openCasesList.cases || [];
+    wrap.style.display = all.length ? '' : 'none';
+    if (!all.length) return;
+
+    // Counts reflect the SEARCH but not the tier, so the chips keep saying how many cases
+    // each tier would show — a chip that reads 0 because of the tier you already picked
+    // tells you nothing.
+    const searched = all.filter(rec => ocMatchesSearch(rec, ocSearch));
+    const counts = new Map();
+    for (const rec of searched) {
+        const k = entitlementTier(rec.entitlement).key;
+        counts.set(k, (counts.get(k) || 0) + 1);
+    }
+
+    const order = [...OC_TIERS, OC_TIER_OTHER, { key: 'none', label: 'No entitlement listed' }];
+    const present = order.filter(t => counts.get(t.key));
+
+    chips.textContent = '';
+    const add = (key, label, count) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'oc-chip' + (ocFilterTier === key ? ' active' : '') + (key !== 'all' ? ' tier-' + key : '');
+        b.textContent = `${label} ${count}`;
+        b.onclick = () => {
+            // Clicking the active chip clears it — otherwise the only way back to the whole
+            // queue is to find "All" again, and that is one more thing to look for.
+            ocFilterTier = (ocFilterTier === key) ? 'all' : key;
+            renderOpenCasesList();
+        };
+        chips.appendChild(b);
+    };
+    add('all', 'All', searched.length);
+    for (const t of present) add(t.key, t.label, counts.get(t.key));
+}
+
+/* FETCH ONE CASE'S DESCRIPTION, in a tab the engineer never sees.
+ *
+ * A background tab rather than the foreground: this runs because somebody opened an
+ * expander to decide whether a case is worth opening, and yanking them onto the case would
+ * pre-empt that decision. The tab is closed again either way — on success, on timeout, and
+ * on the panel being wrong about the page.
+ *
+ * Cached back into openCasesList and persisted, so the second look at a case costs
+ * nothing and a restart does not re-fetch two dozen records.
+ */
+async function loadCaseDescription(rec, into) {
+    const fail = (msg) => { if (into && into.isConnected !== false) into.textContent = msg; };
+
+    if (!isChromeExtension() || !chrome.tabs || !chrome.tabs.create) {
+        return fail('The case description is only available in the Chrome extension.');
+    }
+    const url = salesforceUrlForListRow(rec);
+    if (!url) {
+        return fail('No link to this case was captured — press "Sync from Salesforce" to refresh the queue.');
+    }
+
+    let tabId = null;
+    const closeTab = () => {
+        if (tabId == null) return;
+        const id = tabId; tabId = null;
+        try { chrome.tabs.remove(id, () => void chrome.runtime.lastError); } catch (e) {}
+    };
+
+    try {
+        const tab = await new Promise((res, rej) => {
+            chrome.tabs.create({ url, active: false }, (t) => {
+                if (chrome.runtime.lastError || !t) return rej(new Error('could not open the case'));
+                res(t);
+            });
+        });
+        tabId = tab.id;
+
+        // Poll rather than wait on 'complete': Lightning renders the record after the
+        // document is done, so 'complete' is the start of the wait, not the end of it.
+        const DEADLINE = Date.now() + 20000;
+        let brief = null;
+        while (Date.now() < DEADLINE) {
+            await new Promise(r => setTimeout(r, 800));
+            brief = await new Promise((res) => {
+                try {
+                    chrome.tabs.sendMessage(tabId, { action: 'GET_SALESFORCE_CASE_BRIEF' }, (r) => {
+                        void chrome.runtime.lastError;   // not injected yet — keep waiting
+                        res(r || null);
+                    });
+                } catch (e) { res(null); }
+            });
+            if (brief && (brief.description || brief.subject)) break;
+        }
+        closeTab();
+
+        if (!brief || !brief.description) {
+            return fail(brief && brief.subject
+                ? 'This case has no Description filled in on the record.'
+                : 'Could not read the case description — the record did not finish loading in time.');
+        }
+
+        // Remember it. rec is the object inside openCasesList, so writing to it updates the
+        // queue itself rather than a copy of the row.
+        rec.description = brief.description;
+        if (!rec.subject && brief.subject) rec.subject = brief.subject;
+        saveOpenCasesList();
+
+        if (into && into.parentElement) {
+            const body = document.createElement('div');
+            body.className = 'oc-desc-body';
+            body.textContent = brief.description;
+            into.parentElement.replaceChild(body, into);
+        }
+    } catch (e) {
+        closeTab();
+        fail('Could not read the case description — ' + ((e && e.message) || 'the tab could not be opened') + '.');
+    }
+}
+
+function addOpenCaseTag(into, text, cls) {
+    if (!text) return;
+    const t = document.createElement('span');
+    t.className = 'oc-tag' + (cls ? ' ' + cls : '');
+    t.textContent = text;
+    t.title = text;          // the full value, for a tag the row had to shorten
+    into.appendChild(t);
+}
+
+/* THE JIRA TAG IS A LINK.
+ *
+ * Same affordance as the JIRA Number field in Case Info: a real href so it can be copied
+ * or middle-clicked, but inside the extension the click opens a browser tab, because the
+ * side panel navigating itself to Jira would throw away the case the engineer is reading.
+ *
+ * jiraUrlFor() returns '' for anything it cannot turn into a ticket key, and then this
+ * stays an ordinary tag — a link that goes nowhere is worse than plain text.
+ */
+function addOpenCaseJiraTag(into, key) {
+    const url = key ? jiraUrlFor(key) : '';
+    if (!url) return addOpenCaseTag(into, key, 'sev-jira');
+
+    const a = document.createElement('a');
+    a.className = 'oc-tag sev-jira oc-tag-link';
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.title = 'Open ' + url;
+    a.textContent = key;
+
+    const icon = document.createElement('span');
+    icon.className = 'oc-tag-ext';
+    icon.textContent = '↗';
+    icon.setAttribute('aria-hidden', 'true');
+    a.appendChild(icon);
+
+    a.onclick = (e) => {
+        // The expander sits inside .oc-row but outside .oc-row-main, so this does not reach
+        // the open-the-case handler. stopPropagation anyway: the day this tag is put on the
+        // row itself, a click on it must still mean Jira and not "open the case".
+        e.stopPropagation();
+        if (isChromeExtension() && chrome.tabs && chrome.tabs.create) {
+            e.preventDefault();
+            chrome.tabs.create({ url, active: true });
+        }
+        // Standalone page: target="_blank" opens it.
+    };
+    into.appendChild(a);
+}
+
+function severityTagClass(priority) {
+    if (/severity 1|severity 2|high|critical/i.test(priority || '')) return 'sev-high';
+    if (/severity 3|medium/i.test(priority || '')) return 'sev-med';
+    return '';
+}
+
+function fillOpenCaseDescription(el, rec) {
+    el.textContent = '';
+
+    const section = (label, text, cls) => {
+        if (!text) return;
+        const h = document.createElement('div');
+        h.className = 'oc-desc-label';
+        h.textContent = label;
+        el.appendChild(h);
+        const b = document.createElement('div');
+        b.className = cls;
+        b.textContent = text;
+        el.appendChild(b);
+    };
+
+    /* ISSUE SUMMARY = the case DESCRIPTION.
+     *
+     * Not the subject: the subject is already on the row beside the case number, and
+     * repeating it here would cost a click to learn nothing. The Description is the field
+     * where the customer actually wrote the problem down — device, OS, agent version, what
+     * they did and what happened.
+     *
+     * It is not in the list view. Salesforce only renders Description on the record, so
+     * unless the engineer has added it as a column this arrives per case, fetched when the
+     * expander is opened. Placeholder first so the box is never empty while that happens. */
+    if (rec.description) {
+        section('Issue Summary', rec.description, 'oc-desc-body');
+    } else {
+        const h = document.createElement('div');
+        h.className = 'oc-desc-label';
+        h.textContent = 'Issue Summary';
+        el.appendChild(h);
+        const p = document.createElement('div');
+        p.className = 'oc-desc-none';
+        p.textContent = 'Reading the case description…';
+        el.appendChild(p);
+        loadCaseDescription(rec, p);
+    }
+
+    // The tags the row has no width for. Here they are on one line with room to spare,
+    // which is the whole reason they were taken off it.
+    const meta = document.createElement('div');
+    meta.className = 'oc-desc-tags';
+    addOpenCaseTag(meta, rec.entitlement, 'ent-' + entitlementTier(rec.entitlement).key);
+    addOpenCaseTag(meta, rec.status);
+    addOpenCaseTag(meta, rec.account);
+    if (rec.jira) addOpenCaseJiraTag(meta, rec.jira);
+    if (rec.contact) addOpenCaseTag(meta, rec.contact);
+    if (meta.childNodes.length) el.appendChild(meta);
+
+    section('Case Analysis Notes', rec.analysis, 'oc-desc-body');
+
+    if (!rec.subject && !rec.analysis) {
+        // Say which of the two it is. "Nothing here" reads as a broken expander; "the list
+        // view carries no summary for this case" is a fact about the case.
+        const none = document.createElement('div');
+        none.className = 'oc-desc-none';
+        none.textContent = 'No issue summary or analysis notes on this case in the list view — open it and sync for the full case.';
+        el.appendChild(none);
+    }
 }
 
 /* WHERE THIS CASE LIVES IN SALESFORCE.
@@ -2196,9 +2577,11 @@ function syncWhenTabIsReady(tabId, caseNum) {
         syncFromSalesforce();
     };
 
-    // Is the record on screen yet? GET_SALESFORCE_CASE_READY is answered by the content
-    // script without scrolling or scraping anything, so polling it is cheap and leaves the
-    // engineer's page alone until the real sync runs.
+    // Is the record on screen yet, AND can the sync get at the feed? Both, because they
+    // arrive at different times: Lightning paints the fields before the sub-tab strip, and
+    // a sync started in between reports "no Feed tab could be found on this layout" about a
+    // page that was only half-drawn. GET_SALESFORCE_CASE_READY answers without scrolling or
+    // scraping anything, so polling it is cheap and leaves the page alone until the sync.
     const poll = () => {
         if (done) return;
         if (Date.now() - started > MAX_WAIT_MS) return finish('gave up waiting, syncing anyway');
@@ -2208,7 +2591,7 @@ function syncWhenTabIsReady(tabId, caseNum) {
                 // lastError just means the content script is not up yet — keep waiting.
                 const gone = chrome.runtime.lastError;
                 replied = true;
-                if (!gone && res && res.ready) return finish('case is on screen');
+                if (!gone && res && res.ready && res.feedReady) return finish('case and feed are on screen');
                 setTimeout(poll, POLL_MS);
             });
         } catch (e) {
@@ -2256,6 +2639,24 @@ async function syncCaseListFromSalesforce() {
 }
 
 if ($('btnSyncCaseList')) $('btnSyncCaseList').onclick = syncCaseListFromSalesforce;
+
+// Filter as you type. No debounce: the whole queue is a couple of dozen rows already in
+// memory, so the work per keystroke is a string match and a re-render of what is on screen.
+if ($('ocSearch')) {
+    $('ocSearch').oninput = () => {
+        ocSearch = $('ocSearch').value.trim();
+        renderOpenCasesList();
+    };
+    // Escape clears it. A filter box you have to select-all-and-delete to get out of is
+    // how a queue stays filtered by accident.
+    $('ocSearch').onkeydown = (e) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        $('ocSearch').value = '';
+        ocSearch = '';
+        renderOpenCasesList();
+    };
+}
 loadOpenCasesList().then(() => { if (viewMode === 'openCases') renderOpenCasesList(); });
 
 const SOTI_KB = {

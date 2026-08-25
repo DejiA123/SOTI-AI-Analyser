@@ -1774,20 +1774,191 @@ body {
     border: 1px solid var(--border);
     border-radius: 8px;
 }
-.oc-list { flex: 1; overflow-y: auto; padding: 0 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+/* ---- Narrowing the queue: search box + tier chips ---- */
+.oc-filters { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 8px; }
+.oc-search {
+    width: 100%;
+    padding: 6px 10px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--txt1);
+    font-family: inherit;
+    font-size: 11.5px;
+    outline: none;
+}
+.oc-search::placeholder { color: var(--txt3); }
+.oc-search:focus { border-color: var(--blue); }
+.oc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.oc-chip {
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid var(--border);
+    color: var(--txt2);
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.oc-chip:hover { color: var(--txt1); border-color: var(--border2); }
+.oc-chip.active { color: #fff; background: rgba(99, 102, 241, .22); border-color: var(--blue); }
+.oc-chip:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* One colour per tier, used by the chip, the group heading and the row's left stripe, so
+   the three read as the same thing rather than as three unrelated decorations. */
+.oc-chip.tier-enterprise, .oc-group.tier-enterprise { color: #7ee0b8; }
+.oc-chip.tier-premium,    .oc-group.tier-premium    { color: #c9a6ff; }
+.oc-chip.tier-standard,   .oc-group.tier-standard   { color: #8ab6ff; }
+.oc-chip.tier-other,      .oc-group.tier-other,
+.oc-chip.tier-none,       .oc-group.tier-none       { color: var(--txt3); }
+.oc-chip.tier-enterprise.active { background: rgba(34, 197, 94, .18); border-color: rgba(34, 197, 94, .55); color: #fff; }
+.oc-chip.tier-premium.active    { background: rgba(160, 110, 240, .20); border-color: rgba(160, 110, 240, .55); color: #fff; }
+.oc-chip.tier-standard.active   { background: rgba(80, 130, 230, .20); border-color: rgba(80, 130, 230, .55); color: #fff; }
+
+/* The heading over each tier's block. */
+.oc-group {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    padding: 10px 2px 3px;
+    opacity: .85;
+}
+.oc-group:first-child { padding-top: 2px; }
+
+.oc-list { flex: 1; overflow-y: auto; padding: 0 14px 14px; display: flex; flex-direction: column; gap: 4px; }
+
+/* ONE LINE PER CASE. The row is a flex line holding the case and its expander toggle;
+   the description wraps to a second line only when it is open (flex-basis:100%). */
 .oc-row {
-    padding: 10px 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px 6px 10px;
     background: var(--bg1);
     border: 1px solid var(--border);
     border-radius: 8px;
-    cursor: pointer;
     transition: border-color .15s ease, background .15s ease;
 }
 .oc-row:hover { border-color: var(--blue2); background: rgba(255, 255, 255, .04); }
-.oc-row-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.oc-num { font-size: 12px; font-weight: 700; color: var(--blue2); }
-.oc-subject { font-size: 12px; color: #fff; line-height: 1.4; margin-bottom: 6px; word-break: break-word; }
-.oc-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* The tier stripe. border-left rather than a pseudo-element so it cannot overlap the
+   row's own rounded corners. */
+.oc-row.tier-enterprise { border-left: 3px solid rgba(34, 197, 94, .75); }
+.oc-row.tier-premium    { border-left: 3px solid rgba(160, 110, 240, .75); }
+.oc-row.tier-standard   { border-left: 3px solid rgba(80, 130, 230, .75); }
+.oc-row.tier-other,
+.oc-row.tier-none       { border-left: 3px solid var(--txt4); }
+
+.oc-desc-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--txt3);
+    margin-bottom: 3px;
+}
+.oc-desc-label + .oc-desc-body { margin-top: 0; }
+.oc-desc > .oc-desc-label:not(:first-child) { margin-top: 9px; }
+/* A tag that is a link. The arrow is what says so — a coloured pill on its own reads as a
+   label, and every other tag beside it is exactly that. */
+.oc-tag-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+.oc-tag-link:hover {
+    color: #fff;
+    border-color: var(--blue2);
+    background: rgba(80, 130, 230, .25);
+}
+.oc-tag-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.oc-tag-ext { font-size: 9px; opacity: .75; line-height: 1; }
+.oc-tag-link:hover .oc-tag-ext { opacity: 1; }
+
+.oc-tag.ent-enterprise { color: #7ee0b8; border-color: rgba(34, 197, 94, .45); background: rgba(34, 197, 94, .10); }
+.oc-tag.ent-premium    { color: #c9a6ff; border-color: rgba(160, 110, 240, .45); background: rgba(160, 110, 240, .10); }
+.oc-tag.ent-standard   { color: #8ab6ff; border-color: rgba(80, 130, 230, .45); background: rgba(80, 130, 230, .10); }
+
+/* The clickable half — everything except the expander toggle. min-width:0 is what lets
+   the subject inside it shrink; without it a flex item refuses to go below its content
+   width and the tags are pushed off the row instead of the subject truncating. */
+.oc-row-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+.oc-num { font-size: 12px; font-weight: 700; color: var(--blue2); flex-shrink: 0; }
+
+/* The one part that gives way when the panel is narrow — it is also the one part the
+   expander below can show in full, so nothing is actually lost to the ellipsis. */
+/* min-width holds a floor under the subject. Without it flex:1 lets it shrink to nothing
+   the moment the tags want the space, and the row ends up showing metadata about a case
+   it never names — which is exactly what the first version of this row did. */
+.oc-subject {
+    flex: 1 1 auto;
+    min-width: 90px;
+    font-size: 11.5px;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.oc-tags { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.oc-desc-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+
+/* The expander. A bare chevron: it sits on every row, so anything heavier would read as
+   24 buttons rather than as a margin. */
+.oc-desc-toggle {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--txt3);
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color .15s ease, background .15s ease;
+}
+.oc-desc-toggle:hover { color: var(--txt1); background: rgba(255, 255, 255, .07); }
+.oc-desc-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* flex-basis:100% breaks the description onto its own line under the case it belongs to,
+   without taking the row out of flex layout. */
+.oc-desc {
+    flex-basis: 100%;
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, .22);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+.oc-desc-subject { font-size: 11.5px; font-weight: 600; color: #fff; line-height: 1.45; word-break: break-word; }
+/* pre-wrap: the analysis column is prose an engineer wrote, and its line breaks are
+   meaning — "Case Summary:" and "Next Steps:" are headings inside it. */
+.oc-desc-body {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--txt2);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.oc-desc-none { font-size: 11px; color: var(--txt3); line-height: 1.5; }
 .oc-tag {
     font-size: 9.5px;
     font-weight: 600;

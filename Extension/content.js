@@ -1003,12 +1003,52 @@ function findValueElement(scope, labelEl, wanted) {
     return null;
 }
 
-function getFieldValue(labelEl, exact = false) {
+/*
+ * A LONG TEXT FIELD KEEPS ITS LINES.
+ *
+ * valueText() returns textContent, and textContent does not know what a <br> is — so the
+ * case Description, which Salesforce renders as one element with <br> between every line,
+ * came back as a single paragraph with its structure gone. On a real description that
+ * structure IS the content: "Device make and model: …", "OS type and version: …",
+ * "Detailed description of issue: …" are separate lines that run together into nonsense
+ * when the breaks are dropped.
+ *
+ * Whitespace is tidied per line rather than globally, so indentation noise goes without
+ * taking the line breaks with it, and a run of blank lines collapses to one.
+ */
+function valueTextMultiline(el) {
+    if (!el || typeof el.cloneNode !== 'function') return valueText(el);
+
+    const clone = el.cloneNode(true);
+    try { clone.querySelectorAll(VALUE_CHROME_SELECTOR).forEach(n => n.remove()); } catch (_) {}
+
+    const doc = el.ownerDocument || document;
+    // replaceChild rather than replaceWith: the latter is missing on older engines, and a
+    // throw here would lose the whole field rather than just its line breaks.
+    clone.querySelectorAll('br').forEach(br => {
+        if (br.parentNode) br.parentNode.replaceChild(doc.createTextNode('\n'), br);
+    });
+    // A block element ends a line too — some orgs render the description as <p> per line.
+    clone.querySelectorAll('p, div, li').forEach(b => b.appendChild(doc.createTextNode('\n')));
+
+    return (clone.textContent || '')
+        .replace(/\r/g, '')
+        .split('\n')
+        .map(line => line.replace(/[ \t ]+/g, ' ').trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+function getFieldValue(labelEl, exact = false, multiline = false) {
     if (!labelEl) return '';
     const wanted = labelTextOf(labelEl);
 
     const read = (el) => {
         if (!el) return '';
+        // multiline implies exact: cleanFieldValue would cut a long description at the
+        // first "Edit" or "Close" it happens to contain, which in prose is a real word.
+        if (multiline) return valueTextMultiline(el);
         return exact
             ? valueText(el).replace(/\s{2,}/g, ' ').trim()
             : cleanFieldValue(valueText(el));
@@ -1197,7 +1237,7 @@ async function scrapeSalesforce(options = {}) {
             data.subject = getFieldValue(label);
         }
         if (text === 'description' && !data.description) {
-            data.description = getFieldValue(label);
+            data.description = getFieldValue(label, true, true);
         }
         if (text.includes('current version') && !data.currentVersion) {
             data.currentVersion = getFieldValue(label);
@@ -1642,13 +1682,49 @@ function buildJiraDigest(d) {
 function caseListCell(row, label) {
     const cell = row.querySelector(`[data-label="${label}"]`);
     if (!cell) return '';
-    // The case number and lookups render as links; their title carries the clean
-    // value even when the visible text is truncated with an ellipsis.
-    const link = cell.querySelector('a[title]');
-    if (link) return cleanFieldValue(link.getAttribute('title') || link.textContent || '');
-    const titled = cell.querySelector('[title]');
-    if (titled) return cleanFieldValue(titled.getAttribute('title') || titled.textContent || '');
-    return cleanFieldValue(cell.textContent || '');
+
+    /* A CELL CONTAINS CONTROLS AS WELL AS DATA, and the controls are named.
+     *
+     * Salesforce drops a "Preview" icon button inside the Subject cell and a "Show
+     * Actions" menu inside the last one. Both carry a title and assistive text, and both
+     * sit in the cell exactly like the value does — so a plain "first element with a
+     * title" read returns the name of a button. That is not hypothetical: every case in
+     * the Open Cases queue came back with the subject "Preview", because the subject's
+     * own <a> is the one link in the table rendered WITHOUT a title, so the fallback ran
+     * and found the Preview button first.
+     *
+     * So each step below skips anything that is part of a control, and the value is
+     * looked for in order of how trustworthy it is. */
+    const isControl = (el) => !!(el.closest
+        && (el.closest('button, lightning-button-icon, lightning-button-menu, lightning-button-stateful, [role="button"], [role="menu"]')
+            || (el.classList && el.classList.contains('slds-assistive-text'))));
+
+    // 1. A titled link. The title is the CLEAN value — the visible text of the same link
+    //    is ellipsised by .slds-truncate when the column is narrow.
+    for (const a of cell.querySelectorAll('a[title]')) {
+        if (!isControl(a)) return cleanFieldValue(a.getAttribute('title'));
+    }
+    // 2. The record link's own text, for the Subject column, which has no title on it.
+    for (const a of cell.querySelectorAll('a')) {
+        if (isControl(a)) continue;
+        const t = cleanFieldValue(a.textContent || '');
+        if (t) return t;
+    }
+    // 3. Any other titled element — how Status, Priority and JIRA Number are rendered.
+    for (const el of cell.querySelectorAll('[title]')) {
+        if (!isControl(el)) return cleanFieldValue(el.getAttribute('title'));
+    }
+    // 4. The cell's own text, with the control labels taken out first. Reading textContent
+    //    raw would return "…Customer DevicesPreview" — the value with a button name glued
+    //    to the end of it.
+    let text = cell.textContent || '';
+    if (cell.querySelector('.slds-assistive-text, button, lightning-button-icon, lightning-button-menu')) {
+        const clone = cell.cloneNode(true);
+        clone.querySelectorAll('.slds-assistive-text, button, lightning-button-icon, lightning-button-menu')
+            .forEach(n => n.remove());
+        text = clone.textContent || '';
+    }
+    return cleanFieldValue(text);
 }
 
 function scrapeSalesforceCaseList() {
@@ -1671,6 +1747,20 @@ function scrapeSalesforceCaseList() {
             account:  caseListCell(row, 'Account Name'),
             contact:  caseListCell(row, 'Contact Name'),
             jira:     caseListCell(row, 'JIRA Number'),
+            // The support tier this case is entitled to. It is what decides which cases
+            // are worked first, so the panel groups the queue by it.
+            entitlement: caseListCell(row, 'Entitlement Name'),
+            // Only present if the engineer put Description in their list view columns —
+            // most do not, and then the panel fetches it per case from the record instead.
+            // Free to try, and it saves a page load for every case when it is there.
+            description: caseListCell(row, 'Description'),
+            // What the case is ABOUT, for the panel's per-case expander. The list view's
+            // own analysis column is the only prose it carries — the Salesforce
+            // Description field is not one of these columns — and on a worked case it
+            // opens with a written Case Summary, which is exactly the question the
+            // expander answers. Empty on a case nobody has written up yet; the panel
+            // falls back to the subject and says so.
+            analysis: caseListCell(row, 'Case Analysis Comments'),
             ageDays:  caseListCell(row, 'Case Age (in days)'),
             opened:   caseListCell(row, 'Date/Time Opened'),
             modified: caseListCell(row, 'Last Modified Date')
@@ -1724,9 +1814,52 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const caseNum = [...document.querySelectorAll(FIELD_LABEL_SELECTOR)]
                 .some(l => labelTextOf(l).includes('case number') && getFieldValue(l));
             const hasLabels = document.querySelectorAll(FIELD_LABEL_SELECTOR).length > 3;
-            sendResponse({ ready: !!(caseNum || hasFeed || hasLabels), onCaseUrl });
+
+            /* CAN THE SYNC REACH THE FEED YET? — a separate question from "has the record
+             * rendered", and the one that actually matters to the caller.
+             *
+             * Lightning paints the highlights panel and the field labels BEFORE it paints
+             * the sub-tab strip. So a page can satisfy every check above while the Feed tab
+             * does not exist yet, and a sync started there finds no tab to click and reports
+             * "no Feed tab could be found on this layout" — a layout complaint about a page
+             * that was merely still loading. Either the feed is already on screen, or there
+             * is a tab that will show it; anything else is not ready for a sync. */
+            let feedReady = false;
+            try {
+                feedReady = feedIsShowing(document) || findFeedTabLinks(document).length > 0;
+            } catch (e) { /* treat as not ready — the caller has its own ceiling */ }
+
+            sendResponse({ ready: !!(caseNum || hasFeed || hasLabels), feedReady, onCaseUrl });
         } catch (err) {
             sendResponse({ ready: false });
+        }
+        return true;
+    }
+    /* JUST THE DESCRIPTION, off a case record page.
+     *
+     * The Open Cases queue shows a case's Description in its expander, and a list view has
+     * no Description column — the field only exists on the record. So the panel opens the
+     * record in a background tab and asks for this.
+     *
+     * Deliberately NOT GET_SALESFORCE_DATA. That one drives the feed's infinite scroll to
+     * the end and expands every post before it reads anything, which is right for a sync
+     * and absurd for filling in one expander: minutes of scrolling somebody's case to read
+     * a field that is on screen the moment the record renders. This reads two fields and
+     * touches nothing. */
+    if (request.action === "GET_SALESFORCE_CASE_BRIEF") {
+        try {
+            const out = { caseNumber: '', subject: '', description: '' };
+            for (const label of findInShadows(FIELD_LABEL_SELECTOR, document, false)) {
+                const text = labelTextOf(label);
+                if (!out.caseNumber && text.includes('case number')) out.caseNumber = getFieldValue(label);
+                if (!out.subject && text === 'subject') out.subject = getFieldValue(label);
+                if (!out.description && text === 'description') out.description = getFieldValue(label, true, true);
+                if (out.caseNumber && out.subject && out.description) break;
+            }
+            sendResponse(out);
+        } catch (err) {
+            console.warn('SOTI AI Analyser: case brief failed', err);
+            sendResponse(null);
         }
         return true;
     }

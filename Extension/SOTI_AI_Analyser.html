@@ -93,6 +93,17 @@
             Open your case list in Salesforce (e.g. <b>Cases → My Open Cases</b>), then press
             <b>Sync from Salesforce</b>. Click any case here to open it as a working tab.
         </div>
+
+        <!-- NARROWING THE QUEUE. Two dozen cases is more than anyone works at once, so this
+             is how you get to the one you want: type to match a case number, subject or
+             account, and click a tier to see only that entitlement. Both are filled in by
+             renderOpenCaseFilters() from whatever the sync actually returned — a tier with
+             no cases in it is not offered. Hidden until there is a list to filter. -->
+        <div class="oc-filters" id="ocFilters" style="display:none">
+            <input type="search" class="oc-search" id="ocSearch" placeholder="Filter by case number, subject or account…" autocomplete="off">
+            <div class="oc-chips" id="ocChips"></div>
+        </div>
+
         <div class="oc-list" id="ocList"></div>
     </div>
 
@@ -315,7 +326,12 @@
                 <div class="welcome" id="welcome">
                     <div class="w-hex-wrap">⬡</div>
                     <div class="w-title">SOTI AI Analyser</div>
-                    <div class="w-sub">100% Local AI — powered by Ollama on your machine. No cloud, no API key, no data sent externally.</div>
+                    <!-- Every claim here has to survive the build shipping the Copilot relay.
+                         "100% local, no data sent externally" did not: the prompt carries the
+                         case to Microsoft 365 Copilot now. What IS still remarkable is the
+                         mechanism — there is no API key anywhere in this extension, because
+                         it borrows the session the engineer is already signed in to. -->
+                    <div class="w-sub">Powered by Microsoft 365 Copilot — no API key, no endpoint, just the session you are already signed in to.</div>
 
                     <!-- TWO PAGES, not a longer list. Getting the case in and analysing logs are
                          separate jobs done at different times, and stacking eight steps made the
@@ -325,10 +341,12 @@
                         <div class="w-howto-title">How to get started</div>
 
                         <div class="w-howto-page" data-howto-page="1">
+                            <!-- "Go to the Feed tab" was step 2 and is gone: the sync opens the
+                                 case's Feed sub-tab itself (activateFeedTab in content.js), so
+                                 the instruction asked for something already done for you. -->
                             <div class="w-step"><span class="w-step-num">1</span> Open a Salesforce case</div>
-                            <div class="w-step"><span class="w-step-num">2</span> Go to the Feed tab</div>
-                            <div class="w-step"><span class="w-step-num">3</span> On this app, open the Case Info Panel</div>
-                            <div class="w-step"><span class="w-step-num">4</span> Click Sync from Salesforce</div>
+                            <div class="w-step"><span class="w-step-num">2</span> On this tool, open the Case Info Panel</div>
+                            <div class="w-step"><span class="w-step-num">3</span> Click Sync from Salesforce</div>
                         </div>
 
                         <div class="w-howto-page" data-howto-page="2" style="display:none">
