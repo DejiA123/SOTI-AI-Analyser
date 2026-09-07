@@ -1,0 +1,2055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <!-- GDPR/security: lock the app to first-party + the explicitly-supported AI hosts.
+         img-src/connect-src block any exfiltration of case data to an external host
+         (e.g. an injected <img src="http://…">), even though script execution is already
+         blocked by script-src 'self'. This MUST mirror the manifest's extension_pages CSP:
+         both apply to the side panel and the browser enforces the INTERSECTION, so a host
+         missing here is blocked even when the manifest allows it — which is exactly how an
+         Azure/Claude endpoint ends up failing with an opaque network error.
+         The AI hosts are reachable but never contacted unless that provider is selected;
+         a self-hosted gateway under *.soti.net is already covered and needs no edit.
+         NO localhost. It was here for an on-device model server this build no longer has,
+         and a permission nothing uses is a permission somebody has to justify.
+
+         frame-src IS NOT 'none' AND MUST NOT GO BACK TO IT. This tag said frame-src 'none'
+         while the manifest allowed app.powerbi.com, and the browser enforces the
+         INTERSECTION of the two — so the Stats tab framed Power BI against a policy that
+         forbade every frame there is, and Chrome painted "This content is blocked. Contact
+         the site owner to fix the issue." over the whole report. That is the bug this list
+         fixes, and it is the exact failure the comment three lines above warns about: a
+         host missing HERE is blocked even when the manifest allows it.
+
+         WHY THE SIGN-IN HOSTS ARE ON IT. Power BI's secure-embed address answers a browser
+         with no embed session by redirecting the FRAME to login.microsoftonline.com, and
+         frame-src governs navigations inside a frame, not just its first address — so a
+         list naming app.powerbi.com alone blocks the sign-in half of the very flow it is
+         trying to allow, and the report never renders for anyone who has not already got a
+         Power BI session in this browser. The Microsoft entries are sign-in and Power BI
+         hosts only. They grant FRAMING and nothing else: connect-src still names no
+         Microsoft host, so this page cannot make a request to any of them, and the panel
+         can neither read the frame's document nor message it.
+
+         WHY api.github.com IS ON connect-src. The update check reads the repository's
+         released version and its manifest, and that is the ONE host it talks to — the
+         GitHub API returns file contents base64-encoded, so nothing has to be fetched from
+         raw.githubusercontent.com and that host is deliberately absent. It is ALSO in
+         manifest.json's connect-src, and it has to be in both for the same reason Power BI
+         does: the browser enforces the intersection, so a host named in one and missing
+         from the other is blocked with an opaque network error and no clue which of the two
+         files is refusing it. The permission to reach it is OPTIONAL and is asked for the
+         first time the update button is pressed — see checkForUpdate(); this line grants
+         nothing on its own. The DOWNLOAD does not go through here at all: it is handed to
+         chrome.downloads, which is not governed by this policy. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' https://*.soti.net https://*.salesforce.com https://*.force.com https://api.github.com; object-src 'self'; worker-src 'self'; frame-src https://app.powerbi.com https://*.powerbi.com https://login.microsoftonline.com https://*.microsoftonline.com https://login.microsoft.com https://login.windows.net https://login.live.com https://*.analysis.windows.net; base-uri 'self'; form-action 'none'">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOTI AI Analyser</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="topbar">
+        <!-- BACK, AND THEN THE LOGO. The wordmark still goes home — every app puts that
+             behind the mark in the top-left and people try it here — but "home" and "back"
+             are not the same journey, and the wordmark was being used as both. Opening a
+             case from the queue and wanting the queue again is a step BACKWARDS, not a trip
+             to the main screen, and there was no control that said so.
+
+             So the arrow is its own button, it returns to the PREVIOUS screen (see goBack),
+             and it is hidden entirely until there is a previous screen to return to — a
+             back button that does nothing is the same dead corner this replaces. -->
+        <!-- One flex child of the topbar, not two. The bar is `justify-content: space-between`
+             and a fourth child would have the arrow pushed to one end and the wordmark to the
+             middle — they are one cluster and have to travel together. -->
+        <div class="tl-wrap">
+            <button class="btn-back" id="btnBack" type="button" style="display:none"
+                    title="Back to the previous screen" aria-label="Back to the previous screen">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+            </button>
+            <div class="tl" id="btnHome" role="button" tabindex="0"
+                 title="SOTI AI Analyser — back to the main screen">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:10px"><path d="M12 2l9 4.9V17.1L12 22l-9-4.9V6.9L12 2z"></path></svg>
+                <div class="logo-block">
+                    <span class="logo-name">SOTI AI ANALYSER</span>
+                    <!-- WHICH BUILD IS THIS. Filled in by applyAppVersion() from the manifest, so
+                         it can never drift from the version Chrome actually loaded — and it is the
+                         first thing anyone needs when reporting that something behaves oddly. -->
+                    <span class="logo-ver" id="appVersion"></span>
+                </div>
+            </div>
+            <!-- IS THERE A NEWER BUILD? — beside the version, because that is the only
+                 place on the panel where "which build is this" is already the question
+                 being answered.
+
+                 OUTSIDE #btnHome, deliberately, and that is not a layout preference. The
+                 wordmark is a role="button" that navigates home; a real <button> nested
+                 inside another control is a thing screen readers and keyboard users are
+                 entitled to be confused by, and stopPropagation would be papering over it
+                 rather than fixing it. As a sibling in .tl-wrap it sits in exactly the
+                 same place on screen and is its own control in the accessibility tree.
+
+                 THE DOT IS THE WHOLE POINT OF IT BEING HERE. Nobody opens an update
+                 screen speculatively — this only works if the panel says, quietly and
+                 without being asked, that there is something to open it for. See
+                 checkForUpdate(): the automatic check runs only once the engineer has
+                 granted the GitHub host permission by pressing this button once, and at
+                 most a few times a day after that. -->
+            <button class="btn-upd" id="btnUpdate" type="button"
+                    title="Check GitHub for a newer version of SOTI AI Analyser"
+                    aria-label="Check for a newer version">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>
+                <span class="btn-upd-dot" id="updDot" hidden></span>
+            </button>
+        </div>
+        <div class="tc">
+            <div class="status-pill" id="pulseHealth" title="SOTI Pulse Connection" style="display: none">
+                <div class="dot" id="dot"></div>
+                <span id="statusTxt">Ready — Cloud Scale</span>
+            </div>
+            <!-- Live power/resource readout. Driven by power.js via the monitor UI in
+                 sidepanel.js; hidden until the governor takes its first sample. -->
+            <button class="power-pill" id="powerPill" title="Power Monitor — how much memory and CPU this app is using on your machine" style="display:none">
+                <span class="power-dot" id="powerDot"></span>
+                <span class="power-txt" id="powerTxt">—</span>
+            </button>
+        </div>
+        <div class="tr">
+            <!-- "New Case" USED TO BE HERE. It made a case tab out of nothing, in the one
+                 corner of the app that has no idea which case you are on — and the queue
+                 below is where cases come from. It is "Add Case" now and it lives in the
+                 Cases tab, beside the list it adds to. See #btnAddCase. -->
+            <!-- Create JIRA now lives in the Quick Options dropdown — see openJiraReview(). -->
+            <div class="more-menu">
+                <button class="btn" id="btnMore" title="More Options">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg>
+                </button>
+                <div class="dropdown" id="moreDropdown" style="display:none">
+                    <button class="drop-item" id="btnSettings">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                        Settings
+                    </button>
+                    <button class="drop-item" id="btnExport">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                        Export Session
+                    </button>
+                    <button class="drop-item" id="btnPop">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        Pop Out Window
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- YOU ARE LOOKING AT A DIFFERENT CASE FROM THE ONE THIS PANEL IS ON.
+         Everything below writes to, reads from and answers about ONE case — the one whose
+         tab is selected here — and none of it follows the browser. That is deliberate and it
+         is right: a run started on case A must finish on case A even if the engineer walks
+         off to case B while it thinks. The cost is that the panel and the screen behind it
+         can disagree silently, and the moment they do, every fact on this panel is about a
+         customer other than the one being read on the other half of the monitor.
+         Nothing here CHANGES anything — it is a statement of fact with the two case numbers
+         in it and two ways out. The red edge is on the whole panel rather than on this strip
+         because the mistake it prevents is made while reading somewhere else entirely. -->
+    <div class="case-mismatch-bar" id="caseMismatchBar" style="display:none" role="alert">
+        <div class="cmb-row">
+            <span class="cmb-dot" aria-hidden="true"></span>
+            <!-- PLAIN ENGLISH, AND IT TOOK THREE GOES. It used to read "Different case open
+                 in Salesforce. This panel is on C01718402; the tab in front is C01724613",
+                 with buttons called "Show this panel's case" and "Switch panel to it" — four
+                 pieces of jargon ("this panel", "the tab in front", "show", "switch panel")
+                 in two lines, and the reader had to work out which half was which before
+                 they could tell what either button would do.
+
+                 Now it names the two things the way the engineer would say them out loud —
+                 what the app is working on, and what is on screen in Salesforce — and each
+                 button says the case number it acts on, filled in by paintCaseMismatch. A
+                 button that reads "Open C01718402 in Salesforce" needs no sentence above it
+                 explaining what it means. -->
+            <span class="cmb-text">
+                <b>You are looking at a different case.</b>
+                This app is working on <b id="cmbPanelCase">—</b>, but the Salesforce tab
+                on your screen is showing <b id="cmbTabCase">—</b>.
+            </span>
+        </div>
+        <div class="cmb-acts">
+            <button class="cmb-btn" id="cmbOpenPanelCase" type="button">Open this case in Salesforce</button>
+            <button class="cmb-btn cmb-btn-ghost" id="cmbSwitchTo" type="button" style="display:none">Work on the case on screen</button>
+        </div>
+    </div>
+
+    <div class="tab-bar" id="tabBar"></div>
+
+
+    <!-- OPEN CASES — a permanent tab, not a case. It holds the engineer's Salesforce queue so
+         they can see everything they own in one place and drop into any of it. Shown INSTEAD
+         of .layout (see showOpenCases) rather than inside the chat, because it is a different
+         mode of working: picking what to work on, not working on it. -->
+    <div class="oc-view" id="ocView" style="display:none">
+        <!-- NO HEADING. This strip is one line of facts about the queue below it — how many
+             cases, and how long ago they were read — and nothing else. It used to open with
+             the synced list view's own name, which arrived truncated to its first word ("My",
+             out of "My Open Cases") and, once "Current View" started naming the list properly
+             a few lines down, had nothing left to say even when it was right. The tab this
+             lives in is already labelled Cases; saying it again over the count was a word
+             standing where a number should be. Hidden entirely when there is no queue yet —
+             see renderOpenCasesList — so an empty list shows its hint rather than a blank band. -->
+        <div class="oc-head" id="ocHead">
+            <div class="oc-title">
+                <span class="oc-meta" id="ocMeta"></span>
+            </div>
+        </div>
+
+        <!-- THE QUEUE'S OWN TOOLBAR. Everything that acts on the LIST rather than on one
+             case: put a case in, refresh it from Salesforce, choose what each row shows,
+             and empty it. Add Case is first and styled as the primary action because it is
+             the one an engineer reaches for without being on a Salesforce list view. -->
+        <div class="oc-toolbar">
+            <div class="oc-add-wrap">
+                <button class="btn btn-add" id="btnAddCase" title="Put a case into this list">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:5px"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    Add Case
+                </button>
+                <div class="oc-menu" id="ocAddMenu" style="display:none">
+                    <button class="oc-menu-item" id="ocAddFromSf">
+                        <span class="oc-menu-t">📋 From the Salesforce tab</span>
+                        <span class="oc-menu-s">Reads the case open in your active browser tab and adds it here.</span>
+                    </button>
+                    <!-- A URL, NOT A CASE NUMBER. A case number alone is a row with nothing in
+                         it — no subject, no severity, no owner — and the only way to fill it was
+                         a second, separate action. The link is what the engineer has in hand
+                         anyway (it is what they were sent, and it is in the address bar of the
+                         tab they are on), and it is the one thing the sync can act on by itself:
+                         paste it and the case reads itself in. See addCaseByUrl. -->
+                    <button class="oc-menu-item" id="ocAddByUrl">
+                        <span class="oc-menu-t">🔗 Add Case URL</span>
+                        <span class="oc-menu-s">Paste the Salesforce case link — it syncs itself in from Salesforce.</span>
+                    </button>
+                    <!-- "Blank case" USED TO BE HERE. It made a row and a working tab out of
+                         nothing, in the one list whose entire purpose is to mirror Salesforce —
+                         so it produced a case the sync could never fill, never refresh and never
+                         bring back once removed. Everything this list holds now comes from a
+                         real record. -->
+                </div>
+            </div>
+            <!-- SYNC — WHICH REFRESHES SALESFORCE FIRST, AND FINDS ITS OWN TAB.
+                 A Lightning list view is a SNAPSHOT of the moment it loaded; it does not
+                 re-query because time has passed. So pressing this on a tab that has been
+                 open all day used to read this morning's queue — cases closed since then
+                 still in it, cases opened since then missing, every age and status cell
+                 stale, and nothing about the result looking wrong. Refreshing first is now
+                 part of what this button IS rather than a second control beside it.
+
+                 The ↻ THAT USED TO BE HERE IS GONE for exactly that reason: it did
+                 refresh-then-sync, and so does this, so it had become the same button
+                 twice. (It also rendered full-width rather than as an icon — see the
+                 :not(.sf-refresh) note in styles.css for why that was never a sizing bug
+                 so much as a specificity one.)
+
+                 IT NO LONGER NEEDS YOU TO BE STANDING ON THE LIST. It reads the active tab
+                 when that is a list view, otherwise it goes to the one the queue was last
+                 synced from — focusing that tab if it is open, re-opening it if it is not.
+                 See resolveCaseListTab. -->
+            <button class="btn btn-sf" id="btnSyncCaseList" title="Refresh the Salesforce list view and read every case from it. You do not need to be on the list: if it is open in another tab this brings it to the front, and if it is closed it opens the one you last synced from. Cases you added by hand are kept.">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                <!-- THE LABEL IN ITS OWN SPAN, so "Syncing…" can replace the WORDS and
+                     not the button. syncCaseListFromSalesforce used to write
+                     btn.textContent, which is the whole of the element's content — so
+                     the first sync deleted the icon beside the label and it never came
+                     back for the rest of the session. Swapping one text node is the
+                     same feature without that. -->
+                <span id="ocSyncLabel">Sync from Salesforce</span>
+            </button>
+            <!-- THE ⋮ MENU IS GONE. Everything that was behind it is now a button you can
+                 see — see .oc-actions below the sort. A menu is the right home for actions
+                 nobody needs often; these four turned out to be the opposite, and a control
+                 you have to go looking for is one people assume does not exist. -->
+        </div>
+
+        <!-- SAVED LIST-VIEW LINKS. The engineer's own Salesforce list URLs. Clicking one
+             opens it in the browser AND syncs the queue from it once it has rendered, so
+             "show me my open cases" is one click instead of navigate-wait-press-sync.
+             Rendered by renderOpenCaseLinks(); hidden entirely until one is saved. -->
+        <div class="oc-links" id="ocLinks" style="display:none"></div>
+
+        <div class="oc-hint" id="ocHint">
+            Open your case list in Salesforce (e.g. <b>Cases → My Open Cases</b>) and press
+            <b>Sync from Salesforce</b> once — after that it remembers the list and goes back
+            to it on its own, wherever you happen to be. Or press <b>Add Case</b> to put one
+            in by hand. Click any case here to open it.
+        </div>
+
+        <!-- NARROWING THE QUEUE. Two dozen cases is more than anyone works at once, so this
+             is how you get to the one you want: type to match a case number, subject, account
+             or OWNER, pick an owner outright, and click a tier to see only that entitlement.
+             All three are filled in by renderOpenCaseFilters() from whatever the sync actually
+             returned — a tier or an owner with no cases in it is not offered. Hidden until
+             there is a list to filter. -->
+        <div class="oc-filters" id="ocFilters" style="display:none">
+            <div class="oc-filter-row">
+                <input type="search" class="oc-search" id="ocSearch" placeholder="Filter by case number, subject, account or owner…" autocomplete="off">
+                <!-- "List order" is the default and means the sort the engineer already chose
+                     in Salesforce. Sorting here re-orders WITHIN each entitlement group, not
+                     across them: the tier is which cases you owe first, so it stays the outer
+                     axis and this decides the order inside it. Pick a single tier chip and the
+                     grouping goes away, leaving a flat sorted list. -->
+                <select class="oc-sort" id="ocSort" title="Order the cases within each entitlement group">
+                    <option value="list">List order</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="newest">Newest first</option>
+                    <option value="sev-high">Severity: high first</option>
+                    <option value="sev-low">Severity: low first</option>
+                    <!-- One direction only: "what is waiting on me" is a question; its
+                         reverse puts the cases nobody can act on at the top. -->
+                    <option value="status">Status: on SOTI first</option>
+                    <!-- Longest since I last wrote to the customer, first. The one sort that
+                         answers "who have I left hanging". Named for the column it sorts —
+                         "Last Sent" — so the two cannot be read as different numbers. -->
+                    <option value="reachout">Last sent: longest ago</option>
+                    <!-- Salesforce's own Last Completed Activity dot, worst first. One
+                         direction, like the two above: "what has gone overdue" is the question,
+                         and healthiest-first answers nothing. Rows with no dot sort last. -->
+                    <option value="activity">Activity: overdue first</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- ACTIONS ON THE WHOLE LIST — directly under the sort, where they are seen.
+             All four were behind a ⋮ menu. Three of them are things people do often enough
+             that hunting for them is the cost that matters, and the fourth (Clear all) is
+             the one you most need to be able to FIND when a list has gone wrong.
+
+             OUTSIDE .oc-filters on purpose, in its own element between the two halves of it:
+             the filter blocks are hidden while the list is empty — there is nothing to filter —
+             and an empty list is exactly when "Add a list-view link" and "Sync from Salesforce"
+             are the things you came here for. -->
+        <!-- ONE LINE, not four. Stacked full-width rows cost about a hundred pixels above
+             the list — three cases' worth of the thing you actually came to look at — to
+             hold four controls that are each one short phrase. The labels are shortened to
+             fit and every button carries the full sentence in its title, which is where a
+             sentence belongs. -->
+        <div class="oc-actions" id="ocActions">
+            <button class="oc-act" id="ocSyncAll" type="button"
+                    title="Sync all cases — open every case in this list in turn and read its description, owner and last reach-out from the Salesforce record. Takes a few seconds per case; you can stop it at any point.">
+                <span class="oc-act-i">⟳</span> Sync all cases
+            </button>
+            <button class="oc-act" id="ocAddLink" type="button"
+                    title="Add a list-view link — save a Salesforce list URL. Clicking it later opens that list in Salesforce and syncs this one from it in a single click.">
+                <span class="oc-act-i">🔗</span> Add link
+            </button>
+            <!-- Quiet until hover. It is the one control here that can lose something no
+                 sync brings back (a case added by hand is in no Salesforce list view), so
+                 it must be findable without being inviting. -->
+            <button class="oc-act oc-act-danger" id="ocClearAll" type="button"
+                    title="Clear all — empty this list. Local only; nothing changes in Salesforce, and any case you have open stays open.">
+                <span class="oc-act-i">🗑</span> Clear all
+            </button>
+            <!-- THE COG, WITH NO WORD BESIDE IT, AND LAST. The other three are things you DO
+                 to the list; this one changes how the list is drawn, which is a setting and
+                 belongs where settings live — at the end, as the icon everything else in
+                 every app uses for it. Dropping the label also buys back the width the three
+                 real actions were fighting over on a side panel. The full sentence is in the
+                 title and the panel it opens names itself. -->
+            <button class="oc-act oc-act-icon" id="ocColumns" type="button" aria-label="Customise rows"
+                    title="Customise rows — choose which details each case shows on its line, and how wide each column is.">
+                <span class="oc-act-i">⚙</span>
+            </button>
+        </div>
+
+        <!-- WHAT EACH ROW SHOWS. A popover rather than a settings page: it is a property of
+             this list, and it belongs beside it. Sits directly under
+             the button that opens it. Filled in by renderOpenCaseColumns(). -->
+        <div class="oc-cols" id="ocColsPanel" style="display:none">
+            <div class="oc-cols-head">
+                <span>Show on each case</span>
+                <button class="oc-cols-close" id="ocColsClose" type="button" aria-label="Close">×</button>
+            </div>
+            <div class="oc-cols-body" id="ocColsBody"></div>
+            <div class="oc-cols-foot">
+                <button class="oc-sync-btn" id="ocColsReset" type="button">Reset to defaults</button>
+            </div>
+        </div>
+
+        <!-- THE OWNER DROPDOWN IS GONE. It was a second way to do what the search box
+             already does — type a name — and it cost a full row above the list to offer it.
+             The search matches the owner and the alias along with everything else, so
+             "aaugu" still narrows the list to that person's cases. -->
+        <div class="oc-filters" id="ocFilters2" style="display:none">
+            <div class="oc-chips" id="ocChips"></div>
+        </div>
+
+        <!-- THE COLUMN HEADINGS. A single strip above the rows naming what the short tags on
+             each line are — "Severity" over the H/M/L column, and so on. Without it the tags
+             are a code you have to hover to read. Built by renderOpenCaseHeader() from the
+             same column list the rows use, so the two cannot drift apart. -->
+        <div class="oc-colhead" id="ocColHead" style="display:none"></div>
+
+        <div class="oc-list" id="ocList"></div>
+    </div>
+
+    <!-- STATS — the engineer's own Power BI report, beside their queue.
+
+         A THIRD SCREEN, not a fourth panel inside the case view. Everything in .layout is
+         about ONE case; the Cases tab is about the queue; this is about the person. Those
+         are three different questions and the tab row is where the panel already answers
+         "which of them am I looking at", so Stats is a sibling of #ocView and is shown the
+         same way — instead of .layout, never inside it. See showStats().
+
+         FRAMED, WITH A WAY OUT PRINTED ON IT. Power BI is loaded through its secure-embed
+         address (/reportEmbed?…&autoAuth=true), which renders the report for whoever the
+         browser is already signed in as — this panel holds no Microsoft credential and asks
+         for none, exactly as the Copilot bridge does not. What it cannot do is SEE inside
+         that frame: the document is app.powerbi.com's and the same-origin rule means a
+         sign-in wall, a "you do not have access" page and a fully rendered report are
+         indistinguishable from out here. So the frame is never the only route. #statsOpen
+         opens the same report as a real top-level tab, where Microsoft's sign-in can do the
+         things sign-in needs to do and cannot do in a third-party frame. It is a permanent
+         button; the strip above the frame is NOT a permanent sentence, and says nothing at
+         all on a screen that is working.
+
+         THE FRAME USED TO BE BLOCKED OUTRIGHT — Chrome painted "This content is blocked.
+         Contact the site owner to fix the issue." across it — and the reason was in this
+         document rather than in Power BI: the <meta> CSP at the top said `frame-src 'none'`
+         while the manifest allowed app.powerbi.com, and the browser enforces whichever of
+         the two is stricter. Both now name Power BI AND the Microsoft sign-in hosts the
+         embed flow redirects through. If it ever comes back, the strip above the frame will
+         say so and name the host — see statsFrameSetState in sidepanel.js. -->
+    <div class="stats-view" id="statsView" style="display:none">
+        <div class="stats-head">
+            <div class="stats-title">
+                <!-- BOTH LINES ARE WRITTEN BY renderStatsScope(), not by this markup. They
+                     name whichever of the three reports is showing, and a title hard-coded
+                     here would be right for one of them and a lie for the other two the
+                     moment somebody pressed a sub-tab. -->
+                <span class="stats-title-t" id="statsTitle">Your performance stats</span>
+                <span class="stats-title-s" id="statsSub">Power BI — live from the workspace report</span>
+            </div>
+            <div class="stats-acts">
+                <button class="stats-btn" id="statsReload" type="button"
+                        title="Load the report again. Worth a press after signing in to Microsoft in another tab.">Reload</button>
+                <button class="stats-btn stats-btn-go" id="statsOpen" type="button"
+                        title="Open the report in a full browser tab. Use this if the panel below is blank or asks you to sign in — Microsoft sign-in works there and cannot always complete inside a frame.">Open in Power BI</button>
+            </div>
+        </div>
+
+        <!-- THREE REPORTS, ONE SCREEN.
+             ==================================================================
+             "How am I doing" is not one question. It is three, and they are asked in a
+             fixed order by everybody who asks any of them: my numbers, then my team's,
+             then the whole support organisation's — each one the context that makes the
+             one before it mean something. A month at four cases a day is a fact; it is
+             only good or bad next to the region.
+
+             So they are SUB-TABS of Stats rather than three entries in the tab row above.
+             That row answers "which mode am I in" — a case, the queue, or the numbers —
+             and putting three report choices in it would make two thirds of the panel's
+             top-level navigation be about one screen. Here they sit directly over the
+             frame they change, which is the thing they are a property of.
+
+             MY STATS IS FIRST AND IS THE DEFAULT, because it is the one whose answer only
+             this engineer can act on. The other two are a different Power BI app (see
+             STATS_SCOPES in sidepanel.js) and are two pages of one shared report; the
+             Regional and Global buttons differ only in which page of it they open.
+
+             Built as real buttons with aria-pressed rather than as a radio group: they
+             switch what a frame is showing, which is an action, and the ARIA for "this
+             one is the current one" is what a screen reader needs to hear. -->
+        <div class="stats-tabs" id="statsTabs" role="group" aria-label="Which stats to show"></div>
+
+        <!-- EMPTY AND HIDDEN UNTIL THERE IS SOMETHING TO SAY. It used to carry a permanent
+             line of troubleshooting advice, written for a build whose frame was blocked and
+             therefore always blank; the frame works now, so that sentence sat on top of a
+             loaded report every single visit and pushed it down the screen to answer a
+             question nobody had asked. statsFrameSetState() fills it in for the two states
+             the panel can actually establish — a frame this document's CSP refused, named
+             host and all, and a frame that has not loaded in twelve seconds — and empties it
+             again afterwards. "Open in Power BI" is a permanent button above it either way,
+             which is the way out this strip used to exist to point at. -->
+        <div class="stats-note" id="statsNote" hidden></div>
+
+        <div class="stats-frame-wrap">
+            <!-- src is set by showStats(), not here: a frame with an address in the markup
+                 starts fetching Power BI when the PANEL boots, which is every time Chrome
+                 rebuilds this document, for a screen nobody has asked for yet.
+
+                 NO sandbox ATTRIBUTE, deliberately. Power BI's embed page has to run its own
+                 scripts, keep its own session and navigate itself through the silent sign-in
+                 exchange; a sandbox tight enough to be worth adding would stop all three, and
+                 what actually confines this frame is the CSP allow-list in <head> plus the
+                 same-origin rule, which the panel cannot opt out of in either direction.
+                 `allow` names the two capabilities the report itself offers: Focus mode is
+                 the Fullscreen API, and "copy value" on a visual is the clipboard. -->
+            <iframe class="stats-frame" id="statsFrame" title="Power BI performance report"
+                    referrerpolicy="no-referrer" allow="fullscreen; clipboard-write"
+                    allowfullscreen></iframe>
+        </div>
+    </div>
+
+    <div class="layout" id="mainLayout">
+        <!-- Case Information (Collapsible) -->
+        <aside class="panel-left collapsed" id="panelL">
+            <div class="ph" id="toggleL">
+                <div class="ph-left">
+                    📋 Case Info
+                    <span class="info-icon" title="Review and edit the context provided to the AI. This data is used to ensure accurate analysis and reporting.">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </span>
+                    <!-- WHICH CASE THIS IS, ON THE HEADING.
+                         It was taken off this line once, on the grounds that the Case Number
+                         field says the same thing a few pixels below it. That reasoning only
+                         holds while Case Info is OPEN — and it is collapsed by default, so
+                         for most of the time the panel is on screen the field it deferred to
+                         is not. Everything under this heading, and every Quick Option beside
+                         it, acts on one case; naming it here is the one place that is true
+                         whether the form is open or shut.
+
+                         Filled in by syncCaseInfoHeading() from the caseNum field, so it
+                         cannot drift from what the actions will actually use, and hidden
+                         entirely on a case with no number rather than leaving an empty chip
+                         on the bar. -->
+                    <span class="ph-case" id="phCaseNum" hidden></span>
+                </div>
+                <div class="ph-collapse" id="iconL">▶</div>
+            </div>
+
+            <!-- QUICK OPTIONS — directly under the Case Info header, and a SIBLING of #bodyL
+                 rather than a child of it. Case Info is collapsed by default, so anything
+                 inside its body is invisible until the engineer opens the form; the actions
+                 are the thing they reach for most and must not be behind that. Its old two
+                 homes (the welcome screen's home panel, then a pinned strip under the case
+                 tabs) are gone — it lived in whichever one matched the chat's state, which
+                 meant the one control people use constantly moved the moment a conversation
+                 started. Here it is in one place, always. -->
+            <div class="qa-panel" id="qaPanel">
+                <div class="qa-ph" id="qaToggle">
+                    <div class="qa-ph-left">⚡ Quick Options</div>
+                    <div class="qa-ph-collapse" id="qaIcon">▶</div>
+                </div>
+                <div class="qa-pb" id="qaBody" style="display:none">
+                    <!-- HOW LONG THE SUMMARY IS, chosen BEFORE it is asked for and not after.
+                         The answer takes minutes to produce, so "that was more than I needed"
+                         is a discovery you make far too late to act on — the only remedy was
+                         to run the whole thing again. The two chips sit on the button they
+                         govern, the choice is remembered, and Concise asks for roughly a fifth
+                         of the length while keeping every decisive fact. See ocSummaryLength. -->
+                    <div class="qa-item-row">
+                        <button class="qa-drop-item" id="qaCaseSummary" title="AI writes a full summary of this case and the recommended next steps">📋 Case Summary + Next Steps</button>
+                        <div class="qa-len" id="qaLen" role="group" aria-label="Case summary length">
+                            <button class="qa-len-opt" type="button" data-len="standard"
+                                    title="Standard — the full summary: every troubleshooting action, and next steps spelled out step by step.">Standard</button>
+                            <button class="qa-len-opt" type="button" data-len="concise"
+                                    title="Concise — about a fifth of the length. Every decisive fact and every next step is still there, said in one line each instead of a paragraph.">Concise</button>
+                        </div>
+                    </div>
+                    <!-- ONE EMAIL BUTTON, AND A + FOR THE THINGS THAT VARY ABOUT IT.
+                         ==============================================================
+                         There used to be THREE buttons here, and all three drafted the
+                         SAME email from the same builder. "Draft an email to the
+                         customer", "Draft with a meeting request" and "Account Email"
+                         differed in exactly two respects — whether a live session is
+                         asked for outright, and who is copied in — and neither of those
+                         is a different errand. They are two properties of one errand,
+                         and three buttons is what you get when properties are spelled
+                         as verbs: a column three times as long as the job needs, in
+                         which the button you want is the one you have to read to find.
+
+                         So it is one action with its options behind a +, which is the
+                         shape the rest of this panel already uses (the length chips on
+                         Case Summary, the + at the foot of this list). The ticks say
+                         what will happen, in the same words the review box will use,
+                         and the main button does it.
+
+                         WHAT THE TICKS DO NOT DO IS HIDE ANYTHING. The old meeting
+                         button carried a comment insisting it was a BUTTON and not a
+                         TOGGLE, for a good reason: a sticky switch that silently decides
+                         whether a customer is asked to book a call is one somebody
+                         leaves on and then sends an invitation they did not mean to send.
+                         That risk is answered here rather than dodged — #qaEmailSum
+                         under the button spells out the current choice in words on every
+                         render ("Cc: TAM · asks for a meeting"), so the state is never
+                         somewhere you have to go and look; and the meeting tick is NOT
+                         persisted, so it is off again every time the panel is rebuilt.
+                         Who to copy in IS remembered, because that is a property of the
+                         accounts somebody works rather than of one reply.
+
+                         THE + IS NOT A SETTINGS BUTTON. It opens in flow directly under
+                         the row, for the reason the + at the foot of this list does: the
+                         Quick Options body is scroll-capped and an absolutely positioned
+                         child of a scrolling box is clipped by it. Built by
+                         renderEmailDraftOptions() from EMAIL_DRAFT_RECIPIENTS. -->
+                    <div class="qa-item-row">
+                        <div class="qa-email-row">
+                            <button class="qa-drop-item" id="qaDraftEmail"
+                                    title="AI drafts the next email to the customer from the latest case context. Press + to copy in the account team or ask for a meeting.">📧 Draft an email to the customer</button>
+                            <button class="qa-email-plus" id="qaEmailPlus" type="button"
+                                    aria-expanded="false" aria-controls="qaEmailOpts"
+                                    aria-label="Email options — who to copy in, and whether to ask for a meeting"
+                                    title="Choose who to copy in — the Account Manager, the TAM, or everyone on the account — and whether the email asks for a meeting.">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                        </div>
+                        <!-- WHAT THE BUTTON ABOVE WILL ACTUALLY DO, in words, whenever that
+                             is anything other than the plain reply. Hidden when nothing is
+                             ticked — a line saying "just the customer" on every case would be
+                             noise on the one screen that must stay short. -->
+                        <div class="qa-email-sum" id="qaEmailSum" hidden></div>
+                        <div class="qa-email-opts" id="qaEmailOpts" style="display:none">
+                            <div class="qa-email-head">
+                                <span>Include in this email</span>
+                                <button class="qa-add-close" id="qaEmailClose" type="button" aria-label="Close">×</button>
+                            </div>
+                            <div class="qa-email-body" id="qaEmailBody"></div>
+                            <div class="qa-email-foot">
+                                <span class="qa-email-hint" id="qaEmailHint"></span>
+                                <button class="qa-email-go" id="qaEmailGo" type="button">Draft email</button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- "📄 Create JIRA" AND "🧩 Problem & Resolution Summary (Internal)" ARE
+                         NOT HERE ANY MORE — both moved into + Add actions on 2026-09-07.
+
+                         Neither was deleted and neither changed: they are the same two
+                         generators, on the same dialogs, one tick away in the list below, and
+                         an engineer who raises defects weekly ticks Create JIRA once and it
+                         stays on the panel for good.
+
+                         WHY THEY MOVED. A permanent button is a claim that everybody presses
+                         it on most cases, and neither of these is that. Most cases never have
+                         a defect raised against them, and the internal Problem & Resolution
+                         record is written once at the end of a case rather than during it —
+                         so on the great majority of visits these were two full-width buttons
+                         in the way of the ones being reached for. The + list is exactly where
+                         the two other JIRA variants (XSight, Connect) already live, and
+                         Create JIRA sitting in a different place from its own two siblings
+                         was the odd thing about the old arrangement.
+
+                         Their keys are unchanged (qaJira, qaProbRes), so the usage counters
+                         and everything else that names them still lines up. See
+                         QA_EXTRA_ACTIONS in sidepanel.js. -->
+
+                    <!-- "LATEST RELEASE NOTES" IS NO LONGER A PERMANENT BUTTON — it moved into
+                         the + list below on 2026-09-03, because next to "MobiControl Latest
+                         Release Notes" the two read as the same thing and on a MobiControl
+                         console case they behave as the same thing.
+
+                         They are not the same thing, which is why it MOVED rather than being
+                         deleted: this one picks its Pulse page from the case's own product and
+                         platform (RELEASE_NOTE_KINDS.auto), so an Android agent case gets the
+                         agent notes, while the two named ones are pinned to MobiControl console
+                         and MobiControl agent whatever the case is about. Its home is now the
+                         same place they already lived. -->
+
+                    <!-- WHATEVER ELSE THIS ENGINEER WANTS ON THE PANEL.
+                         Filled in by renderQuickActionExtras() from the choices made with the +
+                         below. Empty on a fresh install, and empty is the point: the five above
+                         are what everybody uses, and a list of nine where five would do is how a
+                         panel of shortcuts stops being one. -->
+                    <div class="qa-extra-items" id="qaExtraItems"></div>
+
+                    <!-- THE +. Last, and quiet: it changes what the panel HOLDS rather than
+                         doing anything to the case, so it must be findable without competing
+                         with the actions above it. The chooser opens in flow directly beneath
+                         it rather than as a popover — Quick Options is scroll-capped, and an
+                         absolutely positioned child of a scrolling box is clipped by it. -->
+                    <div class="qa-add-row">
+                        <!-- THE COUNT IS THE POINT. "Add actions" alone says an action could
+                             be added; it does not say any EXIST, so the button read as a
+                             configuration screen nobody had a reason to open. The number of
+                             actions still available is written on it by
+                             renderQuickActionAddButton() and changes as they are ticked. -->
+                        <button class="qa-add-btn" id="qaAddBtn" type="button"
+                                aria-expanded="false" aria-controls="qaAddPanel">
+                            <span class="qa-add-plus">+</span>
+                            <span id="qaAddLabel">Add actions</span>
+                            <span class="qa-add-n" id="qaAddCount" hidden></span>
+                        </button>
+                        <div class="qa-add-panel" id="qaAddPanel" style="display:none">
+                            <div class="qa-add-head">
+                                <span>Show on Quick Options</span>
+                                <button class="qa-add-close" id="qaAddClose" type="button" aria-label="Close">×</button>
+                            </div>
+                            <div class="qa-add-body" id="qaAddBody"></div>
+                        </div>
+                    </div>
+<!-- 30/60/90 IS A BUTTON AGAIN, but an optional one. It was removed because it was a
+                         permanent control most people never pressed — which was true, and the
+                         answer to that is not to take it away from the people who press it every
+                         week. It lives in the + list above now; asking for one in the chat still
+                         works and still runs the same generator. -->
+                </div>
+            </div>
+
+            <div class="pb" id="bodyL" style="display: none">
+                <div class="sf-sync-row">
+                    <button class="btn btn-sf" id="btnSyncSF" title="Automatically pull case details, account info, and issue descriptions from the active Salesforce tab.">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                        Sync from Salesforce
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px; opacity:0.8"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </button>
+                    <!-- HIDDEN UNTIL THE CASE HAS A JIRA NUMBER — see syncJiraLink().
+                         Starts hidden rather than visible because a brand-new case has no
+                         JIRA by definition, and the alternative is the button flashing on
+                         every case for the moment before the fields are painted. -->
+                    <button class="btn btn-jira" id="btnSyncJira" style="display:none" title="Pull the issue details, custom fields, attachments and full comment thread from the JIRA issue open in the active tab.">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+                        Sync from JIRA
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:6px; opacity:0.8"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    </button>
+                </div>
+                <!-- CASE DETAILS IS NOT A DROPDOWN.
+                     It used to be, and it was the second collapsed level inside a panel that
+                     is itself collapsed — so opening Case Info showed a heading and a chevron
+                     where the fields were expected, and every path that needed a field (the
+                     validation nudges, revealCaseField) had to open two things to point at
+                     one. The fields ARE the panel: opening Case Info now shows them.
+                     #toggleCaseDetails survives as a plain heading, with no handler and no
+                     chevron, so nothing that looks it up breaks. -->
+                <div class="subsec subsec-static" id="secCaseDetails">
+                    <div class="subsec-ph subsec-ph-static" id="toggleCaseDetails">
+                        <div class="subsec-ph-left">
+                            📝 Case Details
+                            <span class="info-icon" title="The facts the AI works from: case number and status, product, SOTI and agent versions, platform, environment and hosting, the JIRA number, the issue summary, and the synced Salesforce email chain and JIRA thread. Sync from Salesforce and Sync from JIRA fill most of it in — anything you change here is what the AI is told.">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                            </span>
+                        </div>
+                    </div>
+                    <div class="subsec-pb" id="bodyCaseDetails">
+                <!-- The record link is captured by Sync from Salesforce and kept out of sight —
+                     it is a machine value, not something to type. It only drives the button,
+                     which syncJfCaseLink() reveals once a real Salesforce URL is stored. -->
+                <div class="fld"><span class="flbl">Case Number</span>
+                    <div class="fld-row">
+                        <input class="finput" id="caseNum" placeholder="e.g. 0012345678">
+                        <a class="fld-open" id="caseUrlOpen" target="_blank" rel="noopener noreferrer" title="Open in Salesforce" style="display:none">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        </a>
+                    </div>
+                </div>
+                <div class="fld" style="display: none;"><span class="flbl">Case URL</span><input class="finput" id="caseUrl"></div>
+                <!-- The Salesforce Case Status picklist. A synced value that is NOT one of these
+                     is added as an option by applyCaseStatus() rather than dropped, so a status
+                     added to the picklist later still shows up instead of blanking the field. -->
+                <div class="fld"><span class="flbl">Case Status</span>
+                    <select class="fsel" id="caseStatus">
+                        <option value="">— Select —</option>
+                        <option>New</option>
+                        <option>Waiting on customer response</option>
+                        <option>Waiting on SOTI response</option>
+                        <option>Waiting on Development</option>
+                        <option>Cloud Upgrade</option>
+                        <option>Meeting Scheduled</option>
+                        <option>Workaround Provided</option>
+                        <option>Closed</option>
+                        <option>Close 3x Process</option>
+                    </select>
+                </div>
+                <!-- WHO THE CASE IS FOR. Both were already synced from Salesforce, already
+                     saved with the case, and already used by the JIRA report and the session
+                     export — they were just hidden, under names ("Account Scrub", "Customer
+                     Scrub") left over from a redaction pass that no longer exists. So they
+                     are shown, and called what Salesforce calls them.
+
+                     The ids are unchanged on purpose: they are the keys in `ci`, so renaming
+                     them would silently drop the account and contact off every case already
+                     saved on this machine. -->
+                <div class="fld"><span class="flbl">Account Name</span><input class="finput" id="scrubAccount" placeholder="e.g. Acme Corp"></div>
+                <div class="fld"><span class="flbl">Contact Name</span><input class="finput" id="scrubCustomer" placeholder="e.g. John Doe"></div>
+                <!-- WHO OWNS THE CASE, and therefore WHO SIGNS THE EMAILS. Salesforce fills it
+                     in on every sync (Case Owner on the record); it is left editable like every
+                     other field here because a case worked on somebody's behalf, or one that has
+                     not been synced yet, still has to be able to say who is writing.
+
+                     This is not decoration. draftCustomerEmail signs the draft with this name
+                     in preference to whoever last wrote from SOTI in the email chain — on a
+                     reassigned case that chain is full of the PREVIOUS engineer, and a draft
+                     signed by them goes out to the customer under the wrong person's name. -->
+                <div class="fld"><span class="flbl">Case Owner</span><input class="finput" id="caseOwner" placeholder="Who is sending emails on this case"></div>
+                <div class="fld"><span class="flbl">Product</span>
+                    <select class="fsel" id="product">
+                        <option value="">— Select —</option>
+                        <option>SOTI MobiControl</option>
+                        <option>SOTI Connect</option>
+                        <option>SOTI SNAP</option>
+                        <option>SOTI XSight</option>
+                        <option>SOTI Identity</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">SOTI Version</span>
+                    <select class="fsel" id="sotiVer"><option value="">— Select —</option></select>
+                </div>
+                <!-- The value doubles as a link: syncJiraLink() reveals the button and points it
+                     at https://jira.soti.net/browse/<key> whenever the box holds a real issue key.
+                     The input stays a plain editable field so the number can still be typed. -->
+                <div class="fld"><span class="flbl">JIRA Number</span>
+                    <div class="fld-row">
+                        <input class="finput" id="jiraNum" placeholder="e.g. MCMR-42071">
+                        <a class="fld-open" id="jiraNumOpen" target="_blank" rel="noopener noreferrer" title="Open in JIRA" style="display:none">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        </a>
+                    </div>
+                </div>
+                <div class="fld"><span class="flbl">Agent Version</span>
+                    <select class="fsel" id="agentVer"><option value="">— Select —</option></select>
+                </div>
+                <div class="fld"><span class="flbl">Case Age (in days)</span><input class="finput" id="caseAge" placeholder="e.g. 15.3"></div>
+                <!-- WHEN THIS CASE LAST MOVED, AND WHEN WE LAST MOVED IT.
+                     Read out of the Feed the sync already scrolls, so it costs nothing extra.
+                     Not an input: these are facts about the case, and typing over them would
+                     be inventing a history. Filled in by renderCaseActivity(); the whole row
+                     is hidden until a sync has read a feed with a date in it. -->
+                <div class="fld" id="fldActivity" style="display:none">
+                    <span class="flbl">Case Activity</span>
+                    <div class="case-activity" id="caseActivity"></div>
+                </div>
+                <!-- THE TWO NPS AVERAGES, read off the Flow screen on the case (see
+                     readNpsAverages in content.js). Shown here because they are what the
+                     closure route turns on — below 100 or N/A is a self-recovery — and an
+                     engineer closing a case should be able to see the number the write-up
+                     is about rather than take the directive's word for it.
+
+                     Not an input, for the same reason as Case Activity above: these are
+                     facts read from Salesforce, and a typed-over score would change which
+                     closure route the app tells you to take. Hidden until a sync has read
+                     one — an empty NPS box reads as a field that failed. -->
+                <div class="fld" id="fldNps" style="display:none">
+                    <span class="flbl">NPS Score</span>
+                    <div class="case-activity" id="caseNps"></div>
+                </div>
+                <div class="fld"><span class="flbl">Platform</span>
+                    <select class="fsel" id="platform">
+                        <option value="">— Select —</option>
+                        <option>Android (Enterprise)</option>
+                        <option>Android (Classic)</option>
+                        <option>iOS</option>
+                        <option>Windows Modern</option>
+                        <option>Windows Classic</option>
+                        <option>macOS</option>
+                        <option>Linux</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">Environment</span>
+                    <select class="fsel" id="enviro">
+                        <option value="">— Select —</option>
+                        <option>Production</option>
+                        <option>Test/UAT</option>
+                        <option>POC/Setup</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">MC Hosted</span>
+                    <select class="fsel" id="dsCfg">
+                        <option value="">— Select —</option>
+                        <option>On-Prem</option>
+                        <option>Cloud</option>
+                    </select>
+                </div>
+                <div class="fld"><span class="flbl">Affected Devices</span>
+                    <select class="fsel" id="affDev">
+                        <option value="">— Select —</option>
+                        <option>1-10 devices</option>
+                        <option>10-50 devices</option>
+                        <option>50-200 devices</option>
+                        <option>200-1000 devices</option>
+                        <option>1000+ devices</option>
+                    </select>
+                </div>
+                <div class="fld">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="flbl">Issue Summary</span>
+                        <span class="info-icon" title="A concise summary of the problem, automatically synced from the Salesforce Case Description or manually entered.">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        </span>
+                    </div>
+                    <textarea class="ftxt" id="issueSummary" rows="5" placeholder="Synced from Salesforce or enter details..."></textarea>
+                </div>
+                <div class="fld">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="flbl">Email Chain</span>
+                        <span class="info-icon" title="Pull the latest email conversation directly from the Salesforce Feed tab to provide the AI with full technical context. Note: Ensure you are on the 'Feed' tab for this to work.">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        </span>
+                    </div>
+                    <div style="font-size:9px; color:var(--blue2); margin:2px 0 6px; line-height:1.2; font-weight: 600; display: flex; align-items: center; gap: 4px;">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        Ensure Salesforce is on the "Feed" tab for Email Chain sync.
+                    </div>
+                    <textarea class="ftxt" id="emailChain" rows="6"></textarea>
+                </div>
+                <div class="fld">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span class="flbl">JIRA Details</span>
+                        <span class="info-icon" title="Everything Sync from JIRA pulls off the issue page: status, priority, versions, components, labels, the customer custom fields, the attachment list and the full comment thread. Editable — trim anything you do not want kept.">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        </span>
+                    </div>
+                    <div style="font-size:9px; color:var(--blue2); margin:2px 0 6px; line-height:1.2; font-weight: 600; display: flex; align-items: center; gap: 4px;">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        Open the JIRA issue in the active tab, then click "Sync from JIRA".
+                    </div>
+                    <textarea class="ftxt" id="jiraDetails" rows="6"></textarea>
+                </div>
+                    </div>
+                </div>
+
+                <!-- Logs (Collapsible) — lives inside Case Info: logs belong to a case.
+                     Element ids are kept from the old right-hand panel so every existing
+                     handler (upload, drag-drop, Analyse Now, collapse-on-analyse) keeps working. -->
+                <div class="subsec" id="panelR">
+                    <div class="subsec-ph" id="toggleR">
+                        <div class="subsec-ph-left">
+                            <!-- "Logs" was too narrow a name for what this holds. Images are
+                                 attached here, so are ZIP bundles, and so is everything pulled
+                                 off the case's own emails — and none of those is a log. It is
+                                 also a HISTORY now: a file removed from the case is still
+                                 recorded, with the date it arrived, so "which of these did I
+                                 upload last week?" has an answer months later. -->
+                            📎 Attachment History
+                            <span class="info-icon" title="Everything attached to this case, newest first, with the date each one arrived. Logs (MS, DS, Agent, DDR), ZIP bundles, images and files pulled off the case's emails all land here. Analyse Now reads whatever is currently attached; removed files stay listed with their dates but their contents are not kept on this device.">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px; opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                            </span>
+                        </div>
+                        <div class="subsec-ph-collapse" id="iconR">▶</div>
+                    </div>
+                    <div class="subsec-pb" id="bodyR" style="display: none">
+                        <div class="dz" id="dz">
+                            <div class="dz-text">Click or drag files here</div>
+                            <div class="dz-sub">LOG · TXT · XML · JSON · HAR · ZIP</div>
+                        </div>
+
+                        <div class="log-guide" id="logGuide">
+                            <div class="guide-title">Supported Log Types</div>
+                            <div class="guide-grid">
+                                <div class="guide-item"><span class="badge ms">MS</span> Management Service</div>
+                                <div class="guide-item"><span class="badge ds">DS</span> Deployment Server</div>
+                                <div class="guide-item"><span class="badge dse">DSE</span> DS Extension</div>
+                                <div class="guide-item"><span class="badge agt">AGT</span> Agent Manager</div>
+                                <div class="guide-item"><span class="badge ddr">DDR</span> Device Debug Report</div>
+                                <div class="guide-item"><span class="badge enr">ENR</span> Enrollment</div>
+                                <div class="guide-item"><span class="badge har">HAR</span> Har logs</div>
+                                <div class="guide-item"><span class="badge evt">EVT</span> Event Log</div>
+                            </div>
+                        </div>
+
+                        <div id="noFiles" class="no-files">No files uploaded yet.</div>
+                        <div class="log-list" id="logList"></div>
+                        <button class="btn btn-analyse" id="btnAnalyse" style="display:none">Analyse Now</button>
+
+                        <!-- EVERYTHING THIS CASE HAS EVER CARRIED, in date order.
+                             Separate from the list above because the two answer different
+                             questions: that one is "what will Analyse Now read", this one is
+                             "what has arrived on this case, and when". A file removed from the
+                             case leaves this list intact — which is the point, because the
+                             usual reason to remove one is that it was the wrong file, and
+                             knowing it was tried is worth keeping. -->
+                        <div class="att-hist" id="attHist" style="display:none">
+                            <div class="att-hist-head">
+                                <span class="att-hist-title">History</span>
+                                <button class="att-hist-zip" id="btnZipAttachments" type="button"
+                                        title="Download every file currently attached to this case as one ZIP, with a manifest listing the full history and the date each file arrived.">
+                                    ⬇ Download all (.zip)
+                                </button>
+                            </div>
+                            <div class="att-hist-list" id="attHistList"></div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </aside>
+
+        <!-- Chat Area -->
+        <section class="chat-wrap">
+            <div class="chat-msgs" id="chatMsgs">
+                <div class="welcome" id="welcome">
+                    <div class="w-hex-wrap">⬡</div>
+                    <div class="w-title">SOTI AI Analyser</div>
+                    <!-- Every claim here has to survive the build shipping the Copilot relay.
+                         "100% local, no data sent externally" did not: the prompt carries the
+                         case to Microsoft 365 Copilot now. What IS still remarkable is the
+                         mechanism — there is no API key anywhere in this extension, because
+                         it borrows the session the engineer is already signed in to. -->
+                    <div class="w-sub">Powered by Microsoft 365 Copilot — no API key, no endpoint, just the session you are already signed in to.</div>
+
+                    <!-- TWO PAGES, not a longer list. Getting the case in and analysing logs are
+                         separate jobs done at different times, and stacking eight steps made the
+                         first four look like prerequisites for the last four. The pager keeps each
+                         page to one job. -->
+                    <!-- SHOWN ONCE. After the first time the engineer sees this, it collapses
+                         to the link below and stays collapsed on every later start — the steps
+                         are for someone who has not done this before, and a permanent panel of
+                         instructions is a permanent statement that you might still need them.
+                         The link is what stops that being a one-way door: the box is hidden,
+                         not deleted, and one click brings it back. See wireHowTo(). -->
+                    <button class="w-howto-link" id="howtoReopen" style="display:none" type="button">How to get started</button>
+
+                    <div class="w-howto" id="howtoBox">
+                        <div class="w-howto-head">
+                            <div class="w-howto-title">How to get started</div>
+                            <!-- Dismiss. The box also hides itself once it has been shown, so
+                                 this is for the engineer who wants it gone NOW rather than on
+                                 the next start. -->
+                            <button class="w-howto-dismiss" id="howtoDismiss" type="button"
+                                    title="Hide this — the link stays if you want it back" aria-label="Hide How to get started">×</button>
+                        </div>
+
+                        <div class="w-howto-page" data-howto-page="1">
+                            <!-- "Go to the Feed tab" was step 2 and is gone: the sync opens the
+                                 case's Feed sub-tab itself (activateFeedTab in content.js), so
+                                 the instruction asked for something already done for you. -->
+                            <div class="w-step"><span class="w-step-num">1</span> Open a Salesforce case</div>
+                            <div class="w-step"><span class="w-step-num">2</span> On this tool, open the Case Info Panel</div>
+                            <div class="w-step"><span class="w-step-num">3</span> Click Sync from Salesforce</div>
+                        </div>
+
+                        <div class="w-howto-page" data-howto-page="2" style="display:none">
+                            <div class="w-step"><span class="w-step-num">1</span> Attach logs with the 📄 button next to the chat box — LOG, TXT, XML, JSON, HAR or a ZIP bundle</div>
+                            <div class="w-step"><span class="w-step-num">2</span> The Logs section appears under Case Info once files are attached</div>
+                            <div class="w-step"><span class="w-step-num">3</span> Click Analyse Now — use Cancel if you need to stop it</div>
+                            <div class="w-step"><span class="w-step-num">4</span> A ZIP is unpacked for you, and findings are cited to the inner file</div>
+                        </div>
+
+                        <div class="w-howto-pager">
+                            <button class="w-howto-nav" id="howtoPrev" title="Previous">‹</button>
+                            <span class="w-howto-dots">
+                                <span class="w-howto-dot is-on" data-howto-dot="1"></span>
+                                <span class="w-howto-dot" data-howto-dot="2"></span>
+                            </span>
+                            <button class="w-howto-nav" id="howtoNext" title="Next">›</button>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- HOME PANEL — sits directly under "How to get started" while the welcome
+                     screen is up, and stays put once the chat starts (it is a SIBLING of the
+                     welcome block, not a child), so Meeting Notes never becomes unreachable
+                     mid-conversation. Quick Options used to lead this panel and now lives in
+                     the left sidebar under Case Info, where it does not move. -->
+                <div class="home-panel" id="homePanel">
+                    <div class="mn-block">
+                        <div class="mn-head">
+                            <span class="flbl">Meeting Notes</span>
+                            <span class="info-icon" title="Capture manual notes during customer meetings or troubleshooting sessions. This content is analysed alongside the rest of the case data.">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                            </span>
+                        </div>
+                        <!-- The headings are REAL pre-filled text in the textarea. The worked
+                             example sits in an overlay behind them and clears the moment the
+                             engineer starts typing. See renderMeetingNotesGhost(). -->
+                        <div class="mn-wrap">
+                            <div class="mn-ghost" id="meetingNotesGhost" aria-hidden="true"></div>
+                            <textarea class="ftxt mn-txt" id="meetingNotes" rows="8"></textarea>
+                        </div>
+                        <button class="btn btn-clean-notes" id="btnCleanNotes" title="AI rewrites your raw meeting notes into clean, professional case notes — ready to paste into Salesforce.">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                            Professionalise
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="progWrap" class="prog-wrap" style="display:none">
+                <div class="prog-lbl" id="progLbl">AI thinking...</div>
+                <div class="prog-bar"><div class="prog-fill" id="progFill"></div></div>
+                <!-- Stops the run that is ACTUALLY in flight, not the panel that started it.
+                     A log analysis can take minutes, and until now the only way out was to
+                     sit through it. Hidden unless something is cancellable. -->
+                <button id="btnCancelRun" class="prog-cancel" style="display:none"
+                        title="Stop this analysis. Anything already written stays in the chat.">Cancel</button>
+            </div>
+
+            <div class="chat-foot">
+                <!-- Meeting Notes lives at the TOP of the scrolling chat area, above every
+                     message. That is the right place for it — it is case material, not a
+                     turn in the conversation — but it means the notes get further away with
+                     every exchange, and mid-conversation is exactly when someone reaches for
+                     them. This is the way back, sat directly above the send button because
+                     that is where the hands already are.
+
+                     A row in normal flow rather than a floating chip: floating it over the
+                     message list would cover the last line of whatever was just said. -->
+                <div class="notes-jump-row">
+                    <!-- WHAT IS ATTACHED, sat where the hands already are. This used to be a
+                         chat bubble ("📎 1 attachment: ..."), which put a permanent turn in
+                         the conversation for something that is not a turn, said it once, and
+                         then scrolled out of sight the moment anybody typed anything else —
+                         so the answer to "what have I got attached?" aged out of the very
+                         place it was written. Here it is live state instead of history: it
+                         redraws with the Logs list, so removing a file corrects it, and it
+                         disappears entirely when nothing is attached. Clicking it goes to the
+                         files in Case Info.
+
+                         `margin-right:auto` in the stylesheet keeps the jump arrow pinned to
+                         the right edge whether this is on screen or not. -->
+                    <button class="attach-strip" id="attachStrip" type="button" style="display:none"></button>
+                    <!-- Icon only. The arrow has no label beside it, so the title and the
+                         aria-label are the only things that say where it goes — they are
+                         the control's name to a screen reader, not decoration. -->
+                    <button class="notes-jump" id="btnJumpNotes" aria-label="Go to Meeting Notes" title="Meeting Notes — scroll up and put the cursor in the box">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                    </button>
+                </div>
+                <div id="imgPreview" class="img-preview-strip" style="display:none"></div>
+                <div class="input-row">
+                    <button class="attach-btn" id="btnAttach" title="Attach logs">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                    </button>
+                    <button class="attach-btn" id="btnImgAttach" title="Attach image">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+                    </button>
+                    <textarea class="cinput" id="chatIn" placeholder="Ask AI anything..." rows="1"></textarea>
+                    <button class="send-btn" id="btnSend">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- Hidden Inputs -->
+    <input type="file" id="fileIn" multiple accept=".txt,.log,.xml,.json,.har,.csv,.out,.err,.trace,.config,.zip" style="display:none">
+    <input type="file" id="imgFileIn" multiple accept="image/*" style="display:none">
+
+    <!-- ==========================================================================
+         UPDATING THE EXTENSION — and, first, not losing anything by doing it
+         ==========================================================================
+         WHY THIS EXISTS AT ALL. This is an unpacked extension: it is a FOLDER on the
+         engineer's machine, and Chrome has no update channel for one. So "there is a
+         new version" is a thing somebody has to be told, and until they are told it
+         they are working with a build that is months behind and have no way of knowing.
+         This screen is the telling. It reads the version out of the repository, says
+         which one is installed beside it, and hands over the download.
+
+         AND WHY THE BACKUP IS THE FIRST BUTTON, NOT AN AFTERTHOUGHT. The reported
+         problem was not "I cannot find the new version" — it was "every time I swap the
+         folder, everything I had is gone". That is real and it is not a bug in this
+         panel: everything the app remembers (cases, chats, settings, sticky notes,
+         usage) lives in chrome.storage under the EXTENSION'S ID, and removing an
+         extension is Chrome deleting that storage. Load the new folder afterwards and
+         it is a fresh install of the same extension, correctly and unhelpfully empty.
+
+         There are two ways not to lose it and this screen gives both, in the order
+         that matters:
+
+           1. DO NOT REMOVE THE OLD ONE. Replace the FILES inside the folder Chrome is
+              already loading and press Reload on chrome://extensions. Chrome never
+              deletes anything, because from its point of view the same extension was
+              updated in place. This is the recommended route and it is step 1 in the
+              list, written out by renderUpdateSteps().
+           2. AND KEEP A BACKUP ANYWAY, for when route 1 is not possible — a new
+              machine, a folder that has to move, a Chrome profile being rebuilt.
+              "Back up my data" writes every key out to a JSON file; "Restore a
+              backup…" reads one back in. Restoring REPLACES what is there, so it is
+              gated behind typing the word, the way anything unrecoverable in this
+              panel is.
+
+         NOTHING HERE INSTALLS ANYTHING. An extension cannot rewrite its own folder on
+         disk — no API exists for it and none should — so the last step is always the
+         engineer's: unzip, replace, press Reload. Saying so plainly is better than a
+         button called "Update" that turns out to mean "download a zip".
+         ========================================================================== -->
+    <div class="backdrop" id="mUpd" style="display:none">
+        <div class="modal m-upd">
+            <div class="mtitle" id="mUpdTitle">Check for updates</div>
+            <p class="mask-note" id="mUpdNote"></p>
+
+            <div class="upd-vers">
+                <div class="upd-ver">
+                    <span class="upd-ver-k">Installed</span>
+                    <span class="upd-ver-v" id="mUpdHave">—</span>
+                </div>
+                <div class="upd-arrow" aria-hidden="true">→</div>
+                <div class="upd-ver">
+                    <span class="upd-ver-k">On GitHub</span>
+                    <span class="upd-ver-v" id="mUpdWant">—</span>
+                </div>
+            </div>
+
+            <!-- What changed, when the release says. Empty and hidden when it does not:
+                 an empty "Release notes" heading is a promise the page cannot keep. -->
+            <div class="upd-notes" id="mUpdNotes" hidden></div>
+
+            <!-- The steps, written by renderUpdateSteps() so they can name the actual
+                 version and say something different when there is nothing to install. -->
+            <ol class="upd-steps" id="mUpdSteps"></ol>
+
+            <div class="mask-err" id="mUpdErr" style="display:none"></div>
+
+            <div class="mact upd-acts">
+                <button class="btn btn-sec" id="mUpdRestore" title="Read a backup file back in. This REPLACES everything this app currently holds.">Restore a backup…</button>
+                <span class="upd-spacer"></span>
+                <button class="btn btn-sec" id="mUpdClose">Close</button>
+                <button class="btn btn-sec upd-backup" id="mUpdBackup" title="Write every case, chat, setting and note out to a single JSON file you can keep.">Back up my data</button>
+                <button class="btn btn-ok" id="mUpdGet" style="background:var(--blue);color:#fff;border:none">Download update</button>
+            </div>
+        </div>
+    </div>
+    <!-- Outside the modal: a file input inside a container that gets display:none has
+         its picker suppressed in some Chrome versions, and this one has to open from a
+         click handler either way. -->
+    <input type="file" id="updRestoreFile" accept="application/json,.json" style="display:none">
+
+    <!-- Modal for New Case -->
+    <div class="backdrop" id="mNew" style="display:none">
+        <div class="modal">
+            <div class="mtitle">Start New Case?</div>
+            <p style="font-size:12px;color:var(--txt2);margin-bottom:20px">This will clear current chat and files.</p>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px">
+                <button class="btn" id="mNewCancel">Cancel</button>
+                <button class="btn btn-del" id="mNewConfirm" style="background:var(--red);color:#fff;border:none">Clear All</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ONE PROMPT, REUSED. The queue needs to ask for a case number and for a list-view
+         URL, and neither deserves a modal of its own. window.prompt() would have done both
+         in one line and is deliberately not used: it is not styled like the app, it cannot
+         explain what it wants, and in a side panel it steals focus from the whole window.
+         Driven by askForValue() in sidepanel.js. -->
+    <div class="backdrop" id="mAsk" style="display:none">
+        <div class="modal">
+            <div class="mtitle" id="mAskTitle">…</div>
+            <p class="mask-note" id="mAskNote"></p>
+            <input class="finput" id="mAskInput" autocomplete="off" spellcheck="false">
+            <div class="mask-err" id="mAskErr" style="display:none"></div>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px">
+                <button class="btn btn-sec" id="mAskCancel">Cancel</button>
+                <button class="btn btn-ok" id="mAskOk" style="background:var(--blue);color:#fff;border:none">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- WRITE SOMETHING STRAIGHT ONTO THE CASE.
+         ==========================================================================
+         Shared by "Log a Call Note" and "Write a Post" — two Quick Options that end
+         in the same place: text the engineer wrote, filed on the case in Salesforce
+         through its own publisher. One modal because it is one job; the title, the
+         hint and the button name say which of the two is about to happen.
+
+         THE CASE NUMBER IS IN THE TITLE AND THAT IS DELIBERATE. Pressing Save here
+         writes to Salesforce under the engineer's own name, in front of the
+         customer on a Post, and there is no undo in this panel. The last thing seen
+         before that button is which case it is going to — so a panel left on
+         yesterday's case cannot quietly file today's note against it.
+
+         mAskInput is not reused: a call note is a paragraph and a one-line input
+         invites a one-line note. Driven by askForNoteText() in sidepanel.js. -->
+    <div class="backdrop" id="mNote" style="display:none">
+        <div class="modal m-note">
+            <div class="mtitle" id="mNoteTitle">Log a call note</div>
+            <p class="mask-note" id="mNoteNote"></p>
+            <textarea class="ftxt note-area" id="mNoteText" spellcheck="true" placeholder=""></textarea>
+            <div class="note-foot">
+                <span class="note-count" id="mNoteCount"></span>
+                <span class="note-hint">Ctrl + Enter to save · Esc to cancel</span>
+            </div>
+            <div class="mask-err" id="mNoteErr" style="display:none"></div>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px">
+                <button class="btn btn-sec" id="mNoteCancel">Cancel</button>
+                <button class="btn btn-ok" id="mNoteOk" style="background:var(--blue);color:#fff;border:none">Save to Salesforce</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- WHICH BOOKING PAGE THIS EMAIL SHOULD CARRY.
+         Only ever shown when there is a genuine choice: with one link configured
+         "With a meeting request" takes it and says which, because a dialog with one
+         option in it is a dialog that only exists to be dismissed. Filled in by
+         pickBookingsLink(). -->
+    <div class="backdrop" id="mBook" style="display:none">
+        <div class="modal m-book">
+            <div class="mtitle">Which bookings link?</div>
+            <p class="mask-note" id="mBookNote"></p>
+            <div class="bk-pick" id="mBookList"></div>
+            <div class="mact" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:14px">
+                <span class="bk-pick-hint">Manage these in Settings → Bookings Links</span>
+                <button class="btn btn-sec" id="mBookCancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- READ THE ACCOUNT EMAIL BEFORE IT GOES IN THE COMPOSER.
+         The Cc list is the half that needs reading most: it was assembled from an Account
+         record the engineer has not looked at, and this is the only moment they see who is on
+         it. Hence an × on every name — an aligned engineer who has moved off the account is
+         still in the field on plenty of accounts, and taking them off has to be easier than
+         cancelling and doing the whole thing by hand.
+         Filled in by askForAccountEmail(). -->
+    <div class="backdrop" id="mAcct" style="display:none">
+        <div class="modal m-acct">
+            <div class="mtitle" id="mAcctTitle">Account email</div>
+            <p class="mask-note" id="mAcctNote"></p>
+            <p class="acct-warn" id="mAcctWarn" style="display:none"></p>
+            <div class="acct-cc-head">
+                <span class="acct-cc-title">Cc — the account team</span>
+                <span class="acct-cc-count" id="mAcctCcCount"></span>
+            </div>
+            <div class="acct-cc" id="mAcctCc"></div>
+            <div class="acct-cc-empty" id="mAcctCcEmpty" style="display:none">
+                Nobody is on the Cc line — the email will go to the customer only.
+            </div>
+            <label class="acct-lab" for="mAcctSubject">Subject</label>
+            <!-- EMPTY IS A REAL ANSWER HERE. A draft that came back without a subject line
+                 leaves this blank, and the write then leaves Salesforce's own value alone —
+                 which on a reply is "RE: <the customer's subject>", the thread their mail
+                 client will recognise. -->
+            <input class="ftxt acct-subject" id="mAcctSubject" type="text" spellcheck="true"
+                   placeholder="Leave empty to keep whatever Salesforce has already put there">
+            <label class="acct-lab" for="mAcctBody">Message</label>
+            <textarea class="ftxt note-area acct-body" id="mAcctBody" spellcheck="true"></textarea>
+            <div class="note-foot">
+                <span class="note-count" id="mAcctCount"></span>
+                <span class="note-hint">Ctrl + Enter to fill in · Esc to cancel · nothing is sent</span>
+            </div>
+            <div class="mask-err" id="mAcctErr" style="display:none"></div>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px">
+                <button class="btn btn-sec" id="mAcctCancel">Cancel</button>
+                <button class="btn btn-ok" id="mAcctOk" style="background:var(--blue);color:#fff;border:none">Fill in Salesforce</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PICK WHICH OF THE CASE'S OWN ATTACHMENTS THE AI SHOULD READ.
+         Shown after a Sync from Salesforce that found files hanging off the email chain.
+         It is a CHOICE and not an automatic download for two reasons: a long case can carry
+         a hundred megabytes of bundles nobody wants read, and the engineer usually knows
+         exactly which of them is the one that matters ("the log they sent this morning",
+         not the four from last month). Each row says who sent it and when, which is the
+         question they are actually answering. Filled in by askForAttachments(). -->
+    <div class="backdrop" id="mPick" style="display:none">
+        <div class="modal" style="max-width:520px">
+            <div class="mtitle" id="mPickTitle">Attachments on this case</div>
+            <p class="mask-note" id="mPickNote"></p>
+            <div class="pick-tools">
+                <button class="pick-tool" id="mPickAll" type="button">Select all</button>
+                <button class="pick-tool" id="mPickNone" type="button">Select none</button>
+                <span class="pick-count" id="mPickCount"></span>
+            </div>
+            <div class="pick-body" id="mPickBody"></div>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px">
+                <button class="btn btn-sec" id="mPickCancel">Not now</button>
+                <button class="btn btn-ok" id="mPickOk" style="background:var(--blue);color:#fff;border:none">Attach selected</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==========================================================================
+         STICKY NOTES & REMINDERS
+         ==========================================================================
+         The Windows Sticky Notes idea, kept where the work is. An engineer's notes
+         about a case are not case DATA — they are "ring them back after lunch",
+         "their AD guy is Piet, not Peter", "same thing happened on C01699xxx" — and
+         they were living on paper and in a Notepad window beside this panel.
+
+         OPTIONAL, and off until it is asked for: it goes on Quick Options through
+         + Add actions like every other extra, because a board of notes is a way of
+         working rather than a default one. See QA_EXTRA_ACTIONS.
+
+         Everything here is filled in by renderStickyNotes(). The board is a grid of
+         real sticky notes — pick a colour, type, set a reminder — and the whole lot
+         exports to a JSON file and imports back, so it survives a new laptop.
+         ========================================================================== -->
+    <div class="backdrop" id="mNotes" style="display:none">
+        <div class="modal notes-modal">
+            <div class="notes-head">
+                <div class="mtitle">🗒 Sticky Notes &amp; Reminders</div>
+                <button class="mcls notes-close" id="mNotesClose" type="button" aria-label="Close">×</button>
+            </div>
+            <div class="notes-tools">
+                <button class="notes-btn notes-btn-new" id="notesNew" type="button"
+                        title="Start a new note. It is saved as you type.">+ New note</button>
+                <input type="search" class="notes-search" id="notesSearch" autocomplete="off"
+                       placeholder="Search notes, case numbers, reminders…">
+                <select class="notes-filter" id="notesFilter" title="Narrow the board">
+                    <option value="all">All notes</option>
+                    <option value="due">Due &amp; overdue</option>
+                    <option value="reminders">With a reminder</option>
+                    <option value="case">This case only</option>
+                    <option value="pinned">Pinned</option>
+                </select>
+                <button class="notes-btn" id="notesExport" type="button"
+                        title="Save every note and reminder to a .json file — for a backup, or to carry them to another machine.">⬇ Export</button>
+                <button class="notes-btn" id="notesImport" type="button"
+                        title="Read notes back from a .json file exported here. You choose whether to merge them with the notes you already have or replace them.">⬆ Import</button>
+                <input type="file" id="notesImportFile" accept=".json,application/json" style="display:none">
+            </div>
+            <div class="notes-board" id="notesBoard"></div>
+            <div class="notes-foot">
+                <span id="notesCount"></span>
+                <span class="notes-hint">Stored on this device only — nothing is uploaded.</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- WHEN A REMINDER COMES DUE, WITH THE PANEL OPEN.
+         The desktop notification (background.js) is what reaches you when the panel
+         is shut; this is the richer half — it shows the note's whole text, it lists
+         everything that fell due while you were away, and each row can be snoozed on
+         its own. Filled in by showReminderPopup(). -->
+    <div class="backdrop" id="mRemind" style="display:none">
+        <div class="modal remind-modal">
+            <div class="remind-head">
+                <span class="remind-bell">⏰</span>
+                <div class="mtitle" id="mRemindTitle">Reminder</div>
+            </div>
+            <div class="remind-body" id="mRemindBody"></div>
+            <div class="mact remind-act">
+                <button class="btn btn-sec" id="mRemindOpen" type="button">Open notes</button>
+                <button class="btn btn-ok" id="mRemindAll" type="button"
+                        style="background:var(--blue);color:#fff;border:none">Dismiss all</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for JIRA Info Review -->
+    <div class="backdrop" id="mJiraReview" style="display:none">
+        <div class="modal" style="max-width:500px">
+            <div class="mhdr" style="display:flex;justify-content:space-between;margin-bottom:15px">
+                <!-- NAMED, because one dialog now collects for three different official forms
+                     (MobiControl, XSight, Connect) and the fields it asks for are identical in
+                     all three. openJiraReview() writes the form name here and onto the Generate
+                     button, so the ticket you are about to raise is stated before you raise it. -->
+                <div class="mtitle" id="mJiraReviewTitle">Additional info that is not in the conversation with the AI and Case Info</div>
+                <button class="mcls" id="mJiraReviewClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+            <div class="pb" style="gap:15px">
+                <div class="fld">
+                    <span class="flbl">Expected Behavior</span>
+                    <textarea class="ftxt" id="jiraExpected" rows="3" placeholder="What should have happened?"></textarea>
+                </div>
+                <div class="fld">
+                    <span class="flbl">Business Impact</span>
+                    <textarea class="ftxt" id="jiraImpact" rows="3" placeholder="Why is this critical?"></textarea>
+                </div>
+                <div class="fld">
+                    <span class="flbl">Priority Justification</span>
+                    <select class="fsel" id="jiraPriority">
+                        <option value="Low">Low - Minor issue</option>
+                        <option value="Medium" selected>Medium - Functional defect</option>
+                        <option value="High">High - Major blocker</option>
+                        <option value="Critical">Critical - Production outage</option>
+                    </select>
+                </div>
+                <div class="fld">
+                    <span class="flbl">Reproduction Steps</span>
+                    <textarea class="ftxt" id="jiraRepro" rows="4" placeholder="1. Go to...&#10;2. Click..."></textarea>
+                </div>
+            </div>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">
+                <button class="btn btn-sec" id="btnJiraReviewCancel">Cancel</button>
+                <button class="btn btn-ok" id="btnGenerateJira" style="background:var(--blue);color:#fff;border:none">Generate JIRA Report</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for JIRA -->
+    <div class="backdrop" id="mJira" style="display:none">
+        <div class="modal m-jira">
+            <div class="mhdr" style="display:flex;justify-content:space-between;margin-bottom:15px">
+                <div class="mtitle" id="mJiraTitle">JIRA Template</div>
+                <button class="mcls" id="mJiraClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+            <!-- Says WHEN this report was written, and only when it is a kept one being read
+                 back. A saved report and a freshly generated one look identical in the box,
+                 and acting on a week-old JIRA draft as though the AI had just written it from
+                 the current case is the mistake this line exists to prevent. -->
+            <div class="jira-kept-note" id="jiraKeptNote" style="display:none"></div>
+            <textarea id="jiraTa" readonly class="jira-textarea"></textarea>
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:15px">
+                <button class="btn btn-sec" id="btnCopyJira">Copy</button>
+                <!-- KEEPING IS A CHOICE, so it is a button and not a side effect of closing.
+                     Generating a JIRA costs minutes of model time, and until now the only copy
+                     of the result lived in a modal that Done threw away — a mis-click and the
+                     whole run was gone. Keep writes it onto the case, where Create JIRA reads
+                     it back instead of regenerating. -->
+                <button class="btn btn-sec" id="btnKeepJira" title="Save this report onto the case. Create JIRA will reopen it instead of generating a new one.">Keep</button>
+                <!-- Only shown when a kept report is on screen: the way back to a fresh one. -->
+                <button class="btn btn-sec" id="btnRegenJira" style="display:none" title="Discard the kept report and generate a new one from the case as it stands now.">Regenerate</button>
+                <button class="btn btn-ok" id="btnJiraDone" style="background:var(--green);color:#fff;border:none">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <!-- Settings Modal (AI provider, answer language, Pulse sync) -->
+    <div class="backdrop" id="mSettings" style="display:none">
+        <div class="modal" style="max-width:400px">
+            <div class="mhdr" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+                <div class="mtitle" style="display:flex;align-items:center;gap:8px">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    AI Settings
+                </div>
+                <button class="mcls" id="mSettingsClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+
+            <!-- WHICH BRAIN ANSWERS. Everything else in this app — the scrape, the log
+                 intelligence, the RAG, the prompt budgeter — is identical whichever one
+                 is picked. See AI_PROVIDERS.md. -->
+            <div class="fld">
+                <!-- HIDDEN, NOT REMOVED. The build ships one provider — the Copilot bridge —
+                     so there is nothing here to choose. The select stays in the DOM because
+                     the whole settings round trip (loadProviderFieldsFromConfig /
+                     readProviderFieldsToConfig) reads its value, and because the other
+                     adapters still work: unhide this block to get the choice back. -->
+                <div id="aiProviderPick" style="display:none">
+                    <span class="flbl">AI Provider</span>
+                    <!-- ONE OPTION, and unhiding this block will not produce a second. The
+                         Azure OpenAI and Anthropic options that sat here are gone along with
+                         their adapters, their settings panes, their manifest origins and
+                         their connect-src entries. -->
+                    <select class="fsel" id="aiProviderSel" title="Which model answers. The Salesforce/JIRA sync, log intelligence, PulseKB research and prompt building are the same either way — only the final call changes.">
+                        <option value="bridge" selected>Copilot browser bridge — no API key</option>
+                    </select>
+                </div>
+                <!-- What is ACTUALLY serving requests right now. The dropdown shows an
+                     intention; this shows reality, and they are not always the same
+                     (unsaved edit, or ai-provider.js not loaded at all). Ambiguity here
+                     is what turns "I picked the bridge" into an unexplained failure. -->
+                <div id="aiProviderActive" style="font-size:10px;margin-top:6px;line-height:1.5;color:var(--txt2)"></div>
+            </div>
+
+            <!-- REMOVED: the "⚠ Case data will leave this device" banner that used to sit
+                 here. It existed to make switching AWAY from an on-device engine a deliberate
+                 act, and there is no longer such an engine — the relay is the only provider
+                 the panel offers, so the banner was a permanent notice over a decision nobody
+                 makes. What it said is still true and still someone's to sign off: the prompt
+                 carries scraped Salesforce content and customer log text. That belongs in
+                 SECURITY.md and the rollout approval, not in a box on a settings screen. -->
+
+            <!-- THE LOCAL-ENGINE PANE USED TO SIT HERE: a server URL, a "detect models"
+                 button and a dropdown of what was installed on the machine. All three
+                 configured an on-device engine this build no longer has. -->
+
+            <!-- ============ BROWSER BRIDGE (no API key) ============ -->
+            <div id="paneBridge" style="display:none">
+                <!-- REMOVED: the "Relays each prompt through a chat tab…" explainer and the
+                     amber caveat under it. Both described a provider you were choosing —
+                     how it works, and what you were taking on by picking it. There is no
+                     choice here now, so it was a standing disclaimer rather than anything
+                     anyone could act on. The caveats themselves have not changed: the relay
+                     drives someone else's web UI and breaks when that UI changes, which is
+                     what the "Bridge selectors" block below exists to repair without a
+                     reinstall, and whether automated use is permitted is a question for
+                     whoever approves the rollout. -->
+
+                <!-- EVERY FIELD FROM HERE TO THE SELECTORS BLOCK IS HIDDEN ON PURPOSE.
+                     They are the relay's tuning, and the shipped values are the tuned ones:
+                     M365 Copilot, a minimized window, 90,000 characters a message, 8 parts.
+                     The inputs stay in the DOM because readProviderFieldsToConfig() reads
+                     every one of them on Save — deleting them would write blanks back over
+                     the config. Drop the display:none to expose any of them again. -->
+                <div class="fld" style="display:none">
+                    <span class="flbl">Chat to relay through</span>
+                    <!-- ONE DESTINATION. This list carried copilot.microsoft.com, claude.ai
+                         and chatgpt.com as well. Hidden is not the same as absent: the field
+                         is read on every Save, so a stored value from an older build — or a
+                         hand-edit — put the relay's full unredacted case content somewhere
+                         other than the tenant. BRIDGE_TARGETS now holds one entry and any
+                         other value resolves to it, but the markup should not advertise
+                         destinations the build refuses to reach. -->
+                    <select class="fsel" id="bridgeTargetSel">
+                        <option value="m365" selected>Microsoft 365 Copilot — m365.cloud.microsoft</option>
+                    </select>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Where the relay runs</span>
+                    <select class="fsel" id="bridgeRelayMode" title="The relay needs a real browser tab. This decides how visible that tab is.">
+                        <option value="minimized">Minimized window — out of sight (recommended)</option>
+                        <option value="window">Separate window — visible, unfocused</option>
+                        <option value="tab">Background tab in this window</option>
+                    </select>
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        It keeps one window and reuses it, and never touches a Copilot tab you
+                        opened yourself. If a minimized window stops rendering and the composer
+                        cannot be found, it is restored automatically and retried.
+                    </div>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Override URL (optional)</span>
+                    <input class="finput" id="bridgeUrl" placeholder="leave blank to use the default above" style="font-family:monospace;font-size:11px">
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Max size of one message (characters)</span>
+                    <input class="finput" id="bridgeMaxChars" type="number" min="2000" max="200000" step="1000" value="90000" style="font-family:monospace;font-size:11px">
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        How much the chat box accepts <em>at once</em> — not how much of the case
+                        the model gets, which is this × the parts below. If the box turns out to
+                        hold less, the relay measures it and re-splits automatically rather than
+                        failing.
+                    </div>
+                </div>
+
+                <!-- The one setting that decides whether the model sees the case or a fragment
+                     of it. A message box caps a MESSAGE; a conversation caps nothing, so a case
+                     too big to type at once is sent as consecutive messages and only the last
+                     asks a question. -->
+                <div class="fld" style="margin-top:12px;display:none">
+                    <span class="flbl">Context parts per conversation</span>
+                    <input class="finput" id="bridgeMaxParts" type="number" min="1" max="12" step="1" value="8" style="font-family:monospace;font-size:11px">
+                    <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                        A big case is sent as several messages, and only the last one asks the
+                        question — the earlier ones are reference material the model is holding.
+                        <strong id="bridgeBudgetNote">8 parts ≈ 92,000 characters of case.</strong>
+                        Each part is a round trip, so more parts means a slower first token.
+                        Set to 1 to send a single message, as older builds did.
+                    </div>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="bridgeCondenseOverflow" style="margin-top:2px;flex-shrink:0">
+                        <span>
+                            <span class="flbl" style="margin-bottom:0">Condense a case that is bigger than that</span>
+                            <span style="display:block;font-size:10px;color:var(--txt2);margin-top:4px;line-height:1.5">
+                                Sends the case material through the same chat first, asking it to
+                                come back shorter, and analyses the result. Costs one extra round
+                                trip per chunk. Any log line reference that comes back and cannot
+                                be found in the original is flagged in place — a condensed log can
+                                gain a citation that never existed, and it reads exactly like a
+                                real one. Off, the tail is trimmed and the cut is declared.
+                            </span>
+                        </span>
+                    </label>
+                </div>
+
+                <div class="fld" style="margin-top:12px;display:none">
+                    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="bridgeCleanupChats" style="margin-top:2px;flex-shrink:0">
+                        <span>
+                            <span class="flbl" style="margin-bottom:0">Delete the relay's own chats afterwards</span>
+                            <span style="display:block;font-size:10px;color:var(--txt2);margin-top:4px;line-height:1.5">
+                                Off by default. Each relayed chat is titled with the case number
+                                it came from, so the Copilot history reads as a record you can
+                                navigate — deleting it throws that away. Turn this on if you would
+                                rather the bridge left no trace. Either way it only ever removes
+                                conversations this tool created, identified by that title, and it
+                                leaves everything else alone.
+                            </span>
+                        </span>
+                    </label>
+                </div>
+
+                <!-- HIDDEN, NOT REMOVED — and the distinction matters more here than
+                     anywhere else in this modal. readProviderFieldsToConfig() reads these
+                     four inputs on every Save: delete them and val() returns '' for each,
+                     which writes selectors:null back over whatever custom selectors were
+                     stored, silently, the next time anyone presses Save. Hiding leaves the
+                     stored values intact and still loaded into the boxes.
+
+                     This is also the repair kit for the one failure this relay is
+                     guaranteed to hit eventually — Microsoft changes the composer markup,
+                     the bridge cannot find where to type, and these selectors are what
+                     fixes it without a reinstall. Unhide this block when that day comes. -->
+                <details style="margin-top:12px;display:none">
+                    <summary style="font-size:11px;color:var(--txt2);cursor:pointer">Bridge selectors (fix here when the site's layout changes)</summary>
+                    <div class="fld" style="margin-top:10px">
+                        <span class="flbl">Message box</span>
+                        <input class="finput" id="bridgeSelComposer" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div class="fld" style="margin-top:8px">
+                        <span class="flbl">Send button</span>
+                        <input class="finput" id="bridgeSelSend" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div class="fld" style="margin-top:8px">
+                        <span class="flbl">Stop button (marks "still generating")</span>
+                        <input class="finput" id="bridgeSelStop" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div class="fld" style="margin-top:8px">
+                        <span class="flbl">Answer container</span>
+                        <input class="finput" id="bridgeSelAssistant" placeholder="built-in defaults" style="font-family:monospace;font-size:10px">
+                    </div>
+                    <div style="font-size:10px;color:var(--txt2);margin-top:6px;line-height:1.5">
+                        Comma-separated CSS selectors, tried left to right. Blank = the built-in list.
+                    </div>
+                </details>
+
+                <!-- Chrome will not let an extension read a tab it has no host permission
+                     for, and the optional grant can only be asked for from a click. Without
+                     a button of its own, the only way to ask was to change the provider or
+                     press Save — so switching the TARGET here left the new host ungranted
+                     and every request died on "Extension manifest must request permission
+                     to access this host". This states the grant and repairs it in one click. -->
+                <div id="bridgeGrantRow" style="display:flex;gap:8px;align-items:center;margin-top:12px">
+                    <button type="button" class="btn" id="btnBridgeGrant" style="flex:1;background:var(--bg3)">Grant access</button>
+                </div>
+                <div id="bridgeGrantStatus" style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5"></div>
+
+                <button type="button" class="btn" id="btnBridgeTest" style="width:100%;margin-top:10px;background:var(--bg3)">Test Copilot Bridge Connection</button>
+                <button type="button" class="btn" id="btnBridgeCleanNow" style="display:none;width:100%;margin-top:8px;background:var(--bg3)">Clean up relay chats now</button>
+            </div>
+
+
+            <div class="fld" style="margin-top:12px;display:none">
+                <span class="flbl">Context Size (num_ctx)</span>
+                <select class="fsel" id="localAiCtxSel" title="Maximum context window for log analysis. Auto uses up to 64K when the model supports it. Lower this if you run out of GPU memory.">
+                    <option value="auto">Auto (recommended)</option>
+                    <option value="8192">8K — low VRAM</option>
+                    <option value="16384">16K</option>
+                    <option value="32768">32K</option>
+                    <option value="65536">64K</option>
+                    <option value="131072">128K — max</option>
+                </select>
+            </div>
+
+            <div class="fld" style="margin-top:12px">
+                <span class="flbl" style="font-size:12px;font-weight:700;color:var(--txt1);text-transform:none;letter-spacing:0;margin-bottom:2px">Answer Language</span>
+                <select class="fsel" id="answerLangSel" title="The language the Case Summary + Next Steps and the customer email draft are written in. Auto reads it from the case itself — the email chain and the issue summary — and answers in the customer's language. Pick a language to always answer in that one, whatever the case is written in.">
+                    <option value="auto">Auto — match the case</option>
+                    <option value="English">English</option>
+                    <option value="French">French</option>
+                    <option value="Spanish">Spanish</option>
+                    <option value="German">German</option>
+                    <option value="Italian">Italian</option>
+                    <option value="Russian">Russian</option>
+                </select>
+                <div style="font-size:10px;color:var(--txt2);margin-top:5px;line-height:1.5">
+                    Auto detects the case's language from the email chain and issue summary. The
+                    three section headers stay in English either way — the case record is indexed by them.
+                </div>
+            </div>
+
+            <!-- THE ENGINEER'S OWN BOOKING PAGES. Optional, and empty by default: when one is
+                 set, a drafted email that genuinely needs a live session carries the link and
+                 an agenda built from what the case needs, instead of "let me know when suits".
+                 With none set the draft asks for availability the normal way — it never
+                 invents a URL. Every URL is validated as http(s) before it can reach a customer.
+
+                 IT IS A LIST BECAUSE ONE FIELD MEANT EDITING SETTINGS BETWEEN DRAFTS. An
+                 engineer routinely has a 30-minute triage page and a 60-minute deep-dive page,
+                 or their own and their team's, and which is appropriate is a property of the
+                 case. THE NAME IS THE FEATURE rather than a label on it: three Microsoft
+                 Bookings URLs are indistinguishable from one another, so a picker showing URLs
+                 would be a picker nobody could use.
+
+                 THE FIRST ROW IS THE DEFAULT. It is the one the automatic meeting offer uses,
+                 and the one "With a meeting request" takes without asking when it is the only
+                 one there. Rendered by renderBookingsLinkRows(); read back on Save. -->
+            <div class="fld" style="margin-top:12px">
+                <span class="flbl" style="font-size:12px;font-weight:700;color:var(--txt1);text-transform:none;letter-spacing:0;margin-bottom:2px">Bookings Links</span>
+                <div class="bk-rows" id="bkRows"></div>
+                <div class="bk-empty" id="bkEmpty" style="display:none">
+                    No bookings link yet. Add one and “📅 Draft with a meeting request” in Quick Options
+                    can put it in a draft with an agenda under it.
+                </div>
+                <button class="bk-add" id="bkAdd" type="button"
+                        title="Add another booking page. Give each one a name — the picker that appears when you draft a meeting request shows the names, and Microsoft Bookings URLs are indistinguishable from each other.">
+                    <span class="bk-add-plus">+</span> Add a bookings link
+                </button>
+                <div style="font-size:10px;color:var(--txt2);margin-top:7px;line-height:1.5">
+                    The <strong>first</strong> link is the default: it is the one added automatically
+                    when a draft genuinely needs a session — On-Prem log collection, a session already
+                    offered, or the customer asking for one — always followed by an agenda naming the
+                    artefacts to be collected. Press <strong>📅 Draft with a meeting request</strong> in Quick
+                    Options to ask for one deliberately, and to choose between these when there is more
+                    than one.
+                </div>
+            </div>
+
+            <!-- THE "FIRST-TIME LOCAL AI SETUP" BOX AND ITS INSTALLER DOWNLOAD ARE GONE.
+                 They walked the engineer through installing a model server on their own
+                 machine and pulling a 7 GB model. There is no on-device engine to install:
+                 the panel relays through the Copilot tab the engineer is already signed in
+                 to, which needs no setup at all. -->
+            <div id="localAiStandaloneHelp" style="display:none;padding:10px 12px;border-radius:8px;margin-top:14px;font-size:11px;color:var(--txt2);background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.35);line-height:1.65">
+                <strong style="color:var(--txt1);display:block;margin-bottom:5px">Standalone browser mode</strong>
+                <div>This page is running outside the Chrome extension, so the Copilot relay — which
+                     needs the extension's tab access — is not available. Load the extension at
+                     <code style="font-size:10px">chrome://extensions</code> and open it from the side panel,
+                     or configure an API provider above.</div>
+            </div>
+
+            <div style="border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 15px"></div>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <strong style="color:var(--txt1);font-size:12px;display:flex;align-items:center;gap:6px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+                    SOTI Pulse Offline Sync
+                </strong>
+            </div>
+            <div class="fld">
+                <span class="flbl">Master Markdown URL</span>
+                <input class="finput" id="pulseSyncUrl" value="https://pulse.soti.net/support/soti-mobicontrol" placeholder="Enter remote .md URL or local path" style="font-family:monospace;font-size:11px">
+            </div>
+            
+            <div style="display:flex;align-items:center;gap:10px;margin-top:12px">
+                <button type="button" class="btn" id="btnSyncPulse" style="background:var(--bg3);flex-shrink:0;padding:6px 10px">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-2px"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Sync Now
+                </button>
+                <div id="pulseSyncStatus" style="font-size:10px;color:var(--txt2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Never synced</div>
+            </div>
+
+            <!-- SYNC NOW ONLY FETCHES WHAT IT DOES NOT ALREADY HAVE.
+                 The compiled knowledge file IS the index of what has been captured, so a page
+                 already in it is carried through rather than downloaded again — which is the
+                 difference between four pages and ten thousand. Index and release-notes pages
+                 are always re-read (that is where new pages get linked from), and every page
+                 expires after a month so the base rolls over on its own.
+
+                 This box is the escape hatch for a knowledge base that has gone wrong in some
+                 way the incremental path cannot see. It is off by default because the whole
+                 point of the change is that you should not need it. -->
+            <label style="display:flex;align-items:center;gap:7px;margin-top:9px;font-size:10.5px;color:var(--txt2);cursor:pointer">
+                <input type="checkbox" id="pulseFullResync" style="accent-color:var(--blue);cursor:pointer">
+                <span>Full re-sync — re-download every page, ignoring what is already stored</span>
+            </label>
+
+            <div style="border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 15px"></div>
+
+            <!-- THE OTHER KNOWLEDGE BASE — the one behind the engineer's own Salesforce login.
+                 Pulse is SOTI's public documentation; this is what support actually did about
+                 the same problem the last four times, written by the people who did it. Kept
+                 as records rather than as a markdown file because it is per-engineer (they see
+                 what their permissions allow), because every article has a status that decides
+                 whether it may be quoted to a customer, and because it changes one article at
+                 a time. See the SfKb block in sidepanel.js. -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <strong style="color:var(--txt1);font-size:12px;display:flex;align-items:center;gap:6px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                    Salesforce Knowledge Articles
+                </strong>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <button type="button" class="btn" id="btnSyncSfKb" style="background:var(--bg3);flex-shrink:0;padding:6px 10px">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-2px"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Sync Knowledge
+                </button>
+                <button type="button" class="btn" id="btnDownloadKbMd" style="background:var(--bg3);flex-shrink:0;padding:6px 10px"
+                        title="Save the compiled corpus — every published and draft article the sync could read">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    KB Articles.md
+                </button>
+                <button type="button" class="btn" id="btnLoadKbMd" style="background:var(--bg3);flex-shrink:0;padding:6px 10px"
+                        title="Load a KB Articles.md back in — restores a knowledge base without re-reading every article page">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;vertical-align:-2px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                    Load .md
+                </button>
+                <input type="file" id="kbMdFile" accept=".md,.markdown,text/markdown,text/plain" style="display:none">
+                <div id="sfKbStatus" style="font-size:10px;color:var(--txt2);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Not synced yet</div>
+            </div>
+            <label style="display:flex;align-items:center;gap:7px;margin-top:9px;font-size:10.5px;color:var(--txt2);cursor:pointer">
+                <input type="checkbox" id="sfKbFullResync" style="accent-color:var(--blue);cursor:pointer">
+                <span>Full re-sync — re-read every article, not only the changed ones</span>
+            </label>
+
+            <div style="border-top:1px solid rgba(255,255,255,0.1);margin:20px 0 15px"></div>
+
+            <div style="padding:10px 12px;border-radius:8px;font-size:11px;color:var(--txt2);background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.3);line-height:1.6">
+                <strong style="color:var(--txt1);display:block;margin-bottom:5px">🔒 Data &amp; Privacy</strong>
+                <div style="margin-bottom:8px">Cases and their logs are stored locally on this device and auto-deleted after <strong>30 days of inactivity</strong>. Nothing is uploaded. Use the button below to wipe everything now.</div>
+                <button type="button" class="btn" id="btnClearAllData" style="width:100%;background:rgba(239,68,68,0.15);color:#fca5a5;border:1px solid rgba(239,68,68,0.4)">Clear all cases &amp; logs now</button>
+            </div>
+
+            <!-- WHICH PARTS OF THIS PANEL ACTUALLY GET USED.
+                 Counters, in real time, of every Quick Option pressed, every sync, every
+                 👍/👎, and how long each case stays open. It is a FEEDBACK system: the point
+                 is to know what people reach for, so what gets built next is the thing being
+                 used and what gets removed is the thing that is not — a panel of twenty
+                 shortcuts where five are pressed is a panel where the five are hard to find.
+
+                 IT IS SHOWN BEFORE IT IS SHARED. The report is printed here and "Copy report"
+                 puts the exact bytes on the clipboard, because the one thing that would make
+                 this unacceptable is an engineer not being able to see what left their
+                 machine. There is no case number, account, customer, subject, log line, prompt
+                 or answer in it — no free text at all except your own name and the panel
+                 version. Sending is a button, and once-a-day is off until it is ticked.
+                 See "USAGE & FEEDBACK" in sidepanel.js for why it opens a tab rather than
+                 posting anywhere — which is now the ONLY thing it can do. The Power Automate
+                 route that POSTed this report to a tenant endpoint has been removed; the
+                 panel originates no request of its own again. -->
+            <!-- ADMINS ONLY, so it is not in the dialog at all.
+
+                 Folding it away was the previous answer and it was the wrong one: a fold
+                 hides the LENGTH of a section, not the section, and everything inside this
+                 one is an administrator's question rather than an engineer's. "How many
+                 times has this install pressed Draft Email", "where does the report go",
+                 "clear the counters" — none of that is a decision the person using the
+                 panel makes, and offering it to them invites the two mistakes that actually
+                 happen: somebody clears their own counters, or somebody points the
+                 dashboard address at a board that is not the team's.
+
+                 COUNTING IS UNAFFECTED. Nothing here is a switch on the recorder — every
+                 counter is written by the actions themselves (see noteUsage) and keeps
+                 being written with this box on screen or off it. This is the readout, and
+                 hiding a readout does not stop the thing it reads.
+
+                 STILL REACHABLE, by the one group it is for. `soti_usage_admin` in
+                 chrome.storage.local reveals it — see revealUsageSectionForAdmins(). A flag
+                 rather than an identity because there is no identity to check here: the
+                 panel has no account of its own and no directory to ask, so the honest
+                 mechanism is a local switch an admin sets on the machine they are looking
+                 at. It is not a security control and must not be read as one; anything that
+                 can set that key could read the counters out of the same store directly. -->
+            <div class="fld" id="usageFld" hidden
+                 style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+                <!-- CLOSED UNTIL IT IS ASKED FOR. This is a long section — a printed report,
+                     four buttons, two text fields and a checkbox — and it sat open at the
+                     bottom of AI Settings, so every visit to Settings for a model or an API
+                     key ended in a wall of counters nobody came for. It is the least urgent
+                     thing in this dialog and it was taking the most room in it.
+                     The heading stays visible, so it can still be FOUND; only its body is
+                     folded away. -->
+                <button type="button" class="usage-head" id="usageToggle"
+                        aria-expanded="false" aria-controls="usageSection"
+                        title="Counters kept on this device, and where they can be shared. Nothing here is on until you turn it on.">
+                    <span class="usage-head-t">📊 Usage &amp; Feedback</span>
+                    <span class="usage-head-i" id="usageIcon" aria-hidden="true">▶</span>
+                </button>
+                <div id="usageSection" style="display:none">
+                <div style="font-size:10px;color:var(--txt2);margin:2px 0 10px;line-height:1.55">
+                    Counted on this device: which Quick Options you press, how often you sync, how
+                    long your cases stay open, and your 👍/👎. <strong>No case content of any
+                    kind</strong> — no case number, account, customer, subject, log text, question
+                    or answer.
+                </div>
+
+                <div class="usage-panel" id="usageBody"></div>
+
+                <div class="usage-acts">
+                    <button type="button" class="usage-btn" id="usageOpenBoard"
+                            title="Open the board that ships with this extension, with your counters already on it. It is a page inside the extension, so nothing is uploaded and it works with the network off.">Open my board</button>
+                    <button type="button" class="usage-btn" id="usageSend"
+                            title="Open the shared dashboard in a background tab with this report on the end of the address. The dashboard page writes it into the shared board itself — this extension cannot and does not post anywhere.">Send to the dashboard</button>
+                    <button type="button" class="usage-btn" id="usageCopy"
+                            title="Put the exact report on the clipboard, as JSON, so you can read every byte of what would be sent.">Copy report</button>
+                    <button type="button" class="usage-btn usage-btn-danger" id="usageReset"
+                            title="Delete the counters on this device. Anything already sent to the dashboard stays there.">Clear counters</button>
+                </div>
+
+                <label class="usage-lab" for="usageName">Your name, as the dashboard shows it</label>
+                <input class="finput usage-input" id="usageName" type="text" maxlength="60"
+                       placeholder="Read from Salesforce automatically — type here to override"
+                       title="Filled in from Salesforce's own header the first time you sync a case, so the dashboard reads as names rather than as random ids. Clear it to be counted anonymously — the install still has a random id of its own.">
+
+                <label class="usage-lab" for="usageDashUrl">Shared dashboard address</label>
+                <input class="finput usage-input" id="usageDashUrl" type="url"
+                       style="font-family:var(--mono);font-size:10.5px"
+                       placeholder="Empty — nothing is shared"
+                       title="The shared usage board. Empty by default, and while it is empty nothing is shared — every counter above still works and stays on this device. Paste your team's board here to start sharing.">
+
+                <label class="usage-auto" title="Sends at most once a day, and only when something has actually been used since the last time. Off until you turn it on.">
+                    <input type="checkbox" id="usageAuto">
+                    <span>Send automatically, once a day</span>
+                </label>
+                </div><!-- /#usageSection -->
+            </div>
+
+            <div class="mact" style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px">
+                <!-- THE WAY INTO ADMIN MODE, and it is deliberately not signposted.
+
+                     Usage & Feedback is hidden because it is an administrator's screen (see
+                     revealUsageSectionForAdmins), and the flag that reveals it lived only in
+                     chrome.storage.local — which meant the honest answer to "how does an admin
+                     turn it on" was "open DevTools", and that is not an answer.
+
+                     WHY IT IS A CORNER AND NOT A CHECKBOX. A labelled "Admin mode" tick in this
+                     dialog is a labelled invitation: the engineers this section was hidden FROM
+                     would find it first, tick it to see what it does, and the section would be
+                     back on everyone's screen — which is the whole thing being fixed. A control
+                     nobody stumbles over is the point, not an oversight.
+
+                     IT IS NOT A SECURITY BOUNDARY and nothing here pretends otherwise. Anything
+                     that can click this can already read the counters straight out of storage.
+                     It decides what the dialog OFFERS.
+
+                     IN FLOW, NOT ABSOLUTE. First child of a flex-end row with margin-right:auto,
+                     so it parks against the dialog's bottom-left corner and can never drift over
+                     Cancel or Save the way an absolutely-positioned box would on a narrow panel.
+
+                     tabindex="-1" and aria-hidden: an unnamed 22px square in the tab order of a
+                     dialog every engineer opens is worse for a keyboard user than not being
+                     there at all. The storage key stays the documented second route. -->
+                <button type="button" class="admin-spot" id="adminSpot" tabindex="-1"
+                        aria-hidden="true" style="margin-right:auto"></button>
+                <button type="button" class="btn btn-sec" id="btnCancelSettings">Cancel</button>
+                <button class="btn btn-ok" id="btnSaveLocalAI" style="background:var(--blue);color:#fff;border:none">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Power Monitor — machine profile, live memory/CPU, throttle knobs and the
+         AI performance log. Everything the panel renders comes from window.SotiPower. -->
+    <div class="backdrop" id="mPower" style="display:none">
+        <div class="modal m-power">
+            <div class="mhdr" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                <div class="mtitle" style="display:flex;align-items:center;gap:8px">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
+                    Power Monitor
+                </div>
+                <button class="mcls" id="mPowerClose" style="background:none;border:none;color:var(--txt2);font-size:20px;cursor:pointer">×</button>
+            </div>
+
+            <!-- What this app has decided it may use on THIS machine -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">This machine</div>
+                <div class="pwr-grid" id="pwrProfile"></div>
+                <div class="pwr-note" id="pwrBudgetNote"></div>
+            </div>
+
+            <!-- Live usage against that decision -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">Right now</div>
+                <div class="pwr-meter-row">
+                    <div class="pwr-meter-label"><span>Memory</span><span id="pwrMemVal">—</span></div>
+                    <div class="pwr-meter"><div class="pwr-meter-fill" id="pwrMemFill"></div></div>
+                </div>
+                <div class="pwr-meter-row">
+                    <div class="pwr-meter-label"><span>Responsiveness</span><span id="pwrLagVal">—</span></div>
+                    <div class="pwr-meter"><div class="pwr-meter-fill" id="pwrLagFill"></div></div>
+                </div>
+                <div class="pwr-grid" id="pwrLive"></div>
+            </div>
+
+            <!-- The throttles currently in force -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">Active limits</div>
+                <div class="pwr-grid" id="pwrKnobs"></div>
+            </div>
+
+            <!-- The internal AI performance log -->
+            <div class="pwr-section">
+                <div class="pwr-section-title">AI performance <span class="pwr-sub">— by request type</span></div>
+                <div class="pwr-table-wrap"><table class="pwr-table" id="pwrSummary"></table></div>
+            </div>
+
+            <div class="pwr-section">
+                <div class="pwr-section-title">Recent activity <span class="pwr-sub">— newest first</span></div>
+                <div class="pwr-table-wrap pwr-scroll"><table class="pwr-table" id="pwrLog"></table></div>
+            </div>
+
+            <div class="mact" style="display:flex;justify-content:space-between;gap:10px;margin-top:18px">
+                <div style="display:flex;gap:8px">
+                    <button class="btn" id="btnPowerFree" title="Drop rebuildable caches now">Free memory now</button>
+                    <button class="btn" id="btnPowerCopy" title="Copy this report for a bug report">Copy report</button>
+                </div>
+                <button class="btn btn-sec" id="btnPowerDone">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- power.js MUST load before sidepanel.js: sidepanel's governor bridge reads
+         window.SotiPower at definition time, and the hot paths consult it from the
+         very first log scan. It degrades to static defaults if this file is absent. -->
+    <script src="power.js?v=2.7.1"></script>
+    <script src="ai-provider.js?v=2.9.0"></script>
+    <script src="lib/tesseract.v5.min.js"></script>
+    <script src="sidepanel.js?v=2.9.0"></script>
+    <!-- Generation Loading Modal — real progress (driven by JiraProgress in sidepanel.js) -->
+    <div class="backdrop" id="mGen" style="display:none">
+        <div class="modal" style="text-align:center; max-width:340px">
+            <div class="w-title" style="font-size:14px">Generating JIRA Report</div>
+            <div class="jira-prog-pct" id="jiraProgPct">0%</div>
+            <div class="jira-prog-bar"><div class="jira-prog-fill" id="jiraProgFill"></div></div>
+            <div class="jira-prog-stage" id="jiraProgStage">Preparing case data...</div>
+            <div class="mact" style="display:flex;justify-content:center;margin-top:18px">
+                <button class="btn btn-sec" id="btnCancelJiraGen">Cancel</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

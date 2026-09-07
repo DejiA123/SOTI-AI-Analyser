@@ -28,3 +28,26 @@ Extension/lib/tesseract.min.js
 # extension ID. Needed only to publish a .crx under the same ID. NEVER commit.
 *.pem
 soti-extension-signing-key.pem
+
+# The compiled Salesforce Knowledge corpus. NEVER COMMIT — this repository is public.
+#
+# "KB Articles.md" is ~1,958 compiled Knowledge articles, and the code that loads it says
+# what they are: "the engineer's own permissioned articles, compiled on their device by
+# their own sync". That is internal SOTI Support content, not the public Pulse and docs
+# pages the other knowledge/*.md files hold, and it does not belong in a public repository.
+#
+# It is also how a real credential nearly got out. GitHub push protection blocked a commit
+# carrying this file because one article had pasted a live-shaped Slack user OAuth token
+# (xoxp-…) into its worked example. That is the general shape of the risk: a support KB
+# accumulates whatever engineers pasted into it over years, so the corpus cannot be
+# reviewed once and then declared clean for ever.
+#
+# Globbed across every extension folder, because the folder name carries the version and is
+# renamed on every release ("Extension v8.0.0" today).
+#
+# THE EXTENSION STILL SHIPS IT. It is the seed corpus a fresh install loads before the
+# engineer has synced their own — see SF_KB_BUNDLED_PATH in sidepanel.js. It travels in the
+# distributed folder, not through git, so anyone rebuilding a release folder from this
+# repository has to put it back in by hand or leave first-run search empty until a sync.
+Extension*/knowledge/KB Articles.md
+Extension*/knowledge/KBArticles.md

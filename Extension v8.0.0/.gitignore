@@ -1,0 +1,11 @@
+# SOTI AI Analyser — Git Ignore Rules
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor artifacts
+.vscode/
+*.swp
+*~
