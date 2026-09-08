@@ -6030,8 +6030,8 @@ function paintCaseMismatch(info) {
         const named = info.panelNum ? `Open ${info.panelNum} in Salesforce` : 'Open this case in Salesforce';
         open.textContent = named;
         open.title = info.panelNum
-            ? `Bring up ${info.panelNum} — the case this app is working on — in Salesforce.`
-            : 'Bring up the case this app is working on in Salesforce.';
+            ? `Bring up ${info.panelNum} — the case this tool is working on — in Salesforce.`
+            : 'Bring up the case this tool is working on in Salesforce.';
     }
 
     /* "Work on the case on screen" is only offered for a case this panel already HOLDS.
