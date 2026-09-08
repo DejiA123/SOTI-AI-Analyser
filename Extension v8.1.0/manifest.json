@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SOTI AI Analyser",
-  "version": "8.0.0",
+  "version": "8.1.0",
   "description": "Intelligent SOTI Log Analysis & Salesforce Integration",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqSsDHm/c2NJxtV7Ui5vI6iLdhuYYIPH8GTiHwtlxoHCOA054y66mn1AlIVPkdnijGrJsWx9LojUrZlIZ0yA0wIjbKq0MDEEMqm97jaSw7gKquGaK02I7OKz493QNk7oLvPkvI3o2Vmcr0KyjixYSusaadXPszWAxpIxnamnuWE3SAnkVwnB8uMkPhwkwnXI1QmF78xHysZhulgBZRjZjvDhBW0gbw6nLBHZGou3zmBjo+Wp2VDqoFoSW0dErTx4X84lp08K5dyNMFPAZLRPlyh/LX1x7iOT36M+VqaE66J9BrPqcxRdVmqJqELhc4hf9VSth8tA2X7JHDV1KaPOHRwIDAQAB",
   "permissions": [
