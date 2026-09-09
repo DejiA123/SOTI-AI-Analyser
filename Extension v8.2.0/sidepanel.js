@@ -15615,13 +15615,55 @@ function buildCaseSignalsBlock(sig, kind, small, lc, sections) {
  * ========================================================================= */
 const CLOSURE_TEMPLATES = [
     {
+        /* THE FINAL CLOSURE CONFIRMATION — the end of the GOOD path, and FIRST because of what
+         * it collides with.
+         *
+         * This is the email that goes out once the customer has confirmed the fix: it thanks
+         * them for confirming, says the case is being closed, mentions the survey, and offers
+         * the 30-day reopen. It can be the last thing on a chain even when the customer never
+         * writes again — they have already said what they needed to say — so "no reply after
+         * it" must NEVER be read as the customer having gone silent on us.
+         *
+         * It shares its whole final paragraph with the Close 3x soft-closure notice (the Log a
+         * Case Webform line, the Customer Portal line, the 30-day reopen), which is exactly how
+         * a resolved case came to be written up as "close as CUSTOMER UNRESPONSIVE". The
+         * markers below are only what this email has and that one does not: the customer's
+         * confirmation being thanked, the case being closed as DISCUSSED rather than for want
+         * of a reply, and the survey. */
+        key: 'final-closure',
+        label: 'the final closure confirmation (the customer confirmed the fix)',
+        need: 1,
+        markers: [
+            /\bthank(?:s| you)[^.\n]{0,40}\bfor confirming\b/i,
+            /\b(?:moving|move) forward to clos(?:e|ing)\b|\bas discussed,? (?:i|we)[''’`]?(?:ll| will| am| are)?\s*(?:be )?(?:moving|proceed)/i,
+            /\byou may receive a survey\b|\bfollowing the closure,? you may receive\b/i,
+            /\bsoti pulse ai chat ?bot\b/i
+        ]
+    },
+    {
         key: 'unresponsive-3',
         label: 'the 3rd attempt / soft-closure notice (Close 3x)',
         need: 1,
+        /* "Log a Case Webform" WAS ON THIS LIST, and taking it off is the reason this comment
+         * exists. That sentence — and the Customer Portal one beside it — appears word for
+         * word in the FINAL CLOSURE email as well: the two templates share a whole closing
+         * paragraph. With `need: 1` that made a case whose customer had just confirmed the
+         * fix match HERE, and it was written up as "close as CUSTOMER UNRESPONSIVE" — a wrong
+         * status on a happy customer's own record, arrived at from their good news.
+         *
+         * What is left is what only this email says: two attempts made, and the soft closure
+         * being applied now. Shared vocabulary is not evidence, however distinctive it looks. */
+        /* AND THE "marking this case with a soft closure" TEST MUST KEEP ITS SUBJECT.
+         *
+         * A bare `marking this case with a soft closure` also matches the SECOND attempt,
+         * which warns that "a third attempt without a response WILL RESULT IN marking this
+         * case with a soft closure". The committed forms — we'll be / we will be / we are —
+         * are what separate the act from the warning about it, and dropping them read every
+         * 2nd attempt as a 3rd and closed the case an email early. "in line with our policy"
+         * is safe as a fourth because only this email puts it AFTER the phrase. */
         markers: [
             /\bwe[''’`]?ve made two attempts\b|\bwe have made (?:two|2|three|3) attempts\b|\bmade (?:two|2|three|3) attempts to (?:connect|contact|reach)\b/i,
-            /\bwe[''’`]?ll be marking this case with a soft closure\b|\bwe will be marking this case with a soft closure\b|\bwe are marking this case with a soft closure\b/i,
-            /\blog a case webform\b/i
+            /\bwe[''’`]?ll be marking this case with a soft closure\b|\bwe will be marking this case with a soft closure\b|\bwe are marking this case with a soft closure\b|\bsoft closure in line with (?:our )?policy\b/i
         ]
     },
     {
@@ -15677,6 +15719,21 @@ const CLOSURE_TEMPLATES = [
  * knows whether today is the day.
  */
 const CLOSURE_STAGE_NEXT = {
+    /* THE GOOD PATH'S LAST STEP. An ORDINARY close — never "customer unresponsive", however
+     * long the chain has been quiet since. The customer confirmed the fix; there is nothing
+     * they still owe us, so silence after this email means the matter is finished, not that
+     * they have stopped answering. Saying otherwise puts the wrong Sub-Status on the record of
+     * a customer who did everything right. */
+    'final-closure': {
+        closes: true,
+        wait: '',
+        steps: [
+            'Proceed with closing the case, per the closure process — the customer confirmed the issue is resolved and the closure confirmation email has already been sent.',
+            'Note the customer can reopen the case within 30 days by replying to that email.'
+        ],
+        forbid: 'Do NOT close this case as "customer unresponsive" and do NOT treat the silence since that email as a missed reply: the customer already confirmed the fix, and this email told them the case was being closed. Do NOT propose any chase-up email.',
+        email: 'The closure confirmation has already gone out and the customer confirmed the fix, so there is NO further email to send. If one is written at all it can only restate that the case is being closed and that replying within 30 days reopens it. Do NOT restart troubleshooting, do NOT ask questions, and do NOT send a chase-up.'
+    },
     'self-recovery': {
         wait: '2 business days from that email',
         steps: [
