@@ -49,7 +49,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 8.1.0 — one email button instead of three, three stats instead of one, and the tool finally tells you when it is out of date. The email actions were collapsed into "Draft an email to the customer" plus a +: "Draft with a meeting request" and "Account Email" wrote the SAME email from the same builder and differed only in who was copied in and whether a session was asked for, which are two properties of one errand rather than two more errands — so they are ticks now (Account Manager, TAM, everyone on the account, ask for a meeting), and the line under the button says in words what the next press will do. Who to copy in is remembered; the meeting tick is deliberately NOT, because a sticky switch that decides whether a customer is invited to book a call is one somebody leaves on. Stats gained My Stats / Regional / Global — the last two are pages of the shared team report, which lives in a Power BI app and is therefore addressed with appId and pageName rather than groupId. Create JIRA and the internal Problem & Resolution summary moved into + Add actions, where the other two JIRA forms already lived. There is an update button beside the version now: it reads the published version off the GitHub API, shows a dot only when one is strictly newer, and leads with how NOT to lose your data — replace the files in the folder Chrome already loads, never remove the extension, because removing it is Chrome deleting the storage every case and chat lives in. A JIRA link reuses the tab you already have open instead of stacking up a new one per ticket, the "different case" warning says so in plain English with the case number on each button, and the Case Info header carries the case number again.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 8.2.0 — the queue learned which cases are on you, the reach-out column learned what an email is, and the closure process learned where in itself a case is standing. A Focus chip sits beside JIRA on the Cases page: it is computed, not curated, and holds the cases waiting on SOTI, or 7+ days since the last email out, or red on Salesforce\'s own activity dot — a row that has never been synced is deliberately NOT counted as stale, because that would put the whole queue in Focus on the first sync. "Last email sent to customer" now counts EMAILS: it was asking only whether a post came from our side, which a logged call and a Chatter post both answer yes to, so logging a call reset the column to "today" without anything reaching the customer. The three merge paths that refused to blank a field can now clear a stale date, or the old wrong answer would have outlived the fix on every case already synced. Write a Post and Log a Call scroll Salesforce back to the top before they look for the publisher, which is why they used to work only when you happened to be at the top of the page. And the closure process is read as the two SEQUENCES it is rather than as one state: the tool recognises which template last went out and says what follows it — self-recovery to its follow-up, Close 3x from one attempt to the next, and the soft-closure notice to closing as Customer Unresponsive — with a customer reply newer than the template cancelling the whole thing. The Recovery Call Button is no longer mentioned on cases nobody is closing: that block is built only once the case is actually at closure, and it says the button belongs to closing a case rather than to working one.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -104,15 +104,19 @@ let viewMode = 'case';                 // 'case' | 'openCases' | 'stats'
  * else — connect-src still names no Microsoft host, so this document cannot make a request
  * to one, and the frame stays unreadable and unmessageable from out here.
  *
- * STATS_TENANT_ID is optional and empty by default. Power BI's generated URL carries a
- * `ctid` naming the tenant the report lives in, which matters only to somebody signed in
- * to more than one (a guest account in another org): with it, the silent sign-in is aimed
- * at the right tenant instead of whichever one the browser used last. Blank means "the
- * tenant this browser is already in", which is right for everybody on the SOTI tenant.
+ * STATS_TENANT_ID is the `ctid` Power BI's own generated URL carries — the tenant the
+ * report lives in. It used to be blank, on the reasoning that a browser already signed in
+ * to exactly one tenant does not need telling which one. That reasoning holds for a report
+ * in a WORKSPACE, and is why My Stats renders without it. It does NOT hold for a report
+ * reached through an APP: the app has to be resolved as "installed for this user, in this
+ * tenant" before the report inside it can be, and every embed URL Power BI generates for
+ * app content carries the ctid. It costs a signed-in, same-tenant user nothing — the value
+ * below is SOTI's own Entra tenant, read from login.microsoftonline.com/soti.net's public
+ * OpenID configuration — so it is now filled in for all three rather than none.
  */
 const STATS_GROUP_ID = 'f8779279-b9b6-4b54-984a-d7dde638eac5';
 const STATS_REPORT_ID = '6c8f5ea0-4de2-4a28-9b3f-c1d091992764';
-const STATS_TENANT_ID = '';
+const STATS_TENANT_ID = 'b87215bf-6fb2-4a8a-86c7-fd1bb1cd930c';
 const STATS_REPORT_URL = 'https://app.powerbi.com/groups/' + STATS_GROUP_ID
     + '/reports/' + STATS_REPORT_ID + '/ReportSection?experience=power-bi';
 const STATS_EMBED_URL = 'https://app.powerbi.com/reportEmbed?reportId=' + STATS_REPORT_ID
@@ -127,15 +131,18 @@ const STATS_EMBED_URL = 'https://app.powerbi.com/reportEmbed?reportId=' + STATS_
  * a report published inside an APP, which Power BI addresses as
  * `/groups/me/apps/<appId>/reports/<reportId>/<section>`: `groups/me` there is a
  * placeholder meaning "wherever this is installed for you", NOT a workspace id, so
- * there is nothing in it to pass as `groupId` and passing one would aim the embed at a
- * workspace that does not hold the report.
+ * there is nothing IN THAT URL to pass as `groupId`.
  *
- * The embed address takes `appId` INSTEAD of `groupId` for exactly this case — it is
- * what Power BI's own "Embed report → Website or portal" dialog generates for an app
- * report — and `pageName` for the section. That is the whole of the difference between
- * the three entries below, and it is why they are built by a function rather than
- * written out three times: the two app reports differ from each other in the section
- * id and in nothing else.
+ * The embed address then takes `appId` in place of `groupId`, and `pageName` for the
+ * section. That is the whole of the difference between the three entries below, and it
+ * is why they are built by a function rather than written out three times: the two app
+ * reports differ from each other in the section id and in nothing else.
+ *
+ * That "there is nothing to pass as groupId" is true of the app URL and was once read
+ * here as though it were true of the report — it is not. Every app is published from a
+ * workspace, that workspace has an id, and the embed can be addressed with it. Which of
+ * the two addresses to use is not a matter of taste, and the block further down explains
+ * which one this build sends and why the choice is a single constant.
  *
  * ONE REPORT, TWO PAGES. Regional and Global share a reportId and are told apart only
  * by their ReportSection. That is not a mistake in the addresses — it is how the report
@@ -151,10 +158,53 @@ const STATS_EMBED_URL = 'https://app.powerbi.com/reportEmbed?reportId=' + STATS_
 const STATS_TEAM_APP_ID = '6ffd52ab-a1df-490f-baee-10dcab4809a8';
 const STATS_TEAM_REPORT_ID = 'c9fa0099-4bd2-45dc-9fbf-e04bf6556f9e';
 
+/* WHY THESE TWO SAID "TO VIEW THIS REPORT, ASK THE AUTHOR FOR ACCESS", AND THE ONE LINE
+ * THAT ENDS THE ARGUMENT.
+ *
+ * That screen is Power BI's own no-permission page, shown to somebody who plainly DOES
+ * have permission — the same two pages open normally in a tab. It is worth being precise
+ * about what that rules OUT, because it is nearly everything: the frame was not blocked,
+ * it reached app.powerbi.com, the silent sign-in completed, and Power BI then decided the
+ * signed-in person could not read what was asked for. CSP, framing and autoAuth are
+ * therefore all working — My Stats proves all three in this very frame, on this very
+ * document — and the only thing left to be wrong is WHICH ARTIFACT THE ADDRESS RESOLVES
+ * TO. Nothing below touches the policy pair; there is nothing wrong with it.
+ *
+ * `appId` is not invented: it is how the Power BI REST API addresses a report inside an
+ * app, and it is what the service's own generated embed URL uses for app content. But the
+ * secure-embed flow checks permission on the REPORT ITEM, and a grant that arrives through
+ * an app AUDIENCE is not the same grant as read access to that item in the workspace the
+ * app was published from. Wherever those two differ, an app address is refused in exactly
+ * this way while the app itself carries on opening — which is the report we have.
+ *
+ * So there are two addresses that reach these pages, and only one of them is proven here:
+ *
+ *   · THE APP ADDRESS — reportId + appId + pageName. What is sent when the constant below
+ *     is blank. Correct in shape; depends on the app grant reaching the underlying item.
+ *   · THE WORKSPACE ADDRESS — reportId + groupId + pageName. Worth having not as a second
+ *     guess but because it is SHAPE-IDENTICAL TO THE ONE MY STATS ALREADY RENDERS WITH:
+ *     it is the configuration this frame is known to accept, on this tenant, today.
+ *
+ * STATS_TEAM_GROUP_ID is the workspace the team report is published FROM, and it is the
+ * only thing not already known here. Fill it in and both sub-tabs move to the proven
+ * shape; leave it blank and they stay on the app address. To find it, open the report from
+ * the WORKSPACE rather than from the app, and read the GUID out of the address bar:
+ *
+ *     app.powerbi.com/groups/<THIS ONE>/reports/c9fa0099-…/ReportSection…
+ *
+ * The report id should be that same c9fa0099-… on both sides, because a modern app points
+ * at its workspace's items rather than copying them — so the workspace GUID really is the
+ * whole of the change. If the workspace shows a DIFFERENT report id, that app predates
+ * that behaviour and is holding copies; put the workspace's id in STATS_TEAM_REPORT_ID and
+ * re-read both section ids from the workspace URLs too, since copies renumber their pages.
+ */
+const STATS_TEAM_GROUP_ID = '';
+
 const statsAppReportUrl = (section) => 'https://app.powerbi.com/groups/me/apps/' + STATS_TEAM_APP_ID
     + '/reports/' + STATS_TEAM_REPORT_ID + '/' + section + '?experience=power-bi';
 const statsAppEmbedUrl = (section) => 'https://app.powerbi.com/reportEmbed?reportId=' + STATS_TEAM_REPORT_ID
-    + '&appId=' + STATS_TEAM_APP_ID + '&autoAuth=true&filterPaneEnabled=false'
+    + (STATS_TEAM_GROUP_ID ? '&groupId=' + STATS_TEAM_GROUP_ID : '&appId=' + STATS_TEAM_APP_ID)
+    + '&autoAuth=true&filterPaneEnabled=false'
     + '&pageName=' + encodeURIComponent(section)
     + (STATS_TENANT_ID ? '&ctid=' + STATS_TENANT_ID : '');
 
@@ -2614,8 +2664,10 @@ function renderStatsScope() {
 
     const go = $('statsOpen');
     if (go) {
-        go.title = `Open ${spec.label} in a full browser tab. Use this if the panel below is blank `
-            + 'or asks you to sign in — Microsoft sign-in works there and cannot always complete inside a frame.';
+        go.title = `Open ${spec.label} in a full browser tab. Use this if the panel below is blank, `
+            + 'asks you to sign in, or says to ask the author for access — a full tab reaches the report '
+            + 'through the app, which an embedded frame cannot always do, and Microsoft sign-in can only '
+            + 'complete out there anyway.';
     }
 
     const wrap = $('statsTabs');
@@ -2816,6 +2868,7 @@ function renderOpenCasesList() {
         if (ocSearch) active.push(`matching “${ocSearch}”`);
         if (ocFilterTier !== 'all') active.push('in that tier');
         if (ocOnlyJira) active.push('with a JIRA');
+        if (ocOnlyFocus) active.push('needing action');
         none.textContent = active.length
             ? `No cases ${active.join(', ')}.`
             : 'No cases to show.';
@@ -3046,6 +3099,12 @@ function ocTierRank(rec) {
 // half-empty after a restart.
 let ocFilterTier = 'all';
 let ocOnlyJira = false;
+/* FOCUS — "which of these is actually on me right now".
+ *
+ * Not a tier and not a saved shortlist: it is COMPUTED from what the sync already read, so
+ * there is nothing to curate and nothing to go stale. See ocNeedsAction for the three tests
+ * and why each one is in there. */
+let ocOnlyFocus = false;
 let ocSearch = '';
 let ocSort = 'list';
 
@@ -3514,6 +3573,14 @@ const OC_REACHOUT_WHY = {
     'customer-only':
         'The feed was read, and every post on it came from the customer — nobody here has '
         + 'written to them on this case. That is a real answer, not a missing one.',
+    /* THE ONE THAT LOOKS LIKE A BUG AND IS NOT. The case has outbound activity on it — a
+     * logged call, a Chatter post — and no outbound EMAIL, which is exactly what this column
+     * measures. Said in full, because an em dash on a case the engineer worked yesterday
+     * reads as a broken sync unless the panel explains itself. See feedItemIsEmail. */
+    'no-outbound-email':
+        'The feed was read. Our side has been active on this case — a logged call or a feed '
+        + 'post — but no EMAIL has gone out to the customer, which is what this column '
+        + 'measures. A call note is not a reach-out to the customer.',
     'not-attributed':
         'The feed was read, and none of its posts could be placed as ours or theirs — no From '
         + 'line, no name this panel recognises. Open the case and check the Feed tab.',
@@ -3525,13 +3592,41 @@ const OC_REACHOUT_WHY = {
         + 'Press Sync now again, or open the case.'
 };
 
+/* HAS THE REACH-OUT QUESTION BEEN ANSWERED FOR THIS CASE?
+ *
+ * A date is the obvious yes. The other two are answers as well, and treating them as
+ * failures is what makes a row impossible to ever finish syncing:
+ *
+ *   · 'customer-only'      — the feed was read and nobody here has written to them;
+ *   · 'no-outbound-email'  — the feed was read and our side has only logged calls or posted,
+ *                            never emailed. That IS the answer to "when did we last email
+ *                            them", and re-reading the record will not produce a different
+ *                            one.
+ *
+ * Shared by ocRowIsFullySynced and ocBriefIsFresh, which had a copy each: the two must agree
+ * or the queue-wide sync re-reads for ever the rows the row test calls complete.
+ */
+const OC_REACHOUT_SETTLED = ['customer-only', 'no-outbound-email'];
+
+function ocReachOutAnswered(rec) {
+    if (!rec) return false;
+    return !!rec.lastReachOutAt || OC_REACHOUT_SETTLED.includes(rec.activityReason);
+}
+
 function reachOutEmptyWhy(rec) {
     // Never read at all — the original message, and now only for the case it is true of.
     if (!rec || !rec.briefAt) {
         return 'Not read yet — press Sync now on this case (a Salesforce list view carries no feed).';
     }
-    return OC_REACHOUT_WHY[rec.activityReason]
+    const why = OC_REACHOUT_WHY[rec.activityReason]
         || 'Read from the record, and the feed gave no reach-out date. Press Sync now to try again.';
+    /* WHEN THE NON-EMAIL WAS, spelled out. "Our side has been active" is the rule; a date is
+     * what makes it checkable against the feed the engineer is about to open. */
+    if (rec.activityReason === 'no-outbound-email' && rec.activityNonEmailAt) {
+        const kind = rec.activityNonEmailKind === 'call' ? 'call note' : 'feed post';
+        return `${why} The most recent one was a ${kind} on ${ocFullDate(rec.activityNonEmailAt)}.`;
+    }
+    return why;
 }
 
 function lastMessageDays(rec) {
@@ -3601,10 +3696,43 @@ function ocJiraKey(rec) {
     return raw;
 }
 
+/* IS THIS CASE ON ME RIGHT NOW? — the Focus chip's whole rule.
+ *
+ * Three tests, ORed, and each one is a different way a case becomes the engineer's problem:
+ *
+ *   · the STATUS says it is waiting on SOTI — the one status in the queue that is a job
+ *     rather than a state of waiting (see statusIsOnSoti, which the red dot on the Cases
+ *     pill already uses);
+ *   · nobody here has written to the customer for OC_FOCUS_STALE_DAYS days — the same
+ *     threshold the "Last Sent" column already paints as stale, so a case the row is
+ *     already marking in red cannot fail to be in Focus;
+ *   · Salesforce's own Last Completed Activity dot has gone RED — the org's own verdict
+ *     that this case is overdue, which is not this panel's to second-guess.
+ *
+ * ORed rather than ANDed on purpose. Each is sufficient by itself: a case waiting on SOTI
+ * that was emailed this morning is still waiting on SOTI. Requiring all three would produce
+ * a chip that is empty on most queues, which is a control that teaches people it is broken.
+ *
+ * A case whose reach-out has never been READ is not counted as stale. `reachOutDays` returns
+ * null there, and treating "not synced yet" as "left hanging for weeks" would fill Focus with
+ * the whole queue on the first sync — the opposite of what the chip is for. Those cases still
+ * qualify on status or on the dot if either says so.
+ */
+const OC_FOCUS_STALE_DAYS = 7;
+
+function ocNeedsAction(rec) {
+    if (!rec) return false;
+    if (statusIsOnSoti(rec.status)) return true;
+    const d = reachOutDays(rec);
+    if (d !== null && d >= OC_FOCUS_STALE_DAYS) return true;
+    return ocActivityIcon(rec) === 'red';
+}
+
 function ocVisibleCases() {
     return (openCasesList.cases || []).filter(rec =>
         (ocFilterTier === 'all' || entitlementTier(rec.entitlement).key === ocFilterTier)
         && (!ocOnlyJira || !!ocJiraKey(rec))
+        && (!ocOnlyFocus || ocNeedsAction(rec))
         && ocMatchesSearch(rec, ocSearch));
 }
 
@@ -3689,6 +3817,45 @@ function renderOpenCaseFilters() {
         // The chip is gone (a sync returned no JIRAs at all) but the filter it set is still
         // on, which would leave an empty queue and no visible control to clear it.
         ocOnlyJira = false;
+    }
+
+    /* THE FOCUS CHIP — "of these, which are on me", asked of the queue itself.
+     *
+     * BESIDE JIRA rather than in the sort dropdown, because it is a filter and not an order:
+     * sorting by status still shows all twenty-four cases and leaves the engineer deciding
+     * where the line is. This draws the line. The three tests behind it are in ocNeedsAction.
+     *
+     * A STAR, not a word alone. The chip has to be findable in a row that is otherwise all
+     * counts, and the star is the one glyph that already means "the ones that matter" without
+     * a legend. The number beside it is the answer to the only question anyone asks of this
+     * row, so it is the label rather than something to click for.
+     *
+     * The count reflects the SEARCH but not the tier — same rule as the tier chips above and
+     * as JIRA — so the number keeps meaning "how many of my cases need me" rather than
+     * "how many need me inside the filter I already applied".
+     *
+     * NOT OFFERED WHEN EVERYTHING IS QUIET. A chip reading "Focus 0" is a control whose only
+     * outcome is an empty list, and the honest reading of an absent chip is the good news
+     * that nothing is overdue. Same rule, and the same reset below it, as JIRA. */
+    const needing = searched.filter(rec => ocNeedsAction(rec)).length;
+    if (needing) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'oc-chip oc-chip-focus' + (ocOnlyFocus ? ' active' : '');
+        b.textContent = `★ Focus ${needing}`;
+        b.title = ocOnlyFocus
+            ? 'Showing only the cases that need you. Click to show them all again.'
+            : `Show only the cases that need you: waiting on SOTI, or ${OC_FOCUS_STALE_DAYS}+ days `
+              + 'since the last email to the customer, or red on the Salesforce activity dot.';
+        b.onclick = () => {
+            ocOnlyFocus = !ocOnlyFocus;
+            renderOpenCasesList();
+        };
+        chips.appendChild(b);
+    } else if (ocOnlyFocus) {
+        // Everything went quiet while the filter was on — see the JIRA reset above. Leaving
+        // it set would show an empty queue with no control on screen to clear it.
+        ocOnlyFocus = false;
     }
 }
 
@@ -4487,6 +4654,20 @@ function applyCaseBrief(rec, brief) {
          * install ids. Never overwrites a name typed in Settings. */
         noteUsageEngineer(brief.activityRead.user);
         rec.activityReason = brief.activityRead.reason;
+        rec.activityNonEmailAt = brief.activityRead.nonEmailAt || null;
+        rec.activityNonEmailKind = brief.activityRead.nonEmailKind || '';
+        /* A READ THAT UNDERSTOOD THE FEED AND FOUND NO OUTBOUND EMAIL MUST BE ABLE TO CLEAR
+         * THE OLD DATE. `set` above refuses to blank a field, which is the right rule for a
+         * thin read — but it is the wrong one here, and it hid the exact bug this column was
+         * fixed for: a case whose "last email" was really a logged call kept that date
+         * forever, because every corrected read after it came back null and null cannot
+         * overwrite. Only ever on a read that actually saw the feed — 'no-feed' means the
+         * posts never rendered, and blanking on that would lose a good answer to a slow
+         * page. */
+        if (!brief.lastReachOutAt && brief.activityRead.reason !== 'no-feed') {
+            rec.lastReachOutAt = null;
+            rec.lastReachOutFrom = '';
+        }
     } else if (brief.lastReachOutAt) {
         rec.activityReason = 'ok';
     }
@@ -5227,6 +5408,11 @@ function buildOpenCaseWhenLine(rec) {
         // them" is an answer about the case, and anything else is an answer about the sync.
         bits.push(rec.activityReason === 'customer-only'
             ? 'nobody here has written to this customer on the case'
+            // The third real answer: we have been active, just never by email. Named as
+            // such rather than lumped in with the sync failures below it, because it is a
+            // fact about the case and they are facts about the read.
+            : rec.activityReason === 'no-outbound-email'
+            ? 'no email has gone out to this customer — only a call note or a feed post'
             : 'no reach-out date from the feed');
     }
 
@@ -5647,6 +5833,10 @@ const OC_RECORD_ONLY_FIELDS = [
      * filled a moment ago. A list view that DOES carry it hands back a real value, which
      * wins here as it should. */
     'description', 'owner', 'lastModifiedBy', 'lastReachOutAt', 'lastReachOutFrom', 'activityReason',
+    // The call note or post that explains an empty reach-out cell. Record-only for exactly
+    // the reason the reason itself is: a list view knows nothing about the feed, so letting
+    // one blank these would leave the cell an unexplained em dash after every list sync.
+    'activityNonEmailAt', 'activityNonEmailKind',
     'lastMessageAt', 'lastMessageFrom',
     'licenseType', 'briefAt', 'localCaseId', 'manual', 'notes'
 ];
@@ -7789,7 +7979,7 @@ function activeRecordIdFromUrl(rawUrl) {
 // our side HAS answered the reach-out question.
 function ocRowIsFullySynced(rec) {
     if (!rec || !rec.description) return false;
-    return !!rec.lastReachOutAt || rec.activityReason === 'customer-only';
+    return ocReachOutAnswered(rec);
 }
 
 /* READ THE CASE THE ENGINEER IS LOOKING AT, and put it in the list.
@@ -8107,7 +8297,7 @@ function ocBriefIsFresh(rec, now = Date.now()) {
      * them" IS the reach-out answer for that case. Without this it would be the one row in
      * the queue that could never go stale, re-read in full on every sync, for ever. */
     if (!rec.description) return false;
-    return !!rec.lastReachOutAt || rec.activityReason === 'customer-only';
+    return ocReachOutAnswered(rec);
 }
 
 async function syncAllOpenCases() {
@@ -15388,8 +15578,197 @@ function buildCaseSignalsBlock(sig, kind, small, lc, sections) {
     return lines.join('\n');
 }
 
+/* ===========================================================================
+ * WHICH CLOSURE TEMPLATE WAS LAST SENT — and therefore what the next one is
+ * ===========================================================================
+ * "This case is in closure" was as far as the panel could see, and it is not far enough.
+ * Closure is not one step; it is two fixed SEQUENCES, each with its own templates in a fixed
+ * order, and the whole of the engineer's next action is decided by which one has already gone
+ * out. Without this the summary said "proceed with closing the case" on a case whose actual
+ * next step was to send the second of three chase-up emails — advice that skips two steps of
+ * a documented process and closes a case eight business days early.
+ *
+ * TWO SEQUENCES, and they are not interchangeable:
+ *
+ *   SELF-RECOVERY (the customer IS talking to us; the issue is done)
+ *     1. the pre-closure check-in — "as we're getting close to wrapping this case up…"
+ *     2. the self-recovery FOLLOW-UP — "any follow up regarding my previous email…"
+ *     3. close.
+ *
+ *   CLOSE 3x (the customer has gone quiet — KB article 000002041, "Using the Close 3x
+ *   Process for Unresponsive Customers")
+ *     1. 1st attempt, after three business days with no reply
+ *     2. 2nd attempt, three business days later — warns that a third means soft closure
+ *     3. 3rd attempt, two business days later — the soft-closure notice itself
+ *     4. close with the status Customer Unresponsive; 30 days to reopen by replying.
+ *
+ * MATCHED ON THE PHRASES THAT ONLY ONE TEMPLATE HAS. Engineers personalise these before
+ * sending — that is what the process asks of them — so anchoring on whole sentences would
+ * match nothing in practice. Each entry below carries several markers and needs `need` of
+ * them, which is what survives an edited greeting and a rewritten middle paragraph without
+ * matching an ordinary email that happens to use one of the words.
+ *
+ * ORDER IS LATEST-STAGE-FIRST and it is load-bearing. Both Close 3x chase-ups say "soft
+ * closure": the SECOND says a third attempt WILL result in one, the THIRD says we are
+ * marking the case with one now. Testing the third's markers first is what keeps the
+ * second from being read as the third and closing the case two emails early.
+ * ========================================================================= */
+const CLOSURE_TEMPLATES = [
+    {
+        key: 'unresponsive-3',
+        label: 'the 3rd attempt / soft-closure notice (Close 3x)',
+        need: 1,
+        markers: [
+            /\bwe[''’`]?ve made two attempts\b|\bwe have made (?:two|2|three|3) attempts\b|\bmade (?:two|2|three|3) attempts to (?:connect|contact|reach)\b/i,
+            /\bwe[''’`]?ll be marking this case with a soft closure\b|\bwe will be marking this case with a soft closure\b|\bwe are marking this case with a soft closure\b/i,
+            /\blog a case webform\b/i
+        ]
+    },
+    {
+        key: 'unresponsive-2',
+        label: 'the 2nd attempt follow-up (Close 3x)',
+        need: 1,
+        markers: [
+            /\b(?:this is|my) (?:my )?second attempt to (?:follow up|reach|connect|contact)\b|\bsecond attempt to follow up\b/i,
+            /\ba third attempt without a response\b/i
+        ]
+    },
+    {
+        key: 'unresponsive-1',
+        label: 'the 1st attempt follow-up (Close 3x)',
+        need: 1,
+        markers: [
+            /\b(?:this is|my) (?:my )?first attempt to (?:follow up|reach|connect|contact)\b|\bfirst attempt to follow up\b/i
+        ]
+    },
+    {
+        /* THE FOLLOW-UP IS TESTED BEFORE THE FIRST SELF-RECOVERY EMAIL, for the same reason
+         * the 3rd attempt is tested before the 2nd. "my previous email" is the discriminator:
+         * it exists only on the follow-up, and the two templates otherwise share most of their
+         * vocabulary (feedback, closure, "no problem at all"). */
+        key: 'self-recovery-followup',
+        label: 'the self-recovery follow-up email',
+        need: 1,
+        markers: [
+            /\bfollow up regarding my previous (?:e-?mail|message)\b|\bregarding my previous (?:e-?mail|message)\b/i,
+            /\bif we do not hear from you soon,? we will proceed with the closure\b/i,
+            /\bif you wish to discuss any additional feedback\b/i
+        ]
+    },
+    {
+        key: 'self-recovery',
+        label: 'the self-recovery / pre-closure check-in email',
+        need: 1,
+        markers: [
+            /\bgetting close to wrapping this case up\b/i,
+            /\bno outstanding issues to be addressed\b/i,
+            /\bdiscuss this feedback with a member of our senior team\b/i,
+            /\bkeen to hear your thoughts on both the product and the support\b/i,
+            /\bwith your confirmation,? we will (?:go ahead and )?proceed with the closure\b/i
+        ]
+    }
+];
+
+/* WHAT THE ENGINEER DOES NEXT, per stage — the whole point of detecting the stage.
+ *
+ * Written as the literal "Next steps:" the summary must produce, because that is what the
+ * quick action is for and because a model given the rule rather than the steps reliably
+ * invents a sixth one. `wait` is the process's own interval and is stated so the engineer
+ * knows whether today is the day.
+ */
+const CLOSURE_STAGE_NEXT = {
+    'self-recovery': {
+        wait: '2 business days from that email',
+        steps: [
+            'Wait 2 business days from the self-recovery email for a reply.',
+            'If there is still no reply, send the SELF-RECOVERY FOLLOW-UP email — the one that opens "I am just emailing to see if there is any follow up regarding my previous email", tells the customer we can proceed with closure if they have no further feedback, and states that the case can be reopened within 30 days by replying.',
+            'Close the case with the correct Sub-Status 2 days after that follow-up if nothing comes back.'
+        ],
+        forbid: 'Do NOT write "close the case" as step 1, and do NOT propose any other email: the self-recovery email has gone and the ONE email that follows it is the self-recovery follow-up.',
+        email: 'The email MUST be the SELF-RECOVERY FOLLOW-UP. Write it in the shape of that template, personalised to this case: open by hoping all is well, say you are following up on your previous email, invite any additional feedback or questions and offer to arrange a discussion with a senior team member if they want one, say that having no further feedback is no problem and the case can then be closed, state that if nothing is heard the case will be closed, and close by noting the case can be reopened within 30 days by replying to the email or by calling the support queue with the case number. Do NOT restart troubleshooting, do NOT ask for logs or diagnostics, and do NOT write a fresh closure notice — this is the follow-up to an email already sent.'
+    },
+    'self-recovery-followup': {
+        // `closes` — this stage's next step IS the close, so the [CASE CLOSURE PROCESS] block
+        // governs how it is carried out rather than sitting beside it as a rival list.
+        closes: true,
+        wait: '2 days from that follow-up',
+        steps: [
+            'Wait the 2 days from the self-recovery follow-up, then close the case with the correct Sub-Status — both the self-recovery email and its follow-up have now been sent.',
+            'Note that the customer can reopen the case within 30 days by replying to that email.'
+        ],
+        forbid: 'Do NOT propose a third email. The self-recovery sequence is two emails and both have been sent.',
+        email: 'Both self-recovery emails have already gone out, so the only email left is the FINAL CLOSURE NOTICE: thank the customer, give a one-line recap of the outcome, confirm the case is now being closed, and remind them it can be reopened within 30 days by replying. Do NOT restart troubleshooting, do NOT ask any questions, and do NOT send a third follow-up.'
+    },
+    'unresponsive-1': {
+        wait: '3 business days from that email',
+        steps: [
+            'Wait 3 business days from the first follow-up for a reply.',
+            'If there is still no reply, send the 2ND ATTEMPT follow-up email — the one that states this is the second attempt and warns that a third attempt without a response will result in the case being given a soft closure, reopenable within 30 days by replying.',
+            'Keep the Case Status on Close 3x Process.'
+        ],
+        forbid: 'Do NOT close the case yet and do NOT jump to the soft-closure notice: only one of the three attempts has been made.',
+        email: 'The email MUST be the 2ND ATTEMPT follow-up of the Close 3x process, personalised to this case: say this is the second attempt to follow up, name the case number, say their input is needed to progress the case, advise that in line with policy a third attempt without a response will result in the case being given a soft closure, reassure them it can be reopened within 30 days by replying to the email or to any email with the same subject, and ask them to get back at their earliest convenience. Do NOT write a soft-closure notice — that is the THIRD email and it is not due yet.'
+    },
+    'unresponsive-2': {
+        wait: '2 business days from that email',
+        steps: [
+            'Wait 2 business days from the second attempt for a reply.',
+            'If there is still no reply, send the 3RD ATTEMPT (SOFT CLOSURE) email — the one that states we have made two attempts and received no response, that the case is being given a soft closure in line with policy, that they can reply within 30 days to reactivate it, and that new issues go through the Log a Case Webform or the Customer Portal.',
+            'Close the case with the status Customer Unresponsive once that third email has gone out.'
+        ],
+        forbid: 'Do NOT write "proceed with closing the case" as step 1. The soft-closure email has NOT been sent yet, and closing before it is skipping a step of the Close 3x process.',
+        email: 'The email MUST be the 3RD ATTEMPT (SOFT CLOSURE) notice of the Close 3x process, personalised to this case: name the case number, say two attempts have been made to connect with no response, acknowledge they may be occupied or the matter resolved at their end, state that the case is being given a soft closure in line with policy, invite them to reply within the next 30 days to reactivate it if the issue persists, point new issues at the Log a Case Webform or their Customer Portal if they have Premium or Enterprise Service, and thank them. Do NOT ask troubleshooting questions and do NOT request logs — this email closes the case.'
+    },
+    'unresponsive-3': {
+        closes: true,          // see `closes` on self-recovery-followup
+        wait: '',
+        steps: [
+            'Proceed with closing the case as CUSTOMER UNRESPONSIVE, per the closure process already communicated to the customer — all three attempts have been made and the soft-closure email has gone out.',
+            'Note the customer can reopen the case within 30 days by replying to that email.'
+        ],
+        forbid: 'Do NOT propose a fourth chase-up email and do NOT ask the customer to confirm: the soft-closure notice already told them the case is being closed.',
+        email: 'All three Close 3x attempts have been made and the soft-closure notice has already gone out, so there is NO further chase-up email to send. If an email is written at all it can only restate that the case is closed as customer unresponsive and that replying within 30 days reopens it. Do NOT write a fourth follow-up and do NOT ask for information.'
+    }
+};
+
+/* THE NEWEST CLOSURE TEMPLATE ON THE CHAIN, and whether it still stands.
+ *
+ * `external` is newest-first, so the first support-authored match IS the current stage.
+ *
+ * A CUSTOMER REPLY AFTER IT CANCELS IT, and that is not a nicety. The Close 3x process is
+ * defined by the customer NOT answering — one reply and the sequence is over, the case is
+ * live again, and telling the engineer to send the next chase-up would be chasing somebody
+ * who has just written back. So the walk records whether a customer message sits newer than
+ * the template and the caller refuses to act on a stage that has been overtaken.
+ */
+function detectClosureStage(external, isCustomerEntry) {
+    let sawCustomerSince = false;
+    for (const e of external || []) {
+        const body = String(e.body || '');
+        if (!body.trim()) continue;
+        if (isCustomerEntry(e)) { sawCustomerSince = true; continue; }
+        // Support-authored. The template phrases live at the TOP of the message; the rest is
+        // the quoted history, which carries every earlier template with it — scanning the
+        // whole body would report the first attempt for ever.
+        const scan = body.slice(0, 1500);
+        for (const tpl of CLOSURE_TEMPLATES) {
+            const hits = tpl.markers.filter(re => re.test(scan)).length;
+            if (hits < tpl.need) continue;
+            return {
+                key: tpl.key,
+                label: tpl.label,
+                sender: (e.sender || '').trim() || 'SOTI Support',
+                time: (e.time || '').trim(),
+                quote: scan.replace(/\s+/g, ' ').trim().slice(0, 220),
+                customerRepliedSince: sawCustomerSince
+            };
+        }
+    }
+    return null;
+}
+
 function detectCaseLifecycleState(ci) {
-    const res = { state: 'unknown', customerConfirmed: false, supportClosingSent: false, evidence: [], customerSender: '', agentSender: '' };
+    const res = { state: 'unknown', customerConfirmed: false, supportClosingSent: false, evidence: [], customerSender: '', agentSender: '', closureStage: null };
     const raw = ((ci && ci.email_chain) || '').trim();
     if (!raw) return res;
     let entries;
@@ -15554,6 +15933,16 @@ function detectCaseLifecycleState(ci) {
     };
     const entryIndex = (e) => entries.indexOf(e);
 
+    /* WHICH CLOSURE TEMPLATE WAS LAST SENT. Run here, off the same `external` list and the
+     * same role test the walk below uses, so the stage and the state can never disagree about
+     * who wrote what. Read by buildCaseStateDirective, which turns it into the actual next
+     * step — see CLOSURE_STAGE_NEXT. */
+    const isCustomerEntry = (e) =>
+        (res.customerSender && e.sender && sameSenderName(e.sender, res.customerSender))
+        || !isStaffEntry(e);
+    try { res.closureStage = detectClosureStage(external, isCustomerEntry); }
+    catch (e) { res.closureStage = null; }
+
     // Walk NEWEST → OLDEST. The newest signal decides the state; replies quote older
     // emails below the new text, so only the top of each cleaned body is scanned.
     let customerEv = null, supportEv = null, closureIdx = -1;
@@ -15637,6 +16026,55 @@ function detectCaseLifecycleState(ci) {
 function buildCaseStateDirective(lc, kind, small) {
     if (small === undefined) { try { small = isSmallLocalModel(); } catch (e) { small = false; } }
     const evLines = (lc.evidence || []).map(e => `- ${e.sender}${e.time ? ` wrote on ${e.time}` : ' wrote'}: "${e.quote}"`).join('\n');
+
+    /* WHICH TEMPLATE WENT OUT LAST, and therefore what comes next.
+     *
+     * Used only while it still STANDS. A customer who has written back since cancels both
+     * sequences outright — Close 3x is defined by their silence, and the self-recovery
+     * follow-up is pointless once they have replied — so a stage the customer has overtaken
+     * is dropped here and the ordinary state rules below decide the answer instead. */
+    const stage = (lc.closureStage && !lc.closureStage.customerRepliedSince) ? lc.closureStage : null;
+    const stageNext = stage ? CLOSURE_STAGE_NEXT[stage.key] : null;
+
+    /* THE STAGE, WRITTEN AS THE BLOCK THE MODEL READS. Two parts, and they do different jobs:
+     * the FACT of which email went out (quoted, so the model can cite it in the Summary) and
+     * the fixed steps that follow from it. The steps are given verbatim rather than as a rule
+     * because a model handed the Close 3x process and asked to work out where this case sits
+     * in it picks the wrong attempt often enough to close a case two emails early. */
+    const stageFacts = () => {
+        if (!stage) return '';
+        const bits = [`The last closure-process email sent on this case was ${stage.label}`
+            + `, sent by ${stage.sender}${stage.time ? ` on ${stage.time}` : ''}`
+            + `, and the customer has NOT replied since. This is a FACT read from the chain — do not contradict it.`];
+        if (stage.quote) bits.push(`It opens: "${stage.quote}"`);
+        if (stageNext && stageNext.wait) bits.push(`The process waits ${stageNext.wait} before the next step.`);
+        return bits.join('\n');
+    };
+    const stageSteps = () => {
+        if (!stageNext) return '';
+        const numbered = stageNext.steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
+        /* HOW THIS SITS WITH THE [CASE CLOSURE PROCESS] BLOCK, which may also be in the
+         * prompt and may require a Team Lead recovery call.
+         *
+         * The two are about different moments and left to itself the model reads them as two
+         * competing lists. The recovery call belongs to the act of CLOSING the case — it is
+         * the last thing before the Sub-Status goes on — so on a stage that closes the case
+         * it is folded into that step, and on a stage that has another email to send first it
+         * is explicitly deferred. That deferral is the same rule the closure block itself now
+         * states: the button is not a mid-case action. */
+        /* DECLARED, not sniffed out of the wording. The first version of this asked whether
+         * step one contained "close", which is false for "proceed with CLOSING the case" and
+         * for "the CLOSURE process" — so the stage that most needed the closure block folded
+         * into it was the one that did not get it. A flag on the table cannot drift when
+         * somebody rewords a step. */
+        const closesTheCase = !!stageNext.closes;
+        const withClosure = closesTheCase
+            ? 'If a [CASE CLOSURE PROCESS] block is also present, it governs HOW that closing step is carried out — carry its recovery-call verdict (Team Lead call, self-recovery, or neither) into the closing step rather than writing a separate list beside it.'
+            : 'If a [CASE CLOSURE PROCESS] block is also present, its Recovery Call Button and Recovery Call Notes actions belong to the LATER step where the case is actually closed, NOT to the next step above. Do not put pressing the Recovery Call Button in this list.';
+        return `"Next steps:" MUST be exactly these, in this order and with nothing added:\n${numbered}\n`
+            + `${stageNext.forbid} You are FORBIDDEN from listing troubleshooting steps: this case is in the closure process, not in investigation.\n`
+            + withClosure;
+    };
     // 'record' — the internal Problem & Resolution note. It has no plan and no closure email, so
     // neither of the two directives below applies to it; what it needs is the verdict itself,
     // because "Solution:" on an unresolved case is the one line in this tool that can put a
@@ -15661,15 +16099,28 @@ function buildCaseStateDirective(lc, kind, small) {
             lines.push('This case is IN CLOSURE: SOTI Support has told the customer the case is proceeding to closure and the customer has raised nothing further:');
         }
         if (evLines) lines.push(evLines);
+        /* THE STAGE OVERRIDES THE THREE GENERIC BRANCHES BELOW, and it has to.
+         *
+         * Those branches know only whether the customer confirmed and whether a closure email
+         * went out — which is the same answer for the 1st, 2nd and 3rd attempt of the Close 3x
+         * process, and for both halves of the self-recovery sequence. So a case whose real
+         * next action was "send the second of three chase-ups" got "proceed with closing the
+         * case", which skips two documented steps and eight business days. When the exact
+         * template is known, it decides; when it is not, the generic branches still answer. */
+        if (stage) lines.push(stageFacts());
         if (kind === 'email') {
-            if (lc.customerConfirmed && lc.supportClosingSent) {
+            if (stage && stageNext && stageNext.email) {
+                lines.push(stageNext.email);
+            } else if (lc.customerConfirmed && lc.supportClosingSent) {
                 lines.push('Because of this, the email MUST be a short FINAL CLOSURE NOTICE: thank the customer, confirm the case is now closed with a one-line recap of the outcome, and remind them they can reopen it within 30 days by replying to this email. Do NOT restart troubleshooting, do NOT ask any questions, do NOT request information.');
             } else {
                 lines.push('Because of this, the email MUST be the CLOSURE CONFIRMATION: thank the customer for confirming, give a one-line recap of the outcome, state that the case will now be closed, and mention they can reopen it within 30 days by replying to this email. Do NOT restart troubleshooting and do NOT ask any questions.');
             }
         } else {
             lines.push('Because of this, the "Summary:" MUST state this closure state explicitly, citing the message(s) quoted above by author and date.');
-            if (lc.customerConfirmed && lc.supportClosingSent) {
+            if (stage && stageNext) {
+                lines.push(stageSteps());
+            } else if (lc.customerConfirmed && lc.supportClosingSent) {
                 lines.push('"Next steps:" MUST be exactly closure actions and NOTHING else:\n1. Close the case in Salesforce — the customer already confirmed closure and the closing confirmation email has already been sent.\n2. No further action is needed; the customer can reopen the case within 30 days by replying to the closure email.\nYou are FORBIDDEN from listing troubleshooting steps, from suggesting the engineer confirm with the customer before closing (the customer ALREADY confirmed), and from proposing further follow-up emails.');
             } else if (lc.customerConfirmed) {
                 lines.push('"Next steps:" MUST be exactly:\n1. Send the customer the closure confirmation email.\n2. Close the case in Salesforce; the customer can reopen it within 30 days by replying.\nDo NOT list troubleshooting steps — the customer already confirmed the case can be closed.');
@@ -15699,6 +16150,26 @@ function buildCaseStateDirective(lc, kind, small) {
     if (lc.staleClosure) {
         lines.push(`Note for context ONLY, never as the current state: earlier in the chain ${lc.staleClosure.sender}${lc.staleClosure.time ? ` (${lc.staleClosure.time})` : ''} sent closure/soft-closure wording — "${lc.staleClosure.quote}". That is SUPERSEDED by the later case work above. You are FORBIDDEN from writing that this case is closed, closing, resolved, or in closure, and FORBIDDEN from making "close the case" a next step.`);
     }
+    /* A CLOSE 3x SEQUENCE IN PROGRESS ON A CASE THE STATE SCAN CALLS OPEN.
+     *
+     * Both are true at once and neither is wrong. The case IS open — nothing is resolved and
+     * the customer has gone quiet — and the process that governs it is not troubleshooting,
+     * it is the chase-up sequence that has already had one or two of its three emails sent.
+     * Telling the engineer to collect logs from somebody who has not answered two emails is
+     * the failure this replaces.
+     *
+     * ONLY the unresponsive track gets this. A self-recovery sequence exists because the issue
+     * is finished, so if the state scan still reads the case as OPEN the safer answer is the
+     * troubleshooting plan the OPEN branch already writes — an open case has more to do than
+     * ask for feedback on it. */
+    if (stage && stageNext && /^unresponsive-/.test(stage.key)) {
+        lines.push(stageFacts());
+        lines.push(kind === 'email'
+            ? stageNext.email
+            : 'The case is open only in the sense that nothing is resolved — the customer has stopped replying and this case is inside the Close 3x process for unresponsive customers, so what happens next is that process and NOT an investigation.\n' + stageSteps());
+        return lines.join('\n');
+    }
+
     if (kind === 'email') {
         lines.push('The email MUST move the OPEN case forward: answer the customer\'s most recent unanswered question(s) precisely, or request exactly the missing information needed to proceed — grounded ONLY in the case data and the [RELEASE NOTES]/[PULSE SEARCH]/[DOCS SEARCH]/[DEEP RESEARCH]/[OFFLINE PULSE KNOWLEDGE MATCHES] sections if present. Any information you ask the customer for must be named exactly (which artefact, from which server role, for which time window) and must obey the [LOG ACCESS] block — never ask a Cloud-hosted customer for server-side logs SOTI can collect itself. If the [MCMR RULE] block lists a verified matching fix, state the fix version (written in full, e.g. "2026.1.0") and that MCMR code verbatim and recommend the upgrade; if it lists none, do not mention release notes, MCMR codes, or an upgrade at all. If the chain references an earlier SOTI case that resolved a similar issue, acknowledge it and say support is reviewing that case\'s resolution. NEVER invent findings, links, or commitments.');
     } else {
@@ -21055,10 +21526,22 @@ function renderCaseActivity() {
             // "customer-only" is not a failure, and saying "not found" about it was a lie the
             // engineer had to go and check: the feed WAS read, and what it says is that this
             // customer has never been written to on this case.
-            const never = act.reason === 'customer-only' && label.startsWith('I last');
-            v.textContent = never ? 'never on this feed' : 'not found in the feed';
+            const mine = label.startsWith('I last');
+            const never = act.reason === 'customer-only' && mine;
+            /* THE THIRD ANSWER, and it is a fact about the case rather than about the sync
+             * for exactly the reason "never on this feed" is. Our side HAS been active —
+             * a logged call, a feed post — and none of it was an email, which is what this
+             * row measures. "Not found in the feed" would send the engineer to check a feed
+             * that was read correctly. */
+            const noEmail = act.reason === 'no-outbound-email' && mine;
+            v.textContent = never ? 'never on this feed'
+                : noEmail ? 'no email sent yet'
+                : 'not found in the feed';
             v.title = never
                 ? 'The feed was read, and every post on it came from the customer.'
+                : noEmail
+                ? 'The feed was read. Our side has posted or logged a call on this case, but '
+                  + 'no email has gone out to the customer — a call note is not a reach-out.'
                 : 'The sync read the feed and could not date this. It reads the posts that '
                   + 'are rendered — open the case Feed tab and sync again.';
         } else {
@@ -27020,10 +27503,14 @@ Cite [PULSE SEARCH] community threads only as community experience, not official
                 liveDataLines.push(SYSTEM_REQUIREMENTS_CONTENT);
             }
             /* THE CLOSURE PROCESS, with its two thresholds already evaluated against this case.
-             * Cheap, deterministic, and always relevant on a case being written up — see
-             * buildCaseClosureDirective. */
+             * Cheap and deterministic — but only relevant once the case is actually being
+             * closed, which is the gate `lc` supplies. It used to go in on every turn, and on
+             * a case in mid-investigation that put "press the Recovery Call Button" into the
+             * block the model trusts most; the summary then listed it among the next steps of
+             * a case nobody was closing. See caseIsAtClosure. */
             try {
-                const closure = buildCaseClosureDirective(c);
+                const closureLc = detectCaseLifecycleState({ email_chain: ci.email_chain || '' });
+                const closure = buildCaseClosureDirective(c, closureLc);
                 if (closure) liveDataLines.push(closure);
             } catch (e) { console.warn('Closure directive failed', e); }
             /* WHAT SUPPORT HAS ALREADY DOCUMENTED ABOUT THIS — the Salesforce knowledge base.
@@ -27968,12 +28455,21 @@ async function syncFromSalesforce(opts = {}) {
              * render must not erase the dates an earlier sync did find. */
             const activeCase = cases.find(x => x.id === activeCaseId);
             if (activeCase && (data.lastMessageAt || data.lastReachOutAt)) {
-                activeCase.activity = Object.assign({}, activeCase.activity, {
-                    lastMessageAt: data.lastMessageAt || (activeCase.activity || {}).lastMessageAt || null,
-                    lastMessageFrom: data.lastMessageFrom || (activeCase.activity || {}).lastMessageFrom || '',
-                    lastReachOutAt: data.lastReachOutAt || (activeCase.activity || {}).lastReachOutAt || null,
-                    lastReachOutFrom: data.lastReachOutFrom || (activeCase.activity || {}).lastReachOutFrom || '',
-                    reason: (data.activityRead && data.activityRead.reason) || '',
+                const prev = activeCase.activity || {};
+                const readReason = (data.activityRead && data.activityRead.reason) || '';
+                /* A READ THAT UNDERSTOOD THE FEED MAY CLEAR THE REACH-OUT, and must be able
+                 * to. Falling back to the previous value is right for a read that saw
+                 * nothing — but it also preserved a date an earlier build had taken off a
+                 * logged call, so the one case this column was fixed for would have gone on
+                 * showing the wrong number for ever. 'no-feed' is the read that saw nothing;
+                 * anything else is an answer. See applyCaseBrief, which does the same. */
+                const feedWasRead = readReason && readReason !== 'no-feed';
+                activeCase.activity = Object.assign({}, prev, {
+                    lastMessageAt: data.lastMessageAt || prev.lastMessageAt || null,
+                    lastMessageFrom: data.lastMessageFrom || prev.lastMessageFrom || '',
+                    lastReachOutAt: data.lastReachOutAt || (feedWasRead ? null : (prev.lastReachOutAt || null)),
+                    lastReachOutFrom: data.lastReachOutFrom || (feedWasRead ? '' : (prev.lastReachOutFrom || '')),
+                    reason: readReason,
                     readAt: Date.now()
                 });
             }
@@ -28026,6 +28522,15 @@ async function syncFromSalesforce(opts = {}) {
                     if (data.activityRead && data.activityRead.reason) {
                         noteUsageEngineer(data.activityRead.user);   // see applyCaseBrief
                         row.activityReason = data.activityRead.reason;
+                        row.activityNonEmailAt = data.activityRead.nonEmailAt || null;
+                        row.activityNonEmailKind = data.activityRead.nonEmailKind || '';
+                        // Same clearing rule, and the same reason for it, as applyCaseBrief:
+                        // a read that understood the feed and found no outbound EMAIL has to
+                        // be able to remove a date an earlier build counted off a call note.
+                        if (!data.lastReachOutAt && data.activityRead.reason !== 'no-feed') {
+                            row.lastReachOutAt = null;
+                            row.lastReachOutFrom = '';
+                        }
                     }
                     if (data.caseOwner) row.owner = data.caseOwner;
                     if (data.caseStatus) row.status = data.caseStatus;
@@ -32131,7 +32636,39 @@ function statusIsClosed(status) {
  * Case Age, and the NPS scores and the escalation flag were captured by the sync (see the
  * closure block in syncFromSalesforce).
  */
-function buildCaseClosureDirective(c) {
+/* WHEN IS A CASE ACTUALLY AT CLOSURE? — the gate on the whole block below.
+ *
+ * The closure directive used to be injected on every single turn, on the reasoning that it is
+ * cheap and deterministic. It is both of those and it was still wrong: on a case in the middle
+ * of troubleshooting it put "press the Recovery Call Button" into the model's most-trusted
+ * block, and the summary duly listed pressing it among the next steps for a case nobody was
+ * closing. The button is part of the CLOSURE workflow — it is pressed once the issue is
+ * resolved and the customer has agreed the case can be closed — so a case that is not there
+ * yet must not be told to press it.
+ *
+ * WHAT COUNTS AS "THERE". Any of:
+ *   · the customer has confirmed the case can be closed (the flowchart's own entry point);
+ *   · SOTI has sent the closure notice and the customer has raised nothing since;
+ *   · the chain scan settled on the closure state for either of those reasons.
+ * All three are already computed by detectCaseLifecycleState, so this adds no new judgement —
+ * it only decides whether the closure block is relevant yet.
+ *
+ * A CASE WITH NO CHAIN TO READ IS NOT AT CLOSURE. 'unknown' means there is no correspondence
+ * recorded, which is the start of a case rather than the end of one.
+ */
+function caseIsAtClosure(lc) {
+    if (!lc) return false;
+    return lc.state === 'closure' || !!lc.customerConfirmed || !!lc.supportClosingSent;
+}
+
+function buildCaseClosureDirective(c, lc) {
+    /* NOT YET. Returning '' rather than a softened block: a shortened directive about a
+     * process that does not apply yet is still a directive about it, and the failure being
+     * fixed here is the model reading one and acting on it. Callers that cannot work out the
+     * state pass nothing, and the block is then built as it always was — losing it on a case
+     * that IS closing is the worse of the two mistakes. */
+    if (lc !== undefined && lc !== null && !caseIsAtClosure(lc)) return '';
+
     const rec = c || {};
     const closure = rec.closure || {};
     const ci = rec.ci || {};
@@ -32242,7 +32779,16 @@ function buildCaseClosureDirective(c) {
     }
 
     /* ---- WHAT THE PROCESS REQUIRES ---- */
+    /* WHEN THE BUTTON IS PRESSED, said before anything about whether it is required.
+     *
+     * The block used to open with the triggers, which reads as "this case meets a trigger,
+     * therefore press it" — with no statement of WHEN. So the instruction turned up in the
+     * next steps of cases that were nowhere near closing, because "the case is over 100 days
+     * old" is true from day 101 and the model had nothing telling it the action belongs at the
+     * end. This block is only built on a case at closure now (see caseIsAtClosure), and it
+     * says so, so the two facts cannot come apart again. */
     const head = `[CASE CLOSURE PROCESS — the CSAT closure & recovery call workflow]
+This case has reached CLOSURE — the issue is resolved and the customer has agreed the case can be closed, or the closure notice has gone out and nothing has come back. Everything below is about closing it, and it applies AT THAT POINT and no earlier: the Recovery Call Button is part of closing a case, never a step to take while it is still being worked. If anything in the correspondence shows the case is NOT actually finished, say so and ignore this whole block.
 These are FACTS about this case, already computed. Do not re-derive them and do not contradict them:
 ${lines.join('\n')}`;
 

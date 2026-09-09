@@ -276,7 +276,7 @@ body.case-mismatch {
 .logo-hex { font-size: 18px; color: var(--txt3) }
 /* The wordmark and the version share a line rather than stacking. A second line here would
    push the 48px topbar out of shape, and the version is a suffix to the name — "SOTI AI
-   ANALYSER v8.1.0" is how anybody says it out loud. */
+   ANALYSER v8.2.0" is how anybody says it out loud. */
 .logo-block { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .logo-name { font-size: 11px; font-weight: 700; color: var(--txt1); letter-spacing: .5px; transition: color .15s ease }
 /* Quieter than the name and in the tabular figures, because it is a fact you look up rather
@@ -3593,6 +3593,12 @@ body.oc-resizing { cursor: col-resize !important; user-select: none !important; 
    rather than borrowing an entitlement colour it has nothing to do with. */
 .oc-chip.oc-chip-jira { color: #a7c7ff; }
 .oc-chip.oc-chip-jira.active { background: rgba(80, 130, 230, .22); border-color: rgba(80, 130, 230, .6); color: #fff; }
+
+/* Focus sits at the end of the same row and is not a tier either. Amber rather than a tier
+   colour or JIRA's blue: it is the row's one attention signal, and it has to read as one at a
+   glance without competing with the entitlement colours that carry a different meaning. */
+.oc-chip.oc-chip-focus { color: #f5c26b; }
+.oc-chip.oc-chip-focus.active { background: rgba(245, 158, 11, .20); border-color: rgba(245, 158, 11, .6); color: #fff; }
 
 /* ============================================================
    CASE ACTIVITY — the two feed dates in Case Info

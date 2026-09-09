@@ -920,6 +920,86 @@ function feedItemIsInternal(item, text) {
 }
 
 /* ----------------------------------------------------------------------------
+ * IS THIS FEED POST AN EMAIL? — the column says "email", so it has to be one
+ * ----------------------------------------------------------------------------
+ * A case feed carries four different things and only ONE of them is an email to the
+ * customer: an email, a logged call, a Chatter post, and Salesforce's own record-change
+ * entries. Until this existed the reach-out reader asked only "did this come from our
+ * side", which every one of those four can answer yes to — so logging a call, or posting
+ * an update to the case feed, reset the column headed "Last email sent to customer" to
+ * "today" without a single email having been sent.
+ *
+ * That is the same failure the internal-note filter exists to prevent, one step further
+ * out: it reports the customer as contacted when the customer has heard nothing. It is
+ * also the one the engineer is most likely to walk into, because logging a call is what
+ * you do INSTEAD of writing when a case is going badly.
+ *
+ * POSITIVE SIGNALS ONLY, and the call test runs first. Salesforce marks a call log
+ * unambiguously — its own body class, its own icon, its own data-type — and a logged call
+ * whose notes happen to quote an email ("as per my mail below…") would otherwise satisfy
+ * the header test underneath. Ruling the call out first is what stops that.
+ *
+ * Returns true / false / null, and null means "this post does not say what it is". The
+ * caller decides what to do with that; see readFeedActivity, which does NOT count it.
+ * -------------------------------------------------------------------------- */
+
+// The markup a logged call renders with. `[title*="Call"]` is scoped to inside one feed
+// item, where the only thing wearing that word is the call entry's own icon.
+const FEED_CALL_SELECTOR = '.logCallDescription, .slds-icon-standard-log-a-call, '
+    + '[title*="Log a Call"], .forceChatterLogACall';
+
+// …and the markup an email renders with, across the layouts this org actually serves.
+const FEED_EMAIL_SELECTOR = '.emailMessageBody, emailui-rich-text-output, '
+    + '.forceChatterEmailMessageBody, .email-message-body, '
+    + 'lightning-formatted-rich-text.email-message-body, .cuf-emailMessage';
+
+// Salesforce writes the preamble as a sentence, and on an email it names the act:
+// "Deji Augustine sent an email to Niels Harland". That is the type stated outright.
+const FEED_EMAIL_PREAMBLE_RE = /\b(?:sent an email|emailed|replied to|forwarded)\b/i;
+
+// The headers a rendered email carries. Two of them, because a single "To:" also appears in
+// the quoted tail of a call note that pasted a mail in — two distinct headers in one post is
+// an email being rendered, not somebody quoting one.
+function feedItemHasEmailHeaders(text) {
+    const head = String(text || '').slice(0, 1200);
+    let seen = 0;
+    for (const name of ['from', 'to', 'subject', 'sent', 'cc']) {
+        if (emailHeaderLine(head, name)) seen++;
+    }
+    return seen >= 2;
+}
+
+function feedItemIsEmail(item, text) {
+    const t = String(text || '');
+
+    // 1 — a LOGGED CALL, settled first and settled outright. See the header above.
+    try { if (item && item.querySelector && item.querySelector(FEED_CALL_SELECTOR)) return false; } catch (_) {}
+    const typeAttr = (item && item.getAttribute && item.getAttribute('data-type')) || '';
+    if (/call/i.test(typeAttr)) return false;
+
+    // 2 — the type Salesforce puts on the article itself, when it puts one there.
+    if (/email/i.test(typeAttr)) return true;
+
+    // 3 — the email body component. The strongest positive signal there is: these classes
+    //     are rendered by the email renderer and by nothing else.
+    try { if (item && item.querySelector && item.querySelector(FEED_EMAIL_SELECTOR)) return true; } catch (_) {}
+
+    // 4 — the preamble naming the act ("sent an email to …").
+    const pre = item && item.querySelector ? item.querySelector('.preamble_custom-preamble, .cuf-preamble') : null;
+    const preText = pre ? String(pre.innerText || pre.textContent || '') : '';
+    if (FEED_EMAIL_PREAMBLE_RE.test(preText)) return true;
+    if (FEED_EMAIL_PREAMBLE_RE.test(t.slice(0, 200))) return true;
+
+    // 5 — the rendered headers. Last, because a post can quote them without being one, which
+    //     is why two are required rather than one.
+    if (feedItemHasEmailHeaders(t)) return true;
+
+    // A Chatter post, a record change, or a layout this build does not recognise. Not an
+    // email as far as anything on the page is concerned, and this column may not guess.
+    return null;
+}
+
+/* ----------------------------------------------------------------------------
  * WHAT IS ATTACHED TO THE EMAILS ON THIS CASE
  * ----------------------------------------------------------------------------
  * The customer sends a log bundle, a screenshot of the error, a config export — and every one
@@ -1239,7 +1319,15 @@ function readFeedActivity(root, opts = {}) {
     const out = {
         lastMessageAt: null, lastMessageLabel: '', lastMessageFrom: '',
         lastReachOutAt: null, lastReachOutLabel: '', lastReachOutFrom: '',
-        itemsRead: 0, user: '', classified: 0, dated: 0, reason: 'no-feed'
+        itemsRead: 0, user: '', classified: 0, dated: 0, reason: 'no-feed',
+        /* THE LAST THING WE SENT THAT WAS NOT AN EMAIL — a call note, a Chatter post.
+         *
+         * Carried because it is the difference between the two sentences the empty cell can
+         * honestly say. "Nobody here has written to them" is right on a case with no outbound
+         * anything; on a case where the engineer logged a call yesterday it is wrong in the
+         * way that matters, because the answer is "you have not EMAILED them" and the engineer
+         * needs to know the panel saw the call and deliberately did not count it. */
+        lastOurNonEmailAt: null, lastOurNonEmailKind: '', outboundNonEmail: 0
     };
 
     let items = findInShadows(FEED_ITEM_SELECTOR, root || document, false);
@@ -1296,7 +1384,26 @@ function readFeedActivity(root, opts = {}) {
         const fromUs = feedItemIsFromUs(text, ctx, sender);
         if (fromUs === null) continue;
         out.classified++;
-        if (fromUs && (out.lastReachOutAt === null || ms > out.lastReachOutAt)) {
+        if (!fromUs) continue;
+
+        /* THE COLUMN IS HEADED "Last email sent to customer", SO IT COUNTS EMAILS.
+         *
+         * A logged call and a Chatter post both come from our side and neither one reaches
+         * the customer's inbox — see feedItemIsEmail. They are remembered separately so the
+         * empty cell can say which of the two true things it means, and never counted as a
+         * reach-out: doing so reported a case as chased on the strength of a note the
+         * engineer wrote to themselves. */
+        if (feedItemIsEmail(item, text) !== true) {
+            out.outboundNonEmail++;
+            if (out.lastOurNonEmailAt === null || ms > out.lastOurNonEmailAt) {
+                out.lastOurNonEmailAt = ms;
+                out.lastOurNonEmailKind = item.querySelector && item.querySelector(FEED_CALL_SELECTOR)
+                    ? 'call' : 'post';
+            }
+            continue;
+        }
+
+        if (out.lastReachOutAt === null || ms > out.lastReachOutAt) {
             out.lastReachOutAt = ms;
             out.lastReachOutLabel = label;
             out.lastReachOutFrom = sender || emailHeaderName(text, 'from');
@@ -1308,6 +1415,9 @@ function readFeedActivity(root, opts = {}) {
     out.reason = out.lastReachOutAt ? 'ok'
         : !out.dated ? 'no-dates'          // posts rendered, none of them carried a timestamp
         : !out.classified ? 'not-attributed'  // dated, and not one could be placed as ours or theirs
+        // Read and understood, and we HAVE been active on it — just never by email. A real
+        // answer, and a different one from "nobody here has contacted them at all".
+        : out.outboundNonEmail ? 'no-outbound-email'
         : 'customer-only';                 // read and understood: nobody here has written to them
     return out;
 }
@@ -2564,7 +2674,10 @@ async function scrapeSalesforce(options = {}) {
         data.lastReachOutFrom = activity.lastReachOutFrom;
         data.activityRead = {
             items: activity.itemsRead, dated: activity.dated,
-            classified: activity.classified, user: activity.user, reason: activity.reason
+            classified: activity.classified, user: activity.user, reason: activity.reason,
+            // The call note or post we sent instead of an email, when that is why the
+            // reach-out came back empty — see the 'no-outbound-email' reason.
+            nonEmailAt: activity.lastOurNonEmailAt, nonEmailKind: activity.lastOurNonEmailKind
         };
         /* WHAT IS ATTACHED TO THOSE EMAILS — links only, nothing fetched. The panel offers
          * them to the engineer after the sync and downloads only what they choose. Wrapped
@@ -4417,6 +4530,79 @@ function scrollControlIntoView(el) {
     catch (_) { /* an element in a frame that will not scroll — the click still works */ }
 }
 
+/* ----------------------------------------------------------------------------
+ * BACK TO THE TOP OF THE RECORD — what the publisher needs before it can be driven
+ * ----------------------------------------------------------------------------
+ * The publisher (Post / Log a Call / Email) sits at the very top of the case feed. Read any
+ * distance down a long case and it is hundreds of pixels above the viewport — and on a case
+ * with months of history Lightning may have recycled it out of the DOM altogether rather
+ * than merely scrolled it away. Either way "Write a Post" reported "No Post tab is on this
+ * case's publisher" about a publisher that was right there, and the only workaround was for
+ * the engineer to scroll Salesforce up by hand before pressing the button.
+ *
+ * `findPublisherTab`'s isRenderedIgnoringScroll pass covers the first of those two — a
+ * publisher that is merely off-screen. It cannot cover the second, because an element that
+ * is not in the DOM cannot be found by any test. So the page is put back where the publisher
+ * lives before anything is looked for.
+ *
+ * MEASURED, NOT NAMED — the same decision, and the same reasoning, as nudgeRecordScroll a
+ * few hundred lines down: the first version of that looked for the container classes a
+ * Lightning record page is BELIEVED to scroll in and guessed wrong on the very page it was
+ * written for. `isScrollable` asks the element instead (computed overflow, more content than
+ * box), which is true whatever the org calls its containers, and it is the same question the
+ * feed auto-loader has always asked.
+ *
+ * IT DOES NOT PUT THE SCROLL BACK, and that is the one way it differs from every other
+ * scroller in this file. nudgeRecordScroll restores the position because its whole job is to
+ * mount sections invisibly; here the engineer PRESSED a button that writes to the case, the
+ * composer they are about to see is at the top, and scrolling them away from the box they
+ * are typing into would be the bug rather than the fix.
+ *
+ * Returns how many scrollers actually moved, so the caller can tell "the page was already at
+ * the top" from "the page was moved" without asking twice.
+ * -------------------------------------------------------------------------- */
+async function scrollRecordToTop(root, opts = {}) {
+    // Two is the record and its one container — the same budget nudgeRecordScroll settled on.
+    // settleMs is a frame or two for Lightning to react and mount what came back into view.
+    const { maxScrollers = 3, settleMs = 260 } = opts;
+
+    const scrollers = [];
+    const consider = (el) => {
+        if (!el || scrollers.includes(el)) return;
+        try { if (isScrollable(el)) scrollers.push(el); } catch (_) {}
+    };
+    try {
+        for (const el of findInShadows('div, main, section, [role="main"]', root || document, false)) consider(el);
+    } catch (_) { /* an unreadable root still leaves the document below */ }
+    // Deepest first: on a record page the outer containers are chrome and the inner one holds
+    // the record, so the one with the most content to scroll is the one that matters.
+    scrollers.sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+    scrollers.length = Math.min(scrollers.length, maxScrollers);
+    // The plain page, for a case NOT open in the Lightning console — there the document
+    // itself scrolls and none of the containers above do.
+    try { consider(document.scrollingElement || document.documentElement); } catch (_) {}
+
+    let moved = 0;
+    for (const el of scrollers) {
+        try {
+            if (el.scrollTop <= 0) continue;   // already there; do not report a move
+            el.scrollTop = 0;
+            moved++;
+        } catch (_) { /* a detached or cross-origin scroller — the others still count */ }
+    }
+    // window.scrollTo is a no-op inside the console (nothing scrolls the window there) and is
+    // the whole answer outside it, so it is tried either way and costs nothing when it does
+    // nothing.
+    try {
+        if (window.scrollY > 0) { window.scrollTo(0, 0); moved++; }
+    } catch (_) {}
+
+    // Only pay the wait when something actually moved. A publisher that was already on screen
+    // must not cost a quarter of a second on every note.
+    if (moved) await sleep(settleMs);
+    return moved;
+}
+
 /* A BUTTON IN THE PUBLISHER, BY ITS EXACT NAME.
  *
  * Exact, because "Save & New" contains "Save" and is one place to the right of it:
@@ -4854,12 +5040,31 @@ async function postToCaseFeed(request) {
     // posts yet reports no feed and still has a publisher, so this only fails the
     // write when there was no Feed tab to open at all.
     const tab = await activateFeedTab(root, { waitMs: 20000 });
+
+    /* AND STEP TWO OF IT: SCROLL BACK UP TO THE PUBLISHER.
+     *
+     * The composer lives at the top of the feed, so a case read any distance down its
+     * history has it off-screen or unmounted — which is why this write used to work only
+     * when the engineer happened to be at the top of the page, and failed with "No Post tab
+     * is on this case's publisher" when they were not. See scrollRecordToTop.
+     *
+     * AFTER activateFeedTab, not before: switching sub-tab is what mounts the feed, and
+     * scrolling a container that is about to be replaced moves nothing. Failure here is
+     * never fatal — the publisher may already be on screen, in which case nothing needed
+     * moving and the write below proceeds exactly as it did. */
+    let scrolled = 0;
+    try { scrolled = await scrollRecordToTop(root); }
+    catch (e) { console.warn('SOTI AI Analyser: could not scroll the case to the top', e); }
     if (tab && tab.reason === 'no-feed-tab' && !feedIsShowing(root)) {
         return Object.assign(wrote('the Feed tab', 'No Feed tab could be found on this case.'), { scope: picked.scope });
     }
 
     const out = kind === 'post' ? await writeFeedPost(root, text) : await writeCallNote(root, text);
-    return Object.assign(out, { scope: picked.scope, feedTab: (tab && tab.reason) || '' });
+    // `scrolled` travels with the result for the same reason `scope` and `feedTab` do: when a
+    // write fails, the useful question is what the driver had already done to the page, and
+    // "the publisher was not found AND nothing scrolled" points somewhere quite different
+    // from "the publisher was not found after scrolling three containers to the top".
+    return Object.assign(out, { scope: picked.scope, feedTab: (tab && tab.reason) || '', scrolled });
 }
 
 /* ============================================================================
@@ -7343,7 +7548,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     out.activityRead = {
                         items: activity.itemsRead, dated: activity.dated,
                         classified: activity.classified, user: activity.user,
-                        reason: activity.reason, feedTab: (tab && tab.reason) || ''
+                        reason: activity.reason, feedTab: (tab && tab.reason) || '',
+                        // See the same two fields in the case-page read above.
+                        nonEmailAt: activity.lastOurNonEmailAt,
+                        nonEmailKind: activity.lastOurNonEmailKind
                     };
                 } catch (e) {
                     // The description is still a good answer on its own — never lose it

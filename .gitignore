@@ -43,7 +43,7 @@ soti-extension-signing-key.pem
 # reviewed once and then declared clean for ever.
 #
 # Globbed across every extension folder, because the folder name carries the version and is
-# renamed on every release ("Extension v8.1.0" today).
+# renamed on every release ("Extension v8.2.0" today).
 #
 # THE EXTENSION STILL SHIPS IT. It is the seed corpus a fresh install loads before the
 # engineer has synced their own — see SF_KB_BUNDLED_PATH in sidepanel.js. It travels in the
@@ -51,3 +51,14 @@ soti-extension-signing-key.pem
 # repository has to put it back in by hand or leave first-run search empty until a sync.
 Extension*/knowledge/KB Articles.md
 Extension*/knowledge/KBArticles.md
+
+# THE QA TOOL IS ITS OWN REPOSITORY, and lives at "QA Tool v1.0.0/" inside this
+# working tree. It has its own .git, so git will not recurse into it anyway —
+# but without this rule `git add -A` here records it as a GITLINK: a one-line
+# submodule entry pointing at a commit hash, with no submodule configured and no
+# URL to fetch it from. Anybody cloning this repository then gets an empty
+# directory and no explanation.
+#
+# Globbed on the version, because the folder name carries it and is renamed on
+# every release — the same reason the Extension* rules below are globbed.
+QA Tool*/
