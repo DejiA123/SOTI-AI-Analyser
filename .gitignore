@@ -43,7 +43,7 @@ soti-extension-signing-key.pem
 # reviewed once and then declared clean for ever.
 #
 # Globbed across every extension folder, because the folder name carries the version and is
-# renamed on every release ("Extension v8.2.0" today).
+# renamed on every release ("Extension v8.3.0" today).
 #
 # THE EXTENSION STILL SHIPS IT. It is the seed corpus a fresh install loads before the
 # engineer has synced their own — see SF_KB_BUNDLED_PATH in sidepanel.js. It travels in the

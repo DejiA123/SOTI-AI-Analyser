@@ -276,7 +276,7 @@ body.case-mismatch {
 .logo-hex { font-size: 18px; color: var(--txt3) }
 /* The wordmark and the version share a line rather than stacking. A second line here would
    push the 48px topbar out of shape, and the version is a suffix to the name — "SOTI AI
-   ANALYSER v8.2.0" is how anybody says it out loud. */
+   ANALYSER v8.3.0" is how anybody says it out loud. */
 .logo-block { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .logo-name { font-size: 11px; font-weight: 700; color: var(--txt1); letter-spacing: .5px; transition: color .15s ease }
 /* Quieter than the name and in the tabular figures, because it is a fact you look up rather
@@ -341,10 +341,49 @@ body.case-mismatch {
 .btn-upd:hover { background: rgba(255, 255, 255, .08); border-color: var(--border); color: #fff; }
 .btn-upd:active { background: rgba(255, 255, 255, .12); }
 .btn-upd:focus-visible { outline: 2px solid var(--blue2); outline-offset: 1px; }
-/* With something to install the icon stops being grey. The dot alone is 6px and on a
-   busy topbar 6px is missable; the two together are not. */
-.btn-upd.has-update { color: var(--blue2); }
-.btn-upd.has-update:hover { color: #fff; }
+/* WITH SOMETHING TO INSTALL THE BUTTON STOPS BEING AN ICON. A blue glyph and a 6px dot are
+   a hint, and a hint is the wrong shape for this: it does not say what it wants, and nobody
+   presses a refresh arrow to find out. So the control widens into a labelled pill — the same
+   button in the same place, now readable at a glance and obviously pressable. It shrinks back
+   to the bare icon the moment the panel is running the newest build, so the wide state always
+   means exactly one thing.
+
+   `width: auto` overrides the fixed 24px above; min-width keeps the square shape as the floor
+   so the collapsed state is untouched. */
+.btn-upd.has-update {
+    width: auto;
+    min-width: 24px;
+    gap: 4px;
+    padding: 0 7px;
+    color: var(--blue2);
+    background: rgba(129, 140, 248, .14);
+    border-color: rgba(129, 140, 248, .5);
+    /* ONCE, ON ARRIVAL — not a loop. The pill appears without anybody pressing anything, so
+       it needs the small movement that makes a change register; it then has to be sat beside
+       all afternoon, which is the thing a permanent pulse makes impossible. */
+    animation: upd-pill-in .4s ease-out;
+}
+.btn-upd.has-update:hover {
+    color: #fff;
+    background: rgba(129, 140, 248, .26);
+    border-color: var(--blue2);
+}
+.btn-upd-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .3px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.btn-upd-label[hidden] { display: none !important; }
+@keyframes upd-pill-in {
+    from { opacity: .35; transform: scale(.9); }
+    to   { opacity: 1;   transform: scale(1); }
+}
+/* The colour and the word carry the whole message without it. */
+@media (prefers-reduced-motion: reduce) {
+    .btn-upd.has-update { animation: none; }
+}
 .btn-upd-dot {
     position: absolute;
     top: 1px;

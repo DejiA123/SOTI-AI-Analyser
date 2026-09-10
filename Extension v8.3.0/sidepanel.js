@@ -49,7 +49,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 8.2.0 — the queue learned which cases are on you, the reach-out column learned what an email is, and the closure process learned where in itself a case is standing. A Focus chip sits beside JIRA on the Cases page: it is computed, not curated, and holds the cases waiting on SOTI, or 7+ days since the last email out, or red on Salesforce\'s own activity dot — a row that has never been synced is deliberately NOT counted as stale, because that would put the whole queue in Focus on the first sync. "Last email sent to customer" now counts EMAILS: it was asking only whether a post came from our side, which a logged call and a Chatter post both answer yes to, so logging a call reset the column to "today" without anything reaching the customer. The three merge paths that refused to blank a field can now clear a stale date, or the old wrong answer would have outlived the fix on every case already synced. Write a Post and Log a Call scroll Salesforce back to the top before they look for the publisher, which is why they used to work only when you happened to be at the top of the page. And the closure process is read as the two SEQUENCES it is rather than as one state: the tool recognises which template last went out and says what follows it — self-recovery to its follow-up, Close 3x from one attempt to the next, and the soft-closure notice to closing as Customer Unresponsive — with a customer reply newer than the template cancelling the whole thing. The Recovery Call Button is no longer mentioned on cases nobody is closing: that block is built only once the case is actually at closure, and it says the button belongs to closing a case rather than to working one.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 8.3.0 — the update button stopped waiting to be pressed. The check for a newer build on GitHub used to run once, six seconds after the panel opened, so a panel left open all day never asked again and a build published at eleven went unseen until Chrome next rebuilt the document. It now re-arms itself every six hours for as long as the panel is up, and every firing re-reads the clock rather than trusting the timer: a machine that slept through an interval does not fire it late, it fires it never. Coming back into view with a stale answer asks straight away. A failed check returns in thirty minutes rather than six hours, because the failure that actually happens is the hourly rate limit on unauthenticated GitHub requests and it clears itself well inside the six. And when there is something to install the button now says so rather than hinting: it widens from a grey icon into a blue UPDATE pill, and one toast is raised per published version rather than per check, with the pill left behind to carry the message once the toast has gone. Both shrink back to the bare icon the moment this panel is the newest build. Nothing about the permission changed: still optional, still api.github.com and nothing else, and still no automatic check until Allow has been pressed once.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -35572,7 +35572,13 @@ const UPDATE_STATE_KEY = 'soti_update_state';
  * to learn the same answer, and a dot that could appear at any moment is one people
  * stop looking at. Pressing the button ignores this and always asks. */
 const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
-let updateState = null;   // { at, version, notes, zipUrl, pageUrl, from }
+/* THIRTY MINUTES AFTER A FAILURE, rather than the full six hours. The failure that
+ * actually happens is GitHub's unauthenticated rate limit, which is counted per hour and
+ * clears itself; treating it like a real answer would leave a panel silent for most of a
+ * day over a limit that lifted twenty minutes in. */
+const UPDATE_RETRY_EVERY_MS = 30 * 60 * 1000;
+// `announced` is the version a toast has already been shown for — see checkForUpdate.
+let updateState = null;   // { at, version, notes, zipUrl, pageUrl, from, announced }
 
 function installedAppVersion() {
     try {
@@ -35812,7 +35818,18 @@ function paintUpdateBadge() {
     const have = installedAppVersion();
     const newer = updateIsNewer(updateState);
     const dot = $('updDot');
-    if (dot) dot.hidden = !newer;
+    /* THE WORD, WHEN THERE IS ONE. "Update" is the whole label and the version goes in the
+     * tooltip: the pill sits beside a wordmark that is already allowed to ellipsis on a
+     * narrow panel, and a number nobody can act on is not worth the pixels it takes off it.
+     *
+     * THE DOT IS THE FALLBACK, not a second badge. Only one of the two is ever on — with a
+     * word on the button a 6px dot beside it says the same thing twice. It still lights up
+     * on its own if the label is missing from the page, which is a real state here: the
+     * update route is "replace the files by hand", and a run that swapped sidepanel.js but
+     * not the HTML would otherwise show nothing at all. */
+    const label = $('updLabel');
+    if (label) label.hidden = !newer;
+    if (dot) dot.hidden = !newer || !!(label && !label.hidden);
     btn.classList.toggle('has-update', newer);
     btn.title = newer
         ? `Version ${updateState.version} is available — this is v${have}. Click to see what to do.`
@@ -35824,13 +35841,17 @@ function paintUpdateBadge() {
         : 'Check for a newer version');
 }
 
+/* RETURNS WHAT HAPPENED, because the background scheduler has to tell three outcomes apart
+ * and none of them is visible from outside otherwise: 'ok' waits the full interval, 'fail'
+ * (a rate limit, a dropped connection) comes back sooner, and 'blocked' — no extension, no
+ * permission — means there is nothing to retry until somebody presses the button. */
 async function checkForUpdate(opts = {}) {
     const interactive = !!opts.interactive;
     if (!isChromeExtension()) {
         if (interactive) {
             openUpdateModal({ error: 'Update checking needs the Chrome extension — this page has no way to reach GitHub or to write a backup.' });
         }
-        return;
+        return 'blocked';
     }
 
     const ok = interactive ? await requestUpdatePermission() : await hasUpdatePermission();
@@ -35843,16 +35864,37 @@ async function checkForUpdate(opts = {}) {
                     + 'downloads, not through this page.'
             });
         }
-        return;
+        return 'blocked';
     }
 
     if (interactive) openUpdateModal({ busy: true });
     try {
         const info = await fetchLatestBuild();
-        updateState = Object.assign({ at: Date.now() }, info);
+        /* WHICH VERSION HAS ALREADY BEEN PUT IN FRONT OF SOMEBODY has to survive the check,
+         * because everything else about updateState is replaced by it. Without carrying it
+         * across, the toast below would fire again on every check for as long as the update
+         * sat uninstalled — which is exactly how a notification becomes something people
+         * dismiss without reading. */
+        const announced = (updateState && updateState.announced) || '';
+        updateState = Object.assign({ at: Date.now(), announced }, info);
+
+        /* ONCE PER PUBLISHED VERSION, not once per check, and only when it is genuinely
+         * newer than what is installed. Both routes mark it: the modal the button opens has
+         * already said it louder than a toast could. */
+        const unannounced = updateIsNewer(updateState) && updateState.announced !== updateState.version;
+        if (unannounced) updateState.announced = updateState.version;
+
         saveUpdateState();
         paintUpdateBadge();
-        if (interactive) openUpdateModal({});
+        if (interactive) {
+            openUpdateModal({});
+        } else if (unannounced) {
+            /* NOBODY PRESSED ANYTHING, so this is the one moment the panel is allowed to
+             * speak up unprompted — and the pill in the topbar is left behind to carry the
+             * message once the toast has gone. */
+            toast(`SOTI AI Analyser ${updateState.version} is available — press Update in the top bar to see what to do.`, 'i', 12000);
+        }
+        return 'ok';
     } catch (e) {
         console.warn('[Update] check failed', e);
         if (interactive) {
@@ -35862,6 +35904,7 @@ async function checkForUpdate(opts = {}) {
                     + 'few minutes"; the Open on GitHub link below always works.'
             });
         }
+        return 'fail';
     }
 }
 
@@ -36168,18 +36211,82 @@ function closeUpdateModal() {
         };
     }
 
-    /* THE AUTOMATIC CHECK. Only ever after the permission has been granted by hand — see
-     * checkForUpdate — and only when the remembered answer is older than the interval, so
-     * a panel Chrome rebuilds six times an hour does not make six requests.
+    /* ---------------------------------------------------------------------------
+     * THE AUTOMATIC CHECK
+     * ---------------------------------------------------------------------------
+     * Only ever after the permission has been granted by hand — see checkForUpdate — and
+     * only when the remembered answer is older than the interval, so a panel Chrome
+     * rebuilds six times an hour does not make six requests.
      *
-     * Delayed past boot: nothing here is urgent, and start-up is competing for the same
-     * few hundred milliseconds as restoring the case list and the chat. */
-    loadUpdateState().then(() => {
-        setTimeout(() => {
-            const fresh = updateState && updateState.at && (Date.now() - updateState.at) < UPDATE_CHECK_EVERY_MS;
-            if (!fresh) checkForUpdate({ interactive: false });
-        }, 6000);
+     * IT KEEPS ASKING, rather than asking once at start-up. This panel is opened in the
+     * morning and left open; a build published at eleven would otherwise go unnoticed until
+     * the next time Chrome tore the document down and rebuilt it, which on a good day is
+     * tomorrow. The whole point of the pill is that nobody has to press anything to learn
+     * there is something to install, and a check that only runs at boot does not deliver
+     * that on the day it matters.
+     *
+     * EVERY WAKE-UP RE-READS THE CLOCK INSTEAD OF TRUSTING THE TIMER. A timer set for six
+     * hours on a laptop that then sleeps for eight does not fire late — depending on how
+     * the panel was suspended it may not fire at all, and if it does the interval it
+     * measured is fiction. So each firing asks updateDueIn() whether the moment has
+     * actually arrived and re-arms itself if it has not, which also means an interactive
+     * check in the meantime silently pushes the next background one out.
+     * ------------------------------------------------------------------------- */
+    let updTimer = null;
+    let updBusy = false;
+    let updLastTry = 0;
+
+    const updateDueIn = () => {
+        const at = (updateState && updateState.at) || 0;
+        return Math.max(0, (at + UPDATE_CHECK_EVERY_MS) - Date.now());
+    };
+
+    function scheduleUpdateCheck(delay) {
+        if (updTimer) clearTimeout(updTimer);
+        updTimer = setTimeout(() => {
+            updTimer = null;
+            if (updBusy) { scheduleUpdateCheck(60 * 1000); return; }
+            const wait = updateDueIn();
+            if (wait > 0) { scheduleUpdateCheck(wait); return; }
+            updBusy = true;
+            updLastTry = Date.now();
+            Promise.resolve(checkForUpdate({ interactive: false }))
+                .catch(() => 'fail')
+                .then((outcome) => {
+                    updBusy = false;
+                    /* A FAILED CHECK COMES BACK SOONER THAN A GOOD ONE: GitHub's
+                     * unauthenticated limit is counted per hour, so the usual failure fixes
+                     * itself well inside the six.
+                     *
+                     * A 'BLOCKED' ONE IS NOT A FAILURE AND MUST NOT BE RETRIED LIKE ONE.
+                     * Nothing about a missing permission changes on its own, and because it
+                     * leaves `at` untouched every rearm would come back due immediately —
+                     * a permission-less panel would sit in a tight poll of
+                     * chrome.permissions.contains for as long as it was open. It waits the
+                     * full interval instead; the moment somebody presses the button and
+                     * allows it, that check writes `at` and this loop picks the answer up
+                     * through updateDueIn(). */
+                    const next = outcome === 'fail' ? UPDATE_RETRY_EVERY_MS
+                        : outcome === 'blocked' ? UPDATE_CHECK_EVERY_MS
+                            : Math.max(updateDueIn(), 60 * 1000);
+                    scheduleUpdateCheck(next);
+                });
+        }, Math.max(0, delay || 0));
+    }
+
+    /* The panel coming back into view is the moment to notice the clock moved, for the
+     * sleeping-laptop case above. The five-minute floor is there so tabbing in and out of a
+     * panel whose last check FAILED cannot turn every switch into another request. */
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;
+        if (updateDueIn() > 0) return;
+        if (Date.now() - updLastTry < 5 * 60 * 1000) return;
+        scheduleUpdateCheck(1500);
     });
+
+    /* Delayed past boot: nothing here is urgent, and start-up is competing for the same few
+     * hundred milliseconds as restoring the case list and the chat. */
+    loadUpdateState().then(() => scheduleUpdateCheck(6000));
 })();
 
 function setQuickActionsOpen(open) {
