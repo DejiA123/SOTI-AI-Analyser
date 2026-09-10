@@ -1140,11 +1140,11 @@
          There are two ways not to lose it and this screen gives both, in the order
          that matters:
 
-           1. DO NOT REMOVE THE OLD ONE. Replace the FILES inside the folder Chrome is
-              already loading and press Reload on chrome://extensions. Chrome never
-              deletes anything, because from its point of view the same extension was
-              updated in place. This is the recommended route and it is step 1 in the
-              list, written out by renderUpdateSteps().
+           1. DO NOT REMOVE THE OLD ONE. Deleting the FOLDER costs nothing — the data is
+              not in it — and "Load unpacked" on the new folder is the same extension
+              arriving at a new path, because the `key` in manifest.json pins the ID.
+              Pressing Remove on the card is the only action that deletes the storage,
+              and that is why every step that could be confused with it says so.
            2. AND KEEP A BACKUP ANYWAY, for when route 1 is not possible — a new
               machine, a folder that has to move, a Chrome profile being rebuilt.
               "Back up my data" writes every key out to a JSON file; "Restore a
@@ -1152,10 +1152,17 @@
               gated behind typing the word, the way anything unrecoverable in this
               panel is.
 
+         THE WHOLE FOLDER GOES IN, NOT ITS CONTENTS — see renderUpdateSteps(). This used
+         to say "replace the files inside the folder Chrome already loads", which works
+         and leaves a folder named after the OLD version holding the new build. The
+         folder name is the one place the version can be read without opening the panel,
+         so that route quietly destroys the only label anybody has.
+
          NOTHING HERE INSTALLS ANYTHING. An extension cannot rewrite its own folder on
          disk — no API exists for it and none should — so the last step is always the
-         engineer's: unzip, replace, press Reload. Saying so plainly is better than a
-         button called "Update" that turns out to mean "download a zip".
+         engineer's: unzip, put the new folder where the old one was, Load unpacked.
+         Saying so plainly is better than a button called "Update" that turns out to
+         mean "download a zip".
          ========================================================================== -->
     <div class="backdrop" id="mUpd" style="display:none">
         <div class="modal m-upd">

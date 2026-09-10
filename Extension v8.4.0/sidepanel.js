@@ -36140,12 +36140,37 @@ function renderUpdateSteps(state) {
     const newer = updateIsNewer(state);
     if (!newer) return;                 // nothing to install, so no instructions to give
 
+    /* THE WHOLE FOLDER, NOT THE FILES INSIDE IT.
+     *
+     * This used to say "open the folder Chrome is loading from and replace its files", which
+     * works and leaves a folder named after the OLD version holding the new build — and the
+     * folder name is the one place the version is visible before the panel is even open. An
+     * engineer looking at "Extension v8.3.0" on disk has no way to know it is 8.4.0 inside,
+     * which is the confusion this wording caused.
+     *
+     * So the new folder goes in whole and the old one goes away. That moves the path Chrome
+     * loads from, which is why step 4 is Load unpacked rather than Reload — and why it says
+     * plainly that this is not a second copy: the extension ID is pinned by the `key` in
+     * manifest.json, so Chrome recognises the same extension at the new path and everything in
+     * chrome.storage.local (which is keyed by that ID) is still there.
+     *
+     * REMOVE IS STILL THE ONE DESTRUCTIVE BUTTON, and it keeps its warning. Deleting the
+     * folder does not touch stored data; pressing Remove on the card does.
+     */
+    const newFolder = state.folder || 'Extension';
+    const haveVer = installedAppVersion();
+    const oldFolder = haveVer ? `Extension v${haveVer}` : 'the old one';
+
     const steps = [
         'Press “Back up my data” below. It writes one JSON file to your Downloads — keep it until the new version is running.',
-        `Press “Download update”. Chrome saves the zip; unzip it and find the ${state.folder || 'extension'} folder inside.`,
-        'Open the folder Chrome is loading this extension from and REPLACE its files with the new ones. '
-            + 'Do not delete the folder and do not remove the extension in Chrome — that is what wipes your data.',
-        'Go to chrome://extensions and press Reload on SOTI AI Analyser. Everything you had is still there.',
+        `Press “Download update”. Chrome saves the zip; unzip it and find the ${newFolder} folder inside.`,
+        `Put the new ${newFolder} folder next to ${oldFolder} — the folder Chrome is loading now — then delete `
+            + `the old one. Move the whole folder rather than copying the files into it: the version is in the `
+            + `folder NAME, so files swapped in place leave ${oldFolder} sitting on disk holding ${newFolder}.`,
+        `Go to chrome://extensions, press “Load unpacked” and pick the new ${newFolder} folder. Same extension at `
+            + 'a new path, not a second copy — its ID is fixed in the manifest — so every case, chat and setting is '
+            + 'still there. (The card may show an error first; that is only the folder it used to point at.) Do NOT '
+            + 'press Remove on it: that is the one thing that wipes your data.',
         'Only if something did go missing: press “Restore a backup…” and pick the file from step 1.'
     ];
     for (const text of steps) {
@@ -36173,7 +36198,7 @@ function openUpdateModal(opts = {}) {
             ? 'Reading the published version from GitHub…'
             : (newer
                 ? 'This app is a folder on your machine, so Chrome cannot update it for you. '
-                  + 'The steps below swap the files WITHOUT losing anything you have stored.'
+                  + 'The steps below swap the old folder for the new one WITHOUT losing anything you have stored.'
                 : (state && state.version
                     ? 'You are on the newest build published to GitHub. Back up your data here any time — '
                       + 'it is worth having before any change to the folder.'
