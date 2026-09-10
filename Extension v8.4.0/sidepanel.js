@@ -49,7 +49,7 @@
 const $ = id => document.getElementById(id);
 // Build stamp — bump when shipping. If the side panel's DevTools console does NOT show this
 // exact line after reloading the extension, Chrome is still running an old cached copy.
-console.log('%c[SOTI AI Analyser] build 8.3.0 — the update button stopped waiting to be pressed. The check for a newer build on GitHub used to run once, six seconds after the panel opened, so a panel left open all day never asked again and a build published at eleven went unseen until Chrome next rebuilt the document. It now re-arms itself every six hours for as long as the panel is up, and every firing re-reads the clock rather than trusting the timer: a machine that slept through an interval does not fire it late, it fires it never. Coming back into view with a stale answer asks straight away. A failed check returns in thirty minutes rather than six hours, because the failure that actually happens is the hourly rate limit on unauthenticated GitHub requests and it clears itself well inside the six. And when there is something to install the button now says so rather than hinting: it widens from a grey icon into a blue UPDATE pill, and one toast is raised per published version rather than per check, with the pill left behind to carry the message once the toast has gone. Both shrink back to the bare icon the moment this panel is the newest build. Nothing about the permission changed: still optional, still api.github.com and nothing else, and still no automatic check until Allow has been pressed once.', 'color:#0a84ff;font-weight:bold');
+console.log('%c[SOTI AI Analyser] build 8.4.0 — one row per attachment, and the case link stopped opening a second tab of a page you already have. A screenshot on a case email reaches the picker under two Salesforce ids — the file card links the ContentDocument, its thumbnail is the ContentVersion — and nothing in the page says the two are one document, so the same file was offered twice: once as an image and once as a file named "file Screenshot …", the word Salesforce puts in front of its own card labels. Ticking both downloaded the same bytes twice and sent one copy to OCR and the other down the log path, where a picture reads as a page of binary. Names are now cleaned until no label verb is left, and a second identity — the file’s own name, within one email — collapses the duplicate, keeping the image kind so it still goes to OCR. What must stay two rows still does: two files with different names, logs.zip beside logs.txt, the same name from two people or on two days, and anything Salesforce never named. And the ↗ beside the Case Number now looks for the tab already showing that case before it makes one, matched on the record id rather than the address, since Salesforce rewrites its own URLs as you move around. Never the background sync window, and it does not start a sync — that is the button above it.', 'color:#0a84ff;font-weight:bold');
 let cases = []; // { id, name, msgs, logs, ci }
 let activeCaseId = null;
 // Per-case busy tracking — enables simultaneous AI chats across cases
@@ -21675,10 +21675,86 @@ function syncSfCaseLink() {
     link.style.display = url ? 'flex' : 'none';
     if (url) {
         link.href = url;
-        link.title = 'Open ' + url;
+        // Says what the press will actually do. The tab this case is already in is by far the
+        // commonest answer, and a tooltip promising to "open" it was describing the one thing
+        // the button had stopped doing.
+        link.title = 'Show this case in Salesforce — ' + url;
     } else {
         link.removeAttribute('href');
         link.title = 'Open in Salesforce';
+    }
+}
+
+/* ===========================================================================
+ * THE CASE'S OWN TAB, NOT A SECOND COPY OF IT
+ * ===========================================================================
+ * The case is nearly always already open in the browser — the sync reads it from a tab, and
+ * the engineer has been looking at it — so a flat chrome.tabs.create answered "show me this
+ * case" by making a second tab of a page that was two tabs to the left. Do that a few times
+ * in a morning and the strip is full of duplicates of one case.
+ *
+ * So the tab is looked for before one is made, exactly as openJiraTab and
+ * openSalesforceRecordTab do. This one does NOT sync afterwards, and that is the difference
+ * between it and openSalesforceRecordTab: this is the ↗ beside the Case Number, whose whole
+ * job is "put that case in front of me". Syncing is the button above it, and pressing a link
+ * should not quietly start a scrape.
+ *
+ * MATCHED ON THE RECORD ID, never on the URL string — Salesforce rewrites its own addresses
+ * as you move around (workspace tabs, /view vs /related/…), so the tab showing this case
+ * rarely still carries the address it was opened with. And NEVER the reader's own tab: during
+ * a sync the background window is holding this exact record open, and "focusing" that sends
+ * the engineer to a minimized window they cannot see. See ocReaderOwnsTab.
+ */
+
+// A Salesforce record id is 15 characters; the 18-character form is those 15 plus a checksum,
+// and the two forms of one id turn up in different places on the same page.
+function sameSalesforceRecordId(a, b) {
+    const x = String(a || ''), y = String(b || '');
+    return !!x && !!y && x.slice(0, 15) === y.slice(0, 15);
+}
+
+function salesforceTabShowsRecord(tab, id) {
+    if (!tab || !tab.url || !id || ocReaderOwnsTab(tab)) return false;
+    if (sameSalesforceRecordId(caseRecordIdFromUrl(tab.url), id)) return true;
+    // A classic address is the record id and nothing else — /500OF00000dQVJTYA4 — and that is
+    // the same case as the Lightning page for it. Host-checked, so a record id quoted in a
+    // search box or a JIRA ticket is not mistaken for the case itself.
+    let host = '';
+    try { host = new URL(tab.url).hostname; } catch (e) { return false; }
+    return SF_CASE_HOST_RE.test(host) && tab.url.includes(String(id).slice(0, 15));
+}
+
+function openSalesforceCaseTab(url, caseNum) {
+    if (!url) return;
+    if (!isChromeExtension() || !chrome.tabs || !chrome.tabs.query) {
+        // Standalone page: no tabs API, so hand the link over rather than failing quietly.
+        try { window.open(url, '_blank', 'noopener'); } catch (e) { /* popup blocked */ }
+        return;
+    }
+
+    const id = caseRecordIdFromUrl(url);
+    const label = String(caseNum || '').trim() || 'That case';
+
+    try {
+        chrome.tabs.query({}, (tabs) => {
+            void chrome.runtime.lastError;
+            const open = id && (tabs || []).find(t => salesforceTabShowsRecord(t, id));
+            if (open) {
+                try {
+                    chrome.tabs.update(open.id, { active: true });
+                    if (open.windowId != null && chrome.windows && chrome.windows.update) {
+                        chrome.windows.update(open.windowId, { focused: true });
+                    }
+                } catch (e) { /* the tab went away between the query and the update */ }
+                toast(`${label} is already open in Salesforce — bringing that tab to the front.`, 'i', 4000);
+                return;
+            }
+            // createEngineerTab, not chrome.tabs.create: with a background reader window alive,
+            // "the current window" is a minimized one the engineer cannot see.
+            createEngineerTab({ url, active: true }, () => { /* nothing to do after */ });
+        });
+    } catch (e) {
+        try { chrome.tabs.create({ url, active: true }); } catch (e2) { /* nothing left to try */ }
     }
 }
 
@@ -28779,14 +28855,20 @@ if ($('bodyCaseDetails')) $('bodyCaseDetails').style.display = '';
 // Open the Salesforce case the sync captured. Same shape as the JIRA link below: a real
 // href so it can be copied or middle-clicked, but inside the extension the click opens a
 // browser tab so the side panel never navigates itself away from the case.
+//
+// Through openSalesforceCaseTab, exactly as the JIRA link goes through openJiraTab: the case
+// is usually ALREADY open in a tab — it is where the sync read it from — and answering "show
+// me this case" with a second copy of a page the engineer already has is not what the press
+// meant. See "THE CASE'S OWN TAB, NOT A SECOND COPY OF IT".
 if ($('caseUrlOpen')) {
     $('caseUrlOpen').onclick = (e) => {
         const url = salesforceCaseUrl($('caseUrl') ? $('caseUrl').value : '');
         if (!url) { e.preventDefault(); return; }
         if (isChromeExtension() && chrome.tabs && chrome.tabs.create) {
             e.preventDefault();
-            chrome.tabs.create({ url, active: true });
+            openSalesforceCaseTab(url, ($('caseNum') && $('caseNum').value) || '');
         }
+        // Standalone page: the anchor's target="_blank" opens the tab itself.
     };
 }
 

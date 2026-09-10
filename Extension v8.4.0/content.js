@@ -1131,8 +1131,19 @@ function feedAttachmentName(el, fallbackId) {
     // Download" — and the trailing words are chrome rather than part of the name.
     n = n.replace(/\s*(?:download|preview|open|view)\s*$/i, '').trim();
     n = n.replace(/\s*[·|-]?\s*\d+(?:\.\d+)?\s*(?:B|KB|MB|GB)\s*$/i, '').trim();
-    // "Preview MS.log" / "Download MS.log" — the verb Salesforce puts in an aria-label.
-    n = n.replace(/^(?:download|preview|open|view|file)\s+/i, '').trim();
+    /* "Preview MS.log" / "Download MS.log" — the verb Salesforce puts in an aria-label.
+     *
+     * STRIPPED UNTIL THERE ARE NONE LEFT, because Salesforce stacks them: a file card's label
+     * is "Preview file Screenshot 2026-09-09" and one pass took the verb and left the noun.
+     * The picker then listed that card as "file Screenshot 2026-09-09" beside the same
+     * screenshot's own name — two rows, one file, and nothing on screen saying they were the
+     * same thing. The de-duplication below matches on the NAME, so a leading "file" that
+     * survives here is also what stops the two rows from being recognised as one. */
+    for (let i = 0; i < 4; i++) {
+        const shorter = n.replace(/^(?:download|preview|open|view|file)\s+/i, '').trim();
+        if (shorter === n) break;
+        n = shorter;
+    }
     if (!n || n.length > 120) n = '';
     return n || (fallbackId ? `Salesforce file ${fallbackId}` : 'Attachment');
 }
@@ -1165,6 +1176,53 @@ function feedImageIsEvidence(img) {
 // The extensions that settle it: whatever a thumbnail says, this file is not a picture.
 const NON_IMAGE_NAME_RE = /\.(?:log|txt|zip|7z|rar|gz|tgz|csv|xml|json|pdf|docx?|xlsx?|pptx?|cab|msi|evtx|dmp|har|cfg|conf|ini|reg|sql|xlsm)$/i;
 
+/* ONE FILE, TWO SALESFORCE IDS.
+ * ----------------------------------------------------------------------------
+ * De-duplicating on the file id is right and is not enough, because Salesforce gives the SAME
+ * file more than one id depending on which of its own objects is rendering it:
+ *
+ *   · the file CARD links to the ContentDocument — 069…
+ *   · the card's thumbnail is a ContentVersion   — 068…
+ *   · a screenshot pasted into the body is served by the rich-text servlet — rta:0EM…
+ *
+ * There is no way to tell from the page that 069x and 068y are the same document — the
+ * mapping lives in Salesforce, not in the DOM — so the picker offered one screenshot twice:
+ * once as an image and once as a file, with the same name on both rows. Ticking both
+ * downloads the same bytes twice and sends one copy to OCR and the other down the log path,
+ * where it lands as a page of binary.
+ *
+ * So a SECOND identity is matched on: the file's own name, within one email. Two entries are
+ * the same file when their names agree and nothing about where they came from contradicts it
+ * — the same sender, the same post time, or silence on one side (the page-wide sweep at the
+ * bottom of readFeedAttachments knows neither). A name only counts when Salesforce actually
+ * gave us one: the fallbacks ("Salesforce file 069…", "Inline image 2", "Attachment") are
+ * placeholders, and merging on those would collapse genuinely different files into one row.
+ *
+ * THE EXTENSION IS PART OF THE NAME, with one exception. "logs.zip" and "logs.txt" are two
+ * files and must stay two rows. But the same screenshot is named with and without its
+ * extension by the card and the <img> that renders it, so an image extension — and only an
+ * image extension — is dropped before comparing.
+ */
+const MERGE_IMAGE_EXT_RE = /\.(?:png|jpe?g|gif|bmp|webp|heic|heif|tiff?)$/i;
+const PLACEHOLDER_NAME_RE = /^(?:Salesforce file |Attachment$|Inline image\b)/i;
+
+function attachmentNameKey(name) {
+    const n = String(name || '').trim();
+    if (!n || PLACEHOLDER_NAME_RE.test(n)) return '';
+    return n.replace(MERGE_IMAGE_EXT_RE, '').replace(/[\s_]+/g, ' ').trim().toLowerCase();
+}
+
+/* Could these two entries be the same file? Only ever asked of two entries whose names already
+ * agree — this is the part that keeps "logs.zip, sent Monday" and "logs.zip, sent Thursday"
+ * apart, which are two different files with one name and the difference that matters. */
+function sameFeedSource(a, b) {
+    if (a.from && b.from && a.from !== b.from) return false;
+    if (a.whenMs && b.whenMs && a.whenMs !== b.whenMs) return false;
+    // No parseable date on either side, but Salesforce printed something ("22h ago") for both.
+    if (!a.whenMs && !b.whenMs && a.whenLabel && b.whenLabel && a.whenLabel !== b.whenLabel) return false;
+    return true;
+}
+
 function readFeedAttachments(root, opts = {}) {
     const { limit = 120 } = opts;
     const out = [];
@@ -1173,32 +1231,68 @@ function readFeedAttachments(root, opts = {}) {
     // the URL filed those as different files, while a layout that gave two different files the
     // same-looking wrapper could still collapse them. The id is the file.
     const byId = new Map();
+    // The second identity — see "ONE FILE, TWO SALESFORCE IDS" above. A name can belong to
+    // more than one real file on a long case, so each key holds every entry that has claimed
+    // it and the one that matches on sender and time wins.
+    const byName = new Map();
 
     let items = findInShadows(FEED_ITEM_SELECTOR, root || document, false);
     if (!items.length && root !== document) items = findInShadows(FEED_ITEM_SELECTOR, document, false);
 
-    const add = (rec) => {
-        if (!rec || !rec.id || !rec.url) return;
-        const prev = byId.get(rec.id);
-        if (!prev) {
-            if (byId.size >= limit) return;
-            byId.set(rec.id, rec);
-            out.push(rec);
-            return;
-        }
-        /* THE SAME FILE, SEEN AGAIN, BETTER. A thumbnail carries no name; the card link
-         * carries the name but sometimes no size; the <img> is what tells us the thing is a
-         * picture. Merge rather than discard, so one file ends up with the best of each. */
+    /* THE SAME FILE, SEEN AGAIN, BETTER. A thumbnail carries no name; the card link
+     * carries the name but sometimes no size; the <img> is what tells us the thing is a
+     * picture. Merge rather than discard, so one file ends up with the best of each. */
+    const mergeInto = (prev, rec) => {
         // A thumbnail RENDITION exists for files that are not pictures — Salesforce renders one
         // for a PDF and for anything it can preview — so "an <img> pointed at this id" is not
         // proof the file is an image. A name that ends in a log/archive/document extension is.
         if (rec.kind === 'image' && !NON_IMAGE_NAME_RE.test(prev.name || '')) prev.kind = 'image';
-        if (prev.name && /^(?:Salesforce file |Attachment$|Inline image)/i.test(prev.name)
-            && rec.name && !/^(?:Salesforce file |Attachment$|Inline image)/i.test(rec.name)) {
+        if (prev.name && PLACEHOLDER_NAME_RE.test(prev.name)
+            && rec.name && !PLACEHOLDER_NAME_RE.test(rec.name)) {
             prev.name = rec.name;
+            // It went into the name index under a placeholder, which indexes nothing. Now that
+            // Salesforce has told us what the file is called, file it under that — otherwise
+            // the row that arrives next with the real name reads as a second file.
+            const named = attachmentNameKey(prev.name);
+            if (named) {
+                if (!byName.has(named)) byName.set(named, []);
+                if (!byName.get(named).includes(prev)) byName.get(named).push(prev);
+            }
         }
         if (!prev.whenMs && rec.whenMs) { prev.whenMs = rec.whenMs; prev.whenLabel = rec.whenLabel; }
+        if (!prev.whenLabel && rec.whenLabel) prev.whenLabel = rec.whenLabel;
         if (!prev.from && rec.from) prev.from = rec.from;
+    };
+
+    const add = (rec) => {
+        if (!rec || !rec.id || !rec.url) return;
+        const prev = byId.get(rec.id);
+        if (prev) { mergeInto(prev, rec); return; }
+
+        /* A DIFFERENT ID, THE SAME FILE. The name index is consulted before a new row is
+         * created, and the id that lost is pointed at the row that won — so the next sighting
+         * of it (the sweep at the bottom, another card in another shadow root) merges straight
+         * away instead of walking the name list again. */
+        const key = attachmentNameKey(rec.name);
+        if (key) {
+            const twins = byName.get(key);
+            const twin = twins && twins.find(t => sameFeedSource(t, rec));
+            if (twin) {
+                mergeInto(twin, rec);
+                byId.set(rec.id, twin);
+                return;
+            }
+        }
+
+        // Bounded on the ROWS, not on the id map: the map also holds the ids that were merged
+        // away, and counting those against the ceiling would cut a long case short.
+        if (out.length >= limit) return;
+        byId.set(rec.id, rec);
+        if (key) {
+            if (!byName.has(key)) byName.set(key, []);
+            byName.get(key).push(rec);
+        }
+        out.push(rec);
     };
 
     let inlineSeq = 0;
